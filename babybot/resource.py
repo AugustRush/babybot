@@ -1,14 +1,25 @@
 """Resource manager based on AgentScope Toolkit."""
 
 import asyncio
+import importlib
+import importlib.util
 import json
 import os
+import sys
 from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from agentscope.tool import Toolkit, ToolResponse
+from agentscope.tool import (
+    Toolkit,
+    ToolResponse,
+    execute_python_code,
+    execute_shell_command,
+    view_text_file,
+    write_text_file,
+    insert_text_file,
+)
 from agentscope.mcp import HttpStatelessClient, StdIOStatefulClient
 from agentscope.message import Msg
 
@@ -53,10 +64,9 @@ class ResourceManager:
         self.toolkit = Toolkit()
         self.mcp_clients: dict[str, Any] = {}
 
-        self._register_builtin_tools()
-
         # Load configuration from config.json
         self._load_config()
+        self._register_builtin_tools()
 
         ResourceManager._initialized = True
 
@@ -65,10 +75,37 @@ class ResourceManager:
         self.toolkit.register_tool_function(
             self.create_worker_tool(),
             group_name="basic",
+            namesake_strategy="skip",
         )
         self.toolkit.register_tool_function(
             self.dispatch_workers_tool(),
             group_name="basic",
+            namesake_strategy="skip",
+        )
+        self.toolkit.register_tool_function(
+            execute_python_code,
+            group_name="code",
+            namesake_strategy="skip",
+        )
+        self.toolkit.register_tool_function(
+            execute_shell_command,
+            group_name="code",
+            namesake_strategy="skip",
+        )
+        self.toolkit.register_tool_function(
+            view_text_file,
+            group_name="code",
+            namesake_strategy="skip",
+        )
+        self.toolkit.register_tool_function(
+            write_text_file,
+            group_name="code",
+            namesake_strategy="skip",
+        )
+        self.toolkit.register_tool_function(
+            insert_text_file,
+            group_name="code",
+            namesake_strategy="skip",
         )
 
     async def initialize_async(self) -> None:
@@ -203,16 +240,14 @@ class ResourceManager:
 
     def _register_custom_tools(self, custom_tools: dict[str, dict]) -> None:
         """Register custom tools from configuration."""
+        self._ensure_workspace_on_pythonpath()
         for name, tool_conf in custom_tools.items():
             try:
                 # Load tool function from module
                 module_name = tool_conf["module"]
                 func_name = tool_conf.get("function", name)
 
-                # Import module and get tool function
-                import importlib
-
-                module = importlib.import_module(module_name)
+                module = self._load_tool_module(module_name)
                 tool_func = getattr(module, func_name, None)
 
                 if tool_func:
@@ -239,11 +274,42 @@ class ResourceManager:
         """Register agent skills from configuration."""
         for name, skill_conf in agent_skills.items():
             try:
+                skill_dir = self.config.resolve_workspace_path(skill_conf["directory"])
                 self.toolkit.register_agent_skill(
-                    skill_conf["directory"],
+                    skill_dir,
                 )
             except Exception as e:
                 print(f"Warning: Failed to register agent skill {name}: {e}")
+
+    def _ensure_workspace_on_pythonpath(self) -> None:
+        """Ensure workspace root is importable for custom tools."""
+        workspace = str(self.config.workspace_dir)
+        if workspace not in sys.path:
+            sys.path.insert(0, workspace)
+
+    def _load_tool_module(self, module_name: str) -> Any:
+        """Load tool module by python module name or workspace-relative file path."""
+        try:
+            return importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            pass
+
+        module_path = module_name
+        if module_path.endswith(".py") or "/" in module_path or "\\" in module_path:
+            resolved = self.config.resolve_workspace_path(module_path)
+            spec = importlib.util.spec_from_file_location(
+                f"babybot_custom_{abs(hash(resolved))}",
+                resolved,
+            )
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+
+        raise ModuleNotFoundError(
+            f"Cannot import custom tool module '{module_name}'. "
+            f"Checked python path and workspace path '{self.config.workspace_dir}'."
+        )
 
     def register_tool(
         self,
@@ -660,8 +726,8 @@ class ResourceManager:
         self.toolkit.clear()
         self.mcp_clients.clear()
         ResourceManager._initialized = False
-        self._register_builtin_tools()
         self._load_config()
+        self._register_builtin_tools()
 
     @classmethod
     def get_instance(cls) -> "ResourceManager":

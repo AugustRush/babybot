@@ -10,6 +10,11 @@ def run():
 
     try:
         config = Config()
+        if config.is_bootstrapped:
+            print(f"\n已初始化配置文件：{config.config_file}")
+            print(f"工作目录：{config.workspace_dir}")
+            print("请先编辑配置文件后再运行 babybot。")
+            return
         if config.system.tracing_endpoint:
             try:
                 from agentscope.tracing import setup_tracing

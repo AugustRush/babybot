@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,14 +47,27 @@ class Config:
         """Initialize configuration.
 
         Args:
-            config_file: Path to config file. Defaults to config.json in project root.
+            config_file: Path to config file.
+                Defaults to `$BABYBOT_CONFIG` or `~/.babybot/config.json`.
         """
-        self.config_file = (
-            Path(config_file)
-            if config_file
-            else Path(__file__).parent.parent / "config.json"
-        )
+        self.home_dir = Path(
+            os.getenv("BABYBOT_HOME", "~/.babybot")
+        ).expanduser()
+        self.workspace_dir = Path(
+            os.getenv("BABYBOT_WORKSPACE", str(self.home_dir / "workspace"))
+        ).expanduser()
+
+        if config_file:
+            self.config_file = Path(config_file).expanduser()
+        else:
+            env_config = os.getenv("BABYBOT_CONFIG", "")
+            self.config_file = (
+                Path(env_config).expanduser()
+                if env_config
+                else self.home_dir / "config.json"
+            )
         self.raw_config: dict[str, Any] = {}
+        self.is_bootstrapped = False
 
         # Load configuration
         self._load_config()
@@ -82,12 +96,62 @@ class Config:
 
     def _load_config(self) -> None:
         """Load configuration from file."""
+        self.home_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.config_file.exists():
+            self._bootstrap_config_file()
+
         if self.config_file.exists():
             with open(self.config_file, "r", encoding="utf-8") as f:
                 self.raw_config = json.load(f)
         else:
             # Use defaults
             self.raw_config = {}
+
+    def _bootstrap_config_file(self) -> None:
+        """Create initial config file from example on first run."""
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        example_candidates = [
+            Path(__file__).resolve().parent.parent / "config.json.example",
+            Path.cwd() / "config.json.example",
+            self.home_dir / "config.json.example",
+        ]
+        for candidate in example_candidates:
+            if candidate.exists():
+                shutil.copyfile(candidate, self.config_file)
+                self.is_bootstrapped = True
+                return
+
+        # Fallback minimal config if example is unavailable.
+        fallback = {
+            "model": {
+                "model_name": "deepseek-ai/DeepSeek-V3.2",
+                "api_key": "",
+                "api_base": "",
+                "temperature": 0.7,
+                "max_tokens": 2048,
+            },
+            "resources": {
+                "tool_groups": {
+                    "code": {"active": True, "description": "代码工具", "notes": ""},
+                    "browser": {"active": False, "description": "浏览器工具", "notes": ""},
+                },
+                "mcp_servers": {},
+                "custom_tools": {},
+                "agent_skills": {},
+            },
+            "system": {
+                "console_output": False,
+                "enable_meta_tool": True,
+                "timeout": 60,
+                "tracing_endpoint": "",
+            },
+        }
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(fallback, f, ensure_ascii=False, indent=2)
+        self.is_bootstrapped = True
 
     def get_tool_groups(self) -> dict[str, dict]:
         """Get tool group configurations."""
@@ -105,6 +169,13 @@ class Config:
         """Get agent skill configurations."""
         return self.resources.get("agent_skills", {})
 
+    def resolve_workspace_path(self, value: str) -> str:
+        """Resolve a path against workspace root if it's relative."""
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return str(path)
+        return str((self.workspace_dir / path).resolve())
+
     def to_dict(self) -> dict[str, Any]:
         """Convert configuration to dictionary."""
         return {
@@ -118,6 +189,11 @@ class Config:
                 "max_tokens": self.model.max_tokens,
             },
             "resources": self.resources,
+            "paths": {
+                "config_file": str(self.config_file),
+                "home_dir": str(self.home_dir),
+                "workspace_dir": str(self.workspace_dir),
+            },
             "system": {
                 "console_output": self.system.console_output,
                 "enable_meta_tool": self.system.enable_meta_tool,
@@ -127,4 +203,7 @@ class Config:
         }
 
     def __repr__(self) -> str:
-        return f"Config(model={self.model.model_name}, tools={len(self.get_custom_tools())})"
+        return (
+            f"Config(model={self.model.model_name}, tools={len(self.get_custom_tools())}, "
+            f"config_file={self.config_file})"
+        )

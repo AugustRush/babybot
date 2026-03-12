@@ -61,6 +61,10 @@
     },
 
     "agent_skills": {
+      "auto_skill_creator": {
+        "directory": "skills/auto_skill_creator",
+        "description": "自动创建新技能的规范化流程"
+      },
       "data_analysis": {
         "directory": "skills/data_analysis",
         "description": "数据分析技能"
