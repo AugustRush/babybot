@@ -1,12 +1,14 @@
 """Resource manager based on AgentScope Toolkit."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Any
 
 from agentscope.tool import Toolkit, ToolResponse
 from agentscope.mcp import HttpStatelessClient, StdIOStatefulClient
+from agentscope.message import Msg
 
 from .config import Config
 
@@ -24,6 +26,7 @@ class ResourceManager:
 
     _instance: "ResourceManager | None" = None
     _initialized: bool = False
+    _orchestration_tools = {"create_worker", "dispatch_workers"}
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "ResourceManager":
         if cls._instance is None:
@@ -38,16 +41,23 @@ class ResourceManager:
         self.toolkit = Toolkit()
         self.mcp_clients: dict[str, Any] = {}
 
-        # Register create_worker tool
-        self.toolkit.register_tool_function(
-            self.create_worker_tool(),
-            group_name="basic",
-        )
+        self._register_builtin_tools()
 
         # Load configuration from config.json
         self._load_config()
 
         ResourceManager._initialized = True
+
+    def _register_builtin_tools(self) -> None:
+        """Register built-in tools that must always be available."""
+        self.toolkit.register_tool_function(
+            self.create_worker_tool(),
+            group_name="basic",
+        )
+        self.toolkit.register_tool_function(
+            self.dispatch_workers_tool(),
+            group_name="basic",
+        )
 
     async def initialize_async(self) -> None:
         """Asynchronously initialize MCP servers."""
@@ -352,24 +362,115 @@ class ResourceManager:
             Args:
                 task_description: Description of the task to be completed.
             """
-            # Import here to avoid circular dependency
-            from .worker import WorkerAgent
+            from .worker import create_worker_agent
 
-            worker = WorkerAgent(
-                config=self.config,
-                toolkit=self.toolkit,
-            )
-
-            result = await worker.execute(task_description)
-            return ToolResponse(content=[{"type": "text", "text": result}])
+            result = await self._run_worker_task(task_description)
+            return ToolResponse(content=result)
 
         return create_worker
 
+    async def _run_worker_task(self, task_description: str) -> str:
+        """Run one worker task and return plain text output."""
+        from .worker import create_worker_agent
+
+        worker_toolkit = self._build_worker_toolkit()
+        worker = create_worker_agent(
+            config=self.config,
+            toolkit=worker_toolkit,
+        )
+        result = await worker(Msg("user", task_description, "user"))
+        text = result.get_text_content()
+        return text or "Worker completed but returned no text."
+
+    def _build_worker_toolkit(self) -> Toolkit:
+        """Build an isolated toolkit for workers.
+
+        Workers inherit business tools and MCP tools, but must not inherit
+        orchestration tools to avoid recursive handoffs.
+        """
+        worker_toolkit = Toolkit()
+
+        # Mirror group definitions and active flags from the root toolkit.
+        for group_name, group in self.toolkit.groups.items():
+            worker_toolkit.create_tool_group(
+                group_name=group_name,
+                description=group.description,
+                active=group.active,
+                notes=group.notes,
+            )
+
+        for tool_name, registered in self.toolkit.tools.items():
+            if tool_name in self._orchestration_tools:
+                continue
+            worker_toolkit.register_tool_function(
+                registered.original_func,
+                group_name=registered.group,
+                preset_kwargs=dict(registered.preset_kwargs or {}),
+                func_name=registered.name,
+                json_schema=registered.json_schema,
+                postprocess_func=registered.postprocess_func,
+                namesake_strategy="skip",
+            )
+
+        return worker_toolkit
+
+    def dispatch_workers_tool(self) -> Any:
+        """Create a batch worker tool with optional concurrency control."""
+
+        async def dispatch_workers(
+            tasks: list[str],
+            max_concurrency: int = 3,
+        ) -> ToolResponse:
+            """Execute multiple tasks with workers concurrently.
+
+            Args:
+                tasks: Subtasks to execute.
+                max_concurrency: Max number of workers running at the same time.
+            """
+            normalized_tasks = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
+            if not normalized_tasks:
+                return ToolResponse(content="No valid tasks were provided.")
+
+            limit = max(1, min(int(max_concurrency), len(normalized_tasks), 8))
+            semaphore = asyncio.Semaphore(limit)
+
+            async def run_one(index: int, task: str) -> dict[str, Any]:
+                async with semaphore:
+                    try:
+                        result = await self._run_worker_task(task)
+                        return {"index": index, "task": task, "result": result}
+                    except Exception as e:
+                        return {"index": index, "task": task, "error": str(e)}
+
+            results = await asyncio.gather(
+                *(run_one(i, task) for i, task in enumerate(normalized_tasks, start=1))
+            )
+            return ToolResponse(
+                content=json.dumps(
+                    {"max_concurrency": limit, "results": results},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+
+        return dispatch_workers
+
     def reset(self) -> None:
         """Reset resource manager to default state."""
+        for name, client in list(self.mcp_clients.items()):
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn(ignore_errors=True)
+                except TypeError:
+                    close_fn()
+                except Exception as e:
+                    print(f"Warning: Failed to close MCP client '{name}': {e}")
+
         self.toolkit.clear()
         self.mcp_clients.clear()
         ResourceManager._initialized = False
+        self._register_builtin_tools()
         self._load_config()
 
     @classmethod

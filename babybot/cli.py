@@ -55,12 +55,15 @@ def run():
                 print("\n⏳ 正在分析任务并创建动态 Agent...")
                 response = loop.run_until_complete(
                     asyncio.wait_for(
-                        orchestrator.process_task(user_input), timeout=60.0
+                        orchestrator.process_task(user_input),
+                        timeout=float(config.system.timeout),
                     )
                 )
                 print(f"\n📋 最终结果:\n{response}\n")
             except asyncio.TimeoutError:
-                print("\n⏰ 任务执行超时（60 秒），请重试或简化任务。\n")
+                print(
+                    f"\n⏰ 任务执行超时（{config.system.timeout} 秒），请重试或简化任务。\n"
+                )
             except Exception as e:
                 print(f"\n❌ Error: {e}\n")
     finally:
