@@ -32,6 +32,7 @@ class SystemConfig:
     console_output: bool = False
     enable_meta_tool: bool = True
     timeout: int = 60
+    tracing_endpoint: str = ""
 
 
 class Config:
@@ -73,6 +74,7 @@ class Config:
             console_output=system_conf.get("console_output", False),
             enable_meta_tool=system_conf.get("enable_meta_tool", True),
             timeout=system_conf.get("timeout", 60),
+            tracing_endpoint=system_conf.get("tracing_endpoint", ""),
         )
 
         # Resource configuration
@@ -120,6 +122,7 @@ class Config:
                 "console_output": self.system.console_output,
                 "enable_meta_tool": self.system.enable_meta_tool,
                 "timeout": self.system.timeout,
+                "tracing_endpoint": self.system.tracing_endpoint,
             },
         }
 

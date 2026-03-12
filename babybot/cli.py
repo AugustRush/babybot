@@ -10,6 +10,13 @@ def run():
 
     try:
         config = Config()
+        if config.system.tracing_endpoint:
+            try:
+                from agentscope.tracing import setup_tracing
+
+                setup_tracing(config.system.tracing_endpoint)
+            except Exception as e:
+                print(f"Warning: Failed to setup tracing: {e}")
         if not config.system.console_output:
             logging.getLogger("agentscope").setLevel(logging.WARNING)
         orchestrator = OrchestratorAgent(config)

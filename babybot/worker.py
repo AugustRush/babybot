@@ -45,8 +45,9 @@ def create_worker_agent(
 请：
 1. 仔细分析任务需求
 2. 使用合适的工具执行任务
-3. 在结束前必须输出最终文本答案（不要只停留在 tool call 或 thinking）
-4. 如果需要多步浏览，请完成所有步骤后再给最终结论
+3. 如果任务完成，输出结构化终态：status=done, answer=最终答案, evidence=关键信息列表, errors=[]
+4. 如果任务失败，输出结构化终态：status=failed, answer="", evidence=[], errors=[失败原因]
+5. 不要只停留在 tool call 或 thinking；必须给出终态
 
 如果有不清楚的地方，请说明需要更多信息。""",
         model=OpenAIChatModel(**model_kwargs),

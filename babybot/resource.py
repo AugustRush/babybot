@@ -4,12 +4,24 @@ import asyncio
 import json
 import os
 from typing import Any
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from agentscope.tool import Toolkit, ToolResponse
 from agentscope.mcp import HttpStatelessClient, StdIOStatefulClient
 from agentscope.message import Msg
 
 from .config import Config
+
+
+class WorkerFinalOutput(BaseModel):
+    """Structured final output for one subagent task."""
+
+    status: Literal["done", "failed"] = "done"
+    answer: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class ResourceManager:
@@ -432,7 +444,10 @@ class ResourceManager:
         worker.set_console_output_enabled(self.config.system.console_output)
         prompt = task_description
         for _ in range(3):
-            result = await worker(Msg("user", prompt, "user"))
+            result = await worker(
+                Msg("user", prompt, "user"),
+                structured_model=WorkerFinalOutput,
+            )
             text = self._extract_worker_output(result)
             if text and not self._looks_incomplete_output(text):
                 return text
@@ -445,6 +460,21 @@ class ResourceManager:
 
     def _extract_worker_output(self, result: Msg) -> str:
         """Extract best-effort textual output from worker message."""
+        structured = self._extract_structured_output(result, WorkerFinalOutput)
+        if structured is not None:
+            summary_lines: list[str] = []
+            answer = structured.answer.strip()
+            if answer:
+                summary_lines.append(answer)
+            if structured.evidence:
+                summary_lines.extend([f"- {item}" for item in structured.evidence if item])
+            if structured.status == "failed" and structured.errors:
+                summary_lines.append("Errors:")
+                summary_lines.extend([f"- {item}" for item in structured.errors if item])
+            summary = "\n".join(summary_lines).strip()
+            if summary:
+                return summary
+
         text = result.get_text_content()
         if text:
             return text
@@ -471,6 +501,28 @@ class ResourceManager:
             "i need to",
         ]
         return any(marker in lowered for marker in markers)
+
+    def _extract_structured_output(
+        self,
+        result: Msg,
+        model_cls: type[BaseModel],
+    ) -> BaseModel | None:
+        metadata = getattr(result, "metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        payload = metadata.get("structured_output")
+        if not isinstance(payload, dict):
+            return None
+        try:
+            validate_fn = getattr(model_cls, "model_validate", None)
+            if callable(validate_fn):
+                return validate_fn(payload)
+            parse_fn = getattr(model_cls, "parse_obj", None)
+            if callable(parse_fn):
+                return parse_fn(payload)
+        except Exception:
+            return None
+        return None
 
     def create_leased_toolkit(
         self,

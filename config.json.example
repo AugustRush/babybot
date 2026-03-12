@@ -71,6 +71,7 @@
   "system": {
     "console_output": false,
     "enable_meta_tool": true,
-    "timeout": 60
+    "timeout": 60,
+    "tracing_endpoint": ""
   }
 }

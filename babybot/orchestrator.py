@@ -36,6 +36,7 @@ class PlanTask(BaseModel):
     include_tools: list[str] | None = None
     exclude_tools: list[str] | None = None
     timeout: int | None = None
+    retries: int = 0
 
 
 class ExecutionPlan(BaseModel):
@@ -44,6 +45,14 @@ class ExecutionPlan(BaseModel):
     mode: Literal["serial", "parallel", "hybrid"] = "hybrid"
     tasks: list[PlanTask] = Field(default_factory=list)
     rationale: str = ""
+
+
+class SynthesizedAnswer(BaseModel):
+    """User-facing final answer contract."""
+
+    conclusion: str
+    evidence: list[str] = Field(default_factory=list)
+    failed_tasks: list[str] = Field(default_factory=list)
 
 
 class OrchestratorAgent:
@@ -69,6 +78,12 @@ class OrchestratorAgent:
             model_kwargs["client_kwargs"] = {"base_url": self.config.model.api_base}
 
         self._plan_notebook = PlanNotebook(max_subtasks=12)
+        self._plan_events: list[dict[str, Any]] = []
+        if hasattr(self._plan_notebook, "register_plan_change_hook"):
+            self._plan_notebook.register_plan_change_hook(
+                "orchestrator_progress",
+                self._on_plan_change,
+            )
 
         self._agent = ReActAgent(
             name="Orchestrator",
@@ -181,10 +196,14 @@ class OrchestratorAgent:
 - 如需实时/网页信息，必须使用工具获取后再回答"""
 
     def _get_synth_prompt(self) -> str:
-        return """你是结果整合器。根据子任务结果生成最终答复：
-- 先给结论
-- 失败任务要明确标注
-- 不要编造不存在的子任务输出"""
+        return """你是结果整合器。根据子任务结果生成最终答复。
+输出必须符合结构化字段：
+- conclusion: 面向用户的最终结论
+- evidence: 支撑结论的关键证据列表
+- failed_tasks: 失败任务与原因列表
+要求：
+- 不要编造不存在的子任务输出
+- 有失败任务时也要给出当前可回答的部分"""
 
     def _extract_text(self, response: Msg) -> str:
         text = response.get_text_content()
@@ -197,6 +216,23 @@ class OrchestratorAgent:
                 if value:
                     return value
         return ""
+
+    def _on_plan_change(self, _notebook: Any, plan: Any) -> None:
+        """Hook from PlanNotebook for lightweight progress tracing."""
+        try:
+            if plan is None:
+                payload: dict[str, Any] = {"event": "plan_cleared"}
+            else:
+                dump_fn = getattr(plan, "model_dump", None) or getattr(plan, "dict", None)
+                payload = (
+                    dump_fn()
+                    if callable(dump_fn)
+                    else {"event": "plan_changed", "raw": str(plan)}
+                )
+            self._plan_events.append(payload)
+            self._plan_events = self._plan_events[-20:]
+        except Exception:
+            pass
 
     def _extract_structured(
         self,
@@ -281,6 +317,7 @@ class OrchestratorAgent:
                     include_tools=task.include_tools,
                     exclude_tools=task.exclude_tools,
                     timeout=task.timeout,
+                    retries=task.retries,
                 )
             )
 
@@ -310,6 +347,7 @@ class OrchestratorAgent:
                     "exclude_tools": task.exclude_tools,
                 },
                 timeout=task.timeout or self.config.system.timeout,
+                retries=max(0, int(task.retries)),
             )
             for task in plan.tasks
         ]
@@ -339,7 +377,22 @@ class OrchestratorAgent:
             content=f"请整合以下执行结果并回答用户原问题：\n{json.dumps(payload, ensure_ascii=False, indent=2)}",
         )
         try:
-            response = await self._synth_agent(synth_msg)
+            response = await self._synth_agent(
+                synth_msg,
+                structured_model=SynthesizedAnswer,
+            )
+            structured = self._extract_structured(response, SynthesizedAnswer)
+            if isinstance(structured, SynthesizedAnswer):
+                lines = [structured.conclusion.strip()]
+                if structured.evidence:
+                    lines.append("\n依据：")
+                    lines.extend(f"- {item}" for item in structured.evidence if item)
+                if structured.failed_tasks:
+                    lines.append("\n失败任务：")
+                    lines.extend(f"- {item}" for item in structured.failed_tasks if item)
+                answer = "\n".join(line for line in lines if line).strip()
+                if answer:
+                    return answer
             text = self._extract_text(response)
             if text:
                 return text
@@ -382,6 +435,7 @@ class OrchestratorAgent:
     def reset(self) -> None:
         self.resource_manager.reset()
         self._scheduler.reset()
+        self._plan_events.clear()
         self._initialized = False
         for agent in (
             self._agent,
@@ -401,4 +455,5 @@ class OrchestratorAgent:
             "available_tools": len(self.resource_manager.get_available_tools()),
             "resources": self.resource_manager.search_resources(),
             "scheduler": self._scheduler.get_status(),
+            "plan_events": list(self._plan_events),
         }

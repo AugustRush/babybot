@@ -20,6 +20,7 @@ class TaskSpec:
     deps: list[str] = field(default_factory=list)
     lease: dict[str, Any] = field(default_factory=dict)
     timeout: int | None = None
+    retries: int = 0
 
 
 @dataclass
@@ -151,28 +152,44 @@ class Scheduler:
     ) -> None:
         self.status[task.task_id] = "running"
         self.events.append({"task_id": task.task_id, "event": "running"})
-        try:
-            if task.timeout is not None and task.timeout > 0:
-                output = await asyncio.wait_for(executor(task), timeout=float(task.timeout))
-            else:
-                output = await executor(task)
-            self.status[task.task_id] = "succeeded"
-            self.results[task.task_id] = TaskResult(
-                task_id=task.task_id,
-                status="succeeded",
-                output=output,
-            )
-            self.events.append({"task_id": task.task_id, "event": "succeeded"})
-        except Exception as e:
-            self.status[task.task_id] = "failed"
-            self.results[task.task_id] = TaskResult(
-                task_id=task.task_id,
-                status="failed",
-                error=str(e),
-            )
-            self.events.append(
-                {"task_id": task.task_id, "event": "failed", "error": str(e)}
-            )
+        attempts = max(0, int(task.retries)) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                if task.timeout is not None and task.timeout > 0:
+                    output = await asyncio.wait_for(
+                        executor(task),
+                        timeout=float(task.timeout),
+                    )
+                else:
+                    output = await executor(task)
+                self.status[task.task_id] = "succeeded"
+                self.results[task.task_id] = TaskResult(
+                    task_id=task.task_id,
+                    status="succeeded",
+                    output=output,
+                )
+                self.events.append({"task_id": task.task_id, "event": "succeeded"})
+                return
+            except Exception as e:
+                if attempt < attempts:
+                    self.events.append(
+                        {
+                            "task_id": task.task_id,
+                            "event": "retrying",
+                            "attempt": attempt,
+                            "error": str(e),
+                        }
+                    )
+                    continue
+                self.status[task.task_id] = "failed"
+                self.results[task.task_id] = TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=str(e),
+                )
+                self.events.append(
+                    {"task_id": task.task_id, "event": "failed", "error": str(e)}
+                )
 
     def _validate_tasks(self, tasks_map: dict[str, TaskSpec]) -> None:
         for task_id, task in tasks_map.items():
