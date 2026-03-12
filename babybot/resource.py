@@ -1,11 +1,14 @@
 """Resource manager based on AgentScope Toolkit."""
 
 import asyncio
+import copy
+import inspect
 import importlib
 import importlib.util
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 from typing import Literal
 
@@ -146,6 +149,12 @@ class ResourceManager:
         if custom_tools:
             self._register_custom_tools(custom_tools)
 
+        # 4. Auto-discover custom tools from workspace/tools
+        self._discover_workspace_tools()
+
+        # 5. Auto-discover skills from project skills/ and workspace/skills
+        self._discover_skills()
+
     def _setup_tool_groups(self, tool_groups_conf: dict) -> None:
         """Setup tool groups from configuration."""
         # Start with empty default groups
@@ -158,7 +167,7 @@ class ResourceManager:
             "code": {
                 "description": "Code execution and analysis tools",
                 "notes": "Use these tools for code execution and debugging.",
-                "active": False,
+                "active": True,
             },
             "analysis": {
                 "description": "Data analysis and visualization tools",
@@ -274,12 +283,84 @@ class ResourceManager:
         """Register agent skills from configuration."""
         for name, skill_conf in agent_skills.items():
             try:
-                skill_dir = self.config.resolve_workspace_path(skill_conf["directory"])
+                raw = skill_conf["directory"]
+                workspace_skill = Path(self.config.resolve_workspace_path(raw))
+                project_skill = (Path(__file__).resolve().parent.parent / raw).resolve()
+                if workspace_skill.exists():
+                    skill_dir = str(workspace_skill)
+                elif project_skill.exists():
+                    skill_dir = str(project_skill)
+                else:
+                    skill_dir = str(workspace_skill)
                 self.toolkit.register_agent_skill(
                     skill_dir,
                 )
             except Exception as e:
                 print(f"Warning: Failed to register agent skill {name}: {e}")
+
+    def _discover_skills(self) -> None:
+        """Auto-load skills from project and workspace."""
+        candidates = [
+            Path(__file__).resolve().parent.parent / "skills",
+            self.config.workspace_dir / "skills",
+        ]
+        seen: set[str] = set()
+        for root in candidates:
+            if not root.exists() or not root.is_dir():
+                continue
+            for skill_dir in sorted(root.iterdir()):
+                if not skill_dir.is_dir():
+                    continue
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.exists():
+                    continue
+                key = str(skill_dir.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    self.toolkit.register_agent_skill(key)
+                except Exception as e:
+                    print(f"Warning: Failed to auto-register skill {skill_dir.name}: {e}")
+
+    def _discover_workspace_tools(self) -> None:
+        """Auto-load custom tools from workspace tools directory.
+
+        Convention:
+        - Place `.py` files under `workspace/tools/`
+        - Group name defaults to the first subdirectory under `tools/`
+        """
+        tools_root = self.config.workspace_dir / "tools"
+        if not tools_root.exists() or not tools_root.is_dir():
+            return
+
+        self._ensure_workspace_on_pythonpath()
+        for py_file in sorted(tools_root.rglob("*.py")):
+            if py_file.name.startswith("_"):
+                continue
+            rel = py_file.relative_to(tools_root)
+            parts = rel.parts
+            group_name = parts[0] if len(parts) > 1 else "basic"
+            if group_name != "basic" and group_name not in self.toolkit.groups:
+                self.toolkit.create_tool_group(
+                    group_name=group_name,
+                    description=f"{group_name} tools",
+                    active=False,
+                    notes="Auto-discovered from workspace/tools",
+                )
+            try:
+                module = self._load_tool_module(str(Path("tools") / rel))
+                for func_name, func in inspect.getmembers(module, inspect.isfunction):
+                    if func.__module__ != module.__name__:
+                        continue
+                    if func_name.startswith("_"):
+                        continue
+                    self.register_tool(
+                        func=func,
+                        group_name=group_name,
+                    )
+            except Exception as e:
+                print(f"Warning: Failed to auto-register tools from {py_file}: {e}")
 
     def _ensure_workspace_on_pythonpath(self) -> None:
         """Ensure workspace root is importable for custom tools."""
@@ -640,15 +721,9 @@ class ResourceManager:
                 and registered.group not in include_group_set
             ):
                 continue
-            worker_toolkit.register_tool_function(
-                registered.original_func,
-                group_name=registered.group,
-                preset_kwargs=dict(registered.preset_kwargs or {}),
-                func_name=registered.name,
-                json_schema=registered.json_schema,
-                postprocess_func=registered.postprocess_func,
-                namesake_strategy="skip",
-            )
+            # Keep full registered metadata (e.g. MCP binding fields) instead
+            # of rebuilding from raw function.
+            worker_toolkit.tools[tool_name] = copy.deepcopy(registered)
 
         return worker_toolkit
 

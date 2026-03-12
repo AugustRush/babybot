@@ -22,7 +22,8 @@ class ModelConfig:
         """Validate configuration."""
         if not self.api_key:
             raise ValueError(
-                "API key is required. Set in config.json or OPENAI_API_KEY environment variable."
+                "API key is required. Set in ~/.babybot/config.json "
+                "or OPENAI_API_KEY environment variable."
             )
 
 
@@ -134,13 +135,7 @@ class Config:
                 "max_tokens": 2048,
             },
             "resources": {
-                "tool_groups": {
-                    "code": {"active": True, "description": "代码工具", "notes": ""},
-                    "browser": {"active": False, "description": "浏览器工具", "notes": ""},
-                },
                 "mcp_servers": {},
-                "custom_tools": {},
-                "agent_skills": {},
             },
             "system": {
                 "console_output": False,

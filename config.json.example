@@ -6,31 +6,7 @@
     "temperature": 0.7,
     "max_tokens": 2048
   },
-
   "resources": {
-    "tool_groups": {
-      "search": {
-        "active": false,
-        "description": "搜索和信息检索工具",
-        "notes": "使用这些工具进行网络搜索和信息收集"
-      },
-      "code": {
-        "active": false,
-        "description": "代码执行和分析工具",
-        "notes": "使用这些工具执行代码和调试"
-      },
-      "analysis": {
-        "active": false,
-        "description": "数据分析和可视化工具",
-        "notes": "使用这些工具进行数据分析任务"
-      },
-      "browser": {
-        "active": false,
-        "description": "浏览器自动化工具",
-        "notes": "使用 Playwright 进行网页交互"
-      }
-    },
-
     "mcp_servers": {
       "playwright": {
         "type": "stdio",
@@ -38,40 +14,9 @@
         "args": ["@playwright/mcp@latest"],
         "group_name": "browser",
         "active": false
-      },
-
-      "gaode_map": {
-        "type": "http",
-        "url": "https://mcp.amap.com/mcp?key=YOUR_API_KEY",
-        "transport": "streamable_http",
-        "group_name": "map_services",
-        "active": false
-      }
-    },
-
-    "custom_tools": {
-      "web_search": {
-        "module": "tools.search",
-        "function": "web_search",
-        "group_name": "search",
-        "preset_kwargs": {
-          "api_key": "${SEARCH_API_KEY}"
-        }
-      }
-    },
-
-    "agent_skills": {
-      "auto_skill_creator": {
-        "directory": "skills/auto_skill_creator",
-        "description": "自动创建新技能的规范化流程"
-      },
-      "data_analysis": {
-        "directory": "skills/data_analysis",
-        "description": "数据分析技能"
       }
     }
   },
-
   "system": {
     "console_output": false,
     "enable_meta_tool": true,
