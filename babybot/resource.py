@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 from typing import Any
 
 from agentscope.tool import Toolkit, ToolResponse
@@ -27,6 +26,7 @@ class ResourceManager:
     _instance: "ResourceManager | None" = None
     _initialized: bool = False
     _orchestration_tools = {"create_worker", "dispatch_workers"}
+    _framework_internal_tools = {"reset_equipped_tools"}
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "ResourceManager":
         if cls._instance is None:
@@ -341,6 +341,48 @@ class ResourceManager:
         """
         return self.toolkit.get_json_schemas()
 
+    def search_resources(self, query: str | None = None) -> dict[str, Any]:
+        """Search registered resources by name."""
+        keyword = (query or "").strip().lower()
+
+        groups = [
+            {
+                "name": group.name,
+                "active": group.active,
+                "description": group.description,
+            }
+            for group in self.toolkit.groups.values()
+            if not keyword
+            or keyword in group.name.lower()
+            or keyword in (group.description or "").lower()
+        ]
+        tools = [
+            {
+                "name": name,
+                "group": registered.group,
+                "source": str(registered.source),
+            }
+            for name, registered in self.toolkit.tools.items()
+            if not keyword or keyword in name.lower()
+        ]
+        mcp_servers = [
+            name
+            for name in self.mcp_clients
+            if not keyword or keyword in name.lower()
+        ]
+        skills = [
+            name
+            for name in getattr(self.toolkit, "skills", {})
+            if not keyword or keyword in name.lower()
+        ]
+        return {
+            "query": query or "",
+            "groups": groups,
+            "tools": tools,
+            "mcp_servers": mcp_servers,
+            "skills": skills,
+        }
+
     def get_tool_prompt(self) -> str:
         """Get prompt for available tools.
 
@@ -362,45 +404,123 @@ class ResourceManager:
             Args:
                 task_description: Description of the task to be completed.
             """
-            from .worker import create_worker_agent
-
             result = await self._run_worker_task(task_description)
             return ToolResponse(content=result)
 
         return create_worker
 
-    async def _run_worker_task(self, task_description: str) -> str:
+    async def _run_worker_task(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+    ) -> str:
         """Run one worker task and return plain text output."""
         from .worker import create_worker_agent
 
-        worker_toolkit = self._build_worker_toolkit()
+        worker_toolkit = self.create_leased_toolkit(
+            agent_id=agent_name,
+            include_groups=(lease or {}).get("include_groups"),
+            include_tools=(lease or {}).get("include_tools"),
+            exclude_tools=(lease or {}).get("exclude_tools"),
+        )
         worker = create_worker_agent(
             config=self.config,
             toolkit=worker_toolkit,
+            name=agent_name,
         )
-        result = await worker(Msg("user", task_description, "user"))
-        text = result.get_text_content()
+        worker.set_console_output_enabled(self.config.system.console_output)
+        prompt = task_description
+        for _ in range(3):
+            result = await worker(Msg("user", prompt, "user"))
+            text = self._extract_worker_output(result)
+            if text and not self._looks_incomplete_output(text):
+                return text
+            prompt = (
+                "请继续执行尚未完成的步骤，并只输出最终结果。"
+                "不要输出 <tool_call> 标签或中间思考。"
+            )
+
         return text or "Worker completed but returned no text."
 
-    def _build_worker_toolkit(self) -> Toolkit:
-        """Build an isolated toolkit for workers.
+    def _extract_worker_output(self, result: Msg) -> str:
+        """Extract best-effort textual output from worker message."""
+        text = result.get_text_content()
+        if text:
+            return text
 
-        Workers inherit business tools and MCP tools, but must not inherit
-        orchestration tools to avoid recursive handoffs.
+        # Fallback to tool_result only. Avoid leaking internal thinking/tool-call
+        # traces into user-facing output.
+        lines: list[str] = []
+        for block in result.get_content_blocks("tool_result"):
+            content = block.get("content", "")
+            if isinstance(content, str) and content.strip():
+                lines.append(content.strip())
+
+        return "\n".join(lines).strip()
+
+    def _looks_incomplete_output(self, text: str) -> bool:
+        """Heuristic: detect intermediate output that indicates unfinished execution."""
+        lowered = text.lower()
+        markers = [
+            "<tool_call>",
+            "</tool_call>",
+            "<function=",
+            "现在我需要",
+            "next i need to",
+            "i need to",
+        ]
+        return any(marker in lowered for marker in markers)
+
+    def create_leased_toolkit(
+        self,
+        agent_id: str,
+        include_groups: list[str] | None = None,
+        include_tools: list[str] | None = None,
+        exclude_tools: list[str] | None = None,
+        allow_orchestration_tools: bool = False,
+    ) -> Toolkit:
+        """Create a toolkit lease for one subagent.
+
+        The lease enforces least-privilege access:
+        - optional group-based filtering
+        - optional tool allow/deny lists
+        - orchestration tools are excluded by default
         """
         worker_toolkit = Toolkit()
+        include_group_set = set(include_groups or [])
+        include_tool_set = set(include_tools or [])
+        exclude_tool_set = set(exclude_tools or [])
 
-        # Mirror group definitions and active flags from the root toolkit.
+        # Mirror group definitions from root toolkit.
         for group_name, group in self.toolkit.groups.items():
+            if include_groups is None:
+                active = group.active
+            else:
+                active = group_name in include_group_set
             worker_toolkit.create_tool_group(
                 group_name=group_name,
                 description=group.description,
-                active=group.active,
+                active=active,
                 notes=group.notes,
             )
 
         for tool_name, registered in self.toolkit.tools.items():
-            if tool_name in self._orchestration_tools:
+            if not allow_orchestration_tools and tool_name in self._orchestration_tools:
+                continue
+            if tool_name in self._framework_internal_tools:
+                continue
+            if registered.group == "plan_related":
+                continue
+            if include_tool_set and tool_name not in include_tool_set:
+                continue
+            if tool_name in exclude_tool_set:
+                continue
+            if (
+                include_groups is not None
+                and registered.group != "basic"
+                and registered.group not in include_group_set
+            ):
                 continue
             worker_toolkit.register_tool_function(
                 registered.original_func,
@@ -414,12 +534,26 @@ class ResourceManager:
 
         return worker_toolkit
 
+    async def run_subagent_task(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+    ) -> str:
+        """Public API to execute one task using a dynamically leased subagent."""
+        return await self._run_worker_task(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+        )
+
     def dispatch_workers_tool(self) -> Any:
         """Create a batch worker tool with optional concurrency control."""
 
         async def dispatch_workers(
             tasks: list[str],
             max_concurrency: int = 3,
+            lease: dict[str, Any] | None = None,
         ) -> ToolResponse:
             """Execute multiple tasks with workers concurrently.
 
@@ -437,7 +571,11 @@ class ResourceManager:
             async def run_one(index: int, task: str) -> dict[str, Any]:
                 async with semaphore:
                     try:
-                        result = await self._run_worker_task(task)
+                        result = await self._run_worker_task(
+                            task_description=task,
+                            lease=lease,
+                            agent_name=f"Worker-{index}",
+                        )
                         return {"index": index, "task": task, "result": result}
                     except Exception as e:
                         return {"index": index, "task": task, "error": str(e)}

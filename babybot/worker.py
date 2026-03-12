@@ -4,7 +4,7 @@ from agentscope.agent import ReActAgent
 from agentscope.model import OpenAIChatModel
 from agentscope.formatter import OpenAIChatFormatter
 from agentscope.memory import InMemoryMemory
-from agentscope.tool import Toolkit, execute_python_code
+from agentscope.tool import Toolkit
 
 from .config import Config
 
@@ -12,6 +12,7 @@ from .config import Config
 def create_worker_agent(
     config: Config,
     toolkit: Toolkit,
+    name: str = "Worker",
 ) -> ReActAgent:
     """Create a temporary worker agent with shared toolkit.
 
@@ -35,7 +36,7 @@ def create_worker_agent(
     }
 
     return ReActAgent(
-        name="Worker",
+        name=name,
         sys_prompt="""你是一个专业的助手。你的任务是完成分配给你的具体工作。
 
 可用的工具包括：
@@ -44,12 +45,14 @@ def create_worker_agent(
 请：
 1. 仔细分析任务需求
 2. 使用合适的工具执行任务
-3. 提供详细、准确的回答
+3. 在结束前必须输出最终文本答案（不要只停留在 tool call 或 thinking）
+4. 如果需要多步浏览，请完成所有步骤后再给最终结论
 
 如果有不清楚的地方，请说明需要更多信息。""",
         model=OpenAIChatModel(**model_kwargs),
         memory=InMemoryMemory(),
         formatter=OpenAIChatFormatter(),
         toolkit=toolkit,
-        enable_meta_tool=config.system.enable_meta_tool,
+        enable_meta_tool=False,
+        max_iters=14,
     )

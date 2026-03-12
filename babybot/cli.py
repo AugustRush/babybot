@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from .config import Config
 from .orchestrator import OrchestratorAgent
 
@@ -9,6 +10,8 @@ def run():
 
     try:
         config = Config()
+        if not config.system.console_output:
+            logging.getLogger("agentscope").setLevel(logging.WARNING)
         orchestrator = OrchestratorAgent(config)
     except ValueError as e:
         print(f"Error: {e}")
@@ -48,7 +51,13 @@ def run():
 
             if user_input.lower() == "status":
                 status = orchestrator.get_status()
-                print(f"\n🤖 Active Agents: {status.get('workers', 0)}\n")
+                scheduler = status.get("scheduler", {})
+                scheduler_status = scheduler.get("status", {})
+                running = sum(1 for v in scheduler_status.values() if v == "running")
+                print(
+                    f"\n🤖 Available Tools: {status.get('available_tools', 0)} | "
+                    f"Running Tasks: {running}\n"
+                )
                 continue
 
             try:
