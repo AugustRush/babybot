@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from agentscope.agent import ReActAgent
-from agentscope.formatter import OpenAIChatFormatter
+from agentscope.formatter import DeepSeekChatFormatter, OpenAIChatFormatter
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
 from agentscope.model import OpenAIChatModel
@@ -90,7 +90,7 @@ class OrchestratorAgent:
             sys_prompt=self._get_orchestrator_prompt(),
             model=OpenAIChatModel(**model_kwargs),
             memory=InMemoryMemory(),
-            formatter=OpenAIChatFormatter(),
+            formatter=self._create_formatter(),
             toolkit=self.resource_manager.toolkit,
             enable_meta_tool=self.config.system.enable_meta_tool,
             parallel_tool_calls=True,
@@ -102,7 +102,7 @@ class OrchestratorAgent:
             sys_prompt=self._get_router_prompt(),
             model=OpenAIChatModel(**model_kwargs),
             memory=InMemoryMemory(),
-            formatter=OpenAIChatFormatter(),
+            formatter=self._create_formatter(),
             toolkit=None,
             enable_meta_tool=False,
             max_iters=1,
@@ -112,7 +112,7 @@ class OrchestratorAgent:
             sys_prompt=self._get_planner_prompt(),
             model=OpenAIChatModel(**model_kwargs),
             memory=InMemoryMemory(),
-            formatter=OpenAIChatFormatter(),
+            formatter=self._create_formatter(),
             toolkit=None,
             enable_meta_tool=False,
             max_iters=1,
@@ -122,7 +122,7 @@ class OrchestratorAgent:
             sys_prompt=self._get_direct_prompt(),
             model=OpenAIChatModel(**model_kwargs),
             memory=InMemoryMemory(),
-            formatter=OpenAIChatFormatter(),
+            formatter=self._create_formatter(),
             toolkit=self.resource_manager.toolkit,
             enable_meta_tool=False,
             max_iters=4,
@@ -132,7 +132,7 @@ class OrchestratorAgent:
             sys_prompt=self._get_synth_prompt(),
             model=OpenAIChatModel(**model_kwargs),
             memory=InMemoryMemory(),
-            formatter=OpenAIChatFormatter(),
+            formatter=self._create_formatter(),
             toolkit=None,
             enable_meta_tool=False,
             max_iters=2,
@@ -148,6 +148,12 @@ class OrchestratorAgent:
             agent.set_console_output_enabled(self.config.system.console_output)
 
         self._initialized = False
+
+    def _create_formatter(self) -> OpenAIChatFormatter | DeepSeekChatFormatter:
+        model_name = (self.config.model.model_name or "").lower()
+        if "deepseek" in model_name:
+            return DeepSeekChatFormatter()
+        return OpenAIChatFormatter()
 
     def _get_orchestrator_prompt(self) -> str:
         available_tools = self.resource_manager.get_available_tools()

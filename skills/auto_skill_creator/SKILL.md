@@ -17,6 +17,7 @@ Produce a valid skill folder quickly with:
 ## Workflow
 
 1. Confirm target skill path and intended purpose from user request.
+   - User-defined skills must be created under `~/.babybot/workspace/skills/<skill_name>/`.
 2. Create/Update `SKILL.md` with YAML frontmatter:
    - `name`
    - `description` (must include when to use the skill)
@@ -28,6 +29,7 @@ Produce a valid skill folder quickly with:
    - `scripts/` for deterministic repeated tasks
    - `references/` for long domain docs
    - `assets/` for templates or output resources
+   - Any generated resources/state files should stay inside this skill directory.
 5. Validate:
    - Directory exists
    - `SKILL.md` frontmatter parses
@@ -38,3 +40,4 @@ Produce a valid skill folder quickly with:
 - Do not add extra docs like README/CHANGELOG unless user explicitly asks.
 - Prefer minimal structure first; expand only for repeated/fragile workflows.
 - Keep instructions implementation-focused, not conceptual.
+- Never write generated skill files into project root when creating user custom skills.

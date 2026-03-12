@@ -1,13 +1,15 @@
 """Resource manager based on AgentScope Toolkit."""
 
 import asyncio
-import copy
+import contextvars
 import inspect
 import importlib
 import importlib.util
 import json
 import os
+import re
 import sys
+import shlex
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -66,6 +68,10 @@ class ResourceManager:
         self.config = config or Config()
         self.toolkit = Toolkit()
         self.mcp_clients: dict[str, Any] = {}
+        self._active_write_root: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "active_write_root",
+            default=str(self.config.workspace_dir.resolve()),
+        )
 
         # Load configuration from config.json
         self._load_config()
@@ -86,28 +92,33 @@ class ResourceManager:
             namesake_strategy="skip",
         )
         self.toolkit.register_tool_function(
-            execute_python_code,
+            self._workspace_execute_python_code,
             group_name="code",
+            func_name="execute_python_code",
             namesake_strategy="skip",
         )
         self.toolkit.register_tool_function(
-            execute_shell_command,
+            self._workspace_execute_shell_command,
             group_name="code",
+            func_name="execute_shell_command",
             namesake_strategy="skip",
         )
         self.toolkit.register_tool_function(
-            view_text_file,
+            self._workspace_view_text_file,
             group_name="code",
+            func_name="view_text_file",
             namesake_strategy="skip",
         )
         self.toolkit.register_tool_function(
-            write_text_file,
+            self._workspace_write_text_file,
             group_name="code",
+            func_name="write_text_file",
             namesake_strategy="skip",
         )
         self.toolkit.register_tool_function(
-            insert_text_file,
+            self._workspace_insert_text_file,
             group_name="code",
+            func_name="insert_text_file",
             namesake_strategy="skip",
         )
 
@@ -285,13 +296,7 @@ class ResourceManager:
             try:
                 raw = skill_conf["directory"]
                 workspace_skill = Path(self.config.resolve_workspace_path(raw))
-                project_skill = (Path(__file__).resolve().parent.parent / raw).resolve()
-                if workspace_skill.exists():
-                    skill_dir = str(workspace_skill)
-                elif project_skill.exists():
-                    skill_dir = str(project_skill)
-                else:
-                    skill_dir = str(workspace_skill)
+                skill_dir = str(workspace_skill)
                 self.toolkit.register_agent_skill(
                     skill_dir,
                 )
@@ -299,10 +304,10 @@ class ResourceManager:
                 print(f"Warning: Failed to register agent skill {name}: {e}")
 
     def _discover_skills(self) -> None:
-        """Auto-load skills from project and workspace."""
+        """Auto-load skills from built-in and workspace directories."""
         candidates = [
-            Path(__file__).resolve().parent.parent / "skills",
-            self.config.workspace_dir / "skills",
+            self.config.builtin_skills_dir,
+            self.config.workspace_skills_dir,
         ]
         seen: set[str] = set()
         for root in candidates:
@@ -391,6 +396,150 @@ class ResourceManager:
             f"Cannot import custom tool module '{module_name}'. "
             f"Checked python path and workspace path '{self.config.workspace_dir}'."
         )
+
+    def _resolve_workspace_file(self, file_path: str) -> tuple[str | None, str | None]:
+        """Resolve file path under active write root and block path traversal."""
+        ws = self.config.workspace_dir.resolve()
+        active_root = self._get_active_write_root()
+        target = Path(file_path).expanduser()
+        if not target.is_absolute():
+            target = active_root / target
+        target = target.resolve()
+        if not self._is_within(ws, target):
+            return None, (
+                "PermissionError: Path is outside workspace. "
+                f"workspace={ws}, requested={target}"
+            )
+        return str(target), None
+
+    def _is_within(self, parent: Path, child: Path) -> bool:
+        """Return True if child is equal to or under parent."""
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    def _get_active_write_root(self) -> Path:
+        """Get current active write root, always constrained to workspace."""
+        ws = self.config.workspace_dir.resolve()
+        raw = Path(self._active_write_root.get()).expanduser().resolve()
+        if self._is_within(ws, raw):
+            return raw
+        return ws
+
+    def _infer_write_root(self, task_description: str) -> Path:
+        """Infer per-task write root from task text.
+
+        Priority:
+        1. Explicit path under workspace/skills/<skill_name>/...
+        2. Explicit path under workspace
+        3. Workspace root fallback
+        """
+        ws = self.config.workspace_dir.resolve()
+        ws_skills = (ws / "skills").resolve()
+        text = task_description or ""
+
+        skill_hint = re.search(
+            r"(?:^|[^\w])workspace/skills/([A-Za-z0-9._-]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if skill_hint:
+            return (ws_skills / skill_hint.group(1)).resolve()
+
+        token_pattern = re.compile(
+            r"(?P<path>(?:~|/|\.{1,2}|workspace)/[^\s'\"<>()]+)",
+            flags=re.IGNORECASE,
+        )
+        for match in token_pattern.finditer(text):
+            token = match.group("path").rstrip(".,;:!?)]}")
+            lowered = token.lower()
+            if lowered.startswith(("http://", "https://")):
+                continue
+
+            if lowered.startswith("workspace/"):
+                rel = token[len("workspace/") :]
+                candidate = (ws / rel).resolve()
+            else:
+                candidate = Path(token).expanduser()
+                if not candidate.is_absolute():
+                    candidate = (ws / candidate).resolve()
+                else:
+                    candidate = candidate.resolve()
+
+            if not self._is_within(ws, candidate):
+                continue
+            if self._is_within(ws_skills, candidate):
+                rel = candidate.relative_to(ws_skills)
+                parts = rel.parts
+                if parts:
+                    return (ws_skills / parts[0]).resolve()
+            return candidate
+
+        return ws
+
+    async def _workspace_execute_python_code(
+        self,
+        code: str,
+        timeout: float = 300,
+        **kwargs: Any,
+    ) -> ToolResponse:
+        """Execute python code in active workspace directory."""
+        ws = self._get_active_write_root()
+        prefix = (
+            "import os\n"
+            f"os.chdir({ws.as_posix()!r})\n"
+        )
+        return await execute_python_code(prefix + code, timeout=timeout, **kwargs)
+
+    async def _workspace_execute_shell_command(
+        self,
+        command: str,
+        timeout: int = 300,
+        **kwargs: Any,
+    ) -> ToolResponse:
+        """Execute shell command in active workspace directory."""
+        ws = shlex.quote(str(self._get_active_write_root()))
+        guarded = f"cd {ws} && {command}"
+        return await execute_shell_command(guarded, timeout=timeout, **kwargs)
+
+    async def _workspace_view_text_file(
+        self,
+        file_path: str,
+        ranges: list[int] | None = None,
+    ) -> ToolResponse:
+        """View text file only inside workspace."""
+        resolved, err = self._resolve_workspace_file(file_path)
+        if err:
+            return ToolResponse(content=err)
+        return await view_text_file(resolved, ranges=ranges)
+
+    async def _workspace_write_text_file(
+        self,
+        file_path: str,
+        content: str,
+        ranges: None | list[int] = None,
+    ) -> ToolResponse:
+        """Write text file only inside workspace."""
+        resolved, err = self._resolve_workspace_file(file_path)
+        if err:
+            return ToolResponse(content=err)
+        target = Path(resolved)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return await write_text_file(str(target), content, ranges=ranges)
+
+    async def _workspace_insert_text_file(
+        self,
+        file_path: str,
+        content: str,
+        line_number: int,
+    ) -> ToolResponse:
+        """Insert text into file only inside workspace."""
+        resolved, err = self._resolve_workspace_file(file_path)
+        if err:
+            return ToolResponse(content=err)
+        return await insert_text_file(resolved, content, line_number)
 
     def register_tool(
         self,
@@ -589,21 +738,25 @@ class ResourceManager:
             name=agent_name,
         )
         worker.set_console_output_enabled(self.config.system.console_output)
-        prompt = task_description
-        for _ in range(3):
-            result = await worker(
-                Msg("user", prompt, "user"),
-                structured_model=WorkerFinalOutput,
-            )
-            text = self._extract_worker_output(result)
-            if text and not self._looks_incomplete_output(text):
-                return text
-            prompt = (
-                "请继续执行尚未完成的步骤，并只输出最终结果。"
-                "不要输出 <tool_call> 标签或中间思考。"
-            )
-
-        return text or "Worker completed but returned no text."
+        write_root = self._infer_write_root(task_description)
+        token = self._active_write_root.set(str(write_root))
+        try:
+            prompt = task_description
+            for _ in range(3):
+                result = await worker(
+                    Msg("user", prompt, "user"),
+                    structured_model=WorkerFinalOutput,
+                )
+                text = self._extract_worker_output(result)
+                if text and not self._looks_incomplete_output(text):
+                    return text
+                prompt = (
+                    "请继续执行尚未完成的步骤，并只输出最终结果。"
+                    "不要输出 <tool_call> 标签或中间思考。"
+                )
+            return text or "Worker completed but returned no text."
+        finally:
+            self._active_write_root.reset(token)
 
     def _extract_worker_output(self, result: Msg) -> str:
         """Extract best-effort textual output from worker message."""
@@ -721,9 +874,9 @@ class ResourceManager:
                 and registered.group not in include_group_set
             ):
                 continue
-            # Keep full registered metadata (e.g. MCP binding fields) instead
-            # of rebuilding from raw function.
-            worker_toolkit.tools[tool_name] = copy.deepcopy(registered)
+            # Keep original registered metadata and runtime binding (especially
+            # for MCP tools) by sharing the registered object reference.
+            worker_toolkit.tools[tool_name] = registered
 
         return worker_toolkit
 

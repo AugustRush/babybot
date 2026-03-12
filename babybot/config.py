@@ -5,7 +5,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -37,6 +37,19 @@ class SystemConfig:
     tracing_endpoint: str = ""
 
 
+@dataclass
+class FeishuConfig:
+    """Feishu channel configuration."""
+
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+    encrypt_key: str = ""
+    verification_token: str = ""
+    group_policy: Literal["open", "mention"] = "mention"
+    reply_mode: Literal["chat", "p2p"] = "chat"
+
+
 class Config:
     """Unified configuration manager.
 
@@ -57,6 +70,9 @@ class Config:
         self.workspace_dir = Path(
             os.getenv("BABYBOT_WORKSPACE", str(self.home_dir / "workspace"))
         ).expanduser()
+        self.builtin_skills_dir = Path(__file__).resolve().parent.parent / "skills"
+        self.workspace_skills_dir = self.workspace_dir / "skills"
+        self.workspace_tools_dir = self.workspace_dir / "tools"
 
         if config_file:
             self.config_file = Path(config_file).expanduser()
@@ -95,10 +111,25 @@ class Config:
         # Resource configuration
         self.resources = self.raw_config.get("resources", {})
 
+        # Channel configuration
+        channels_conf = self.raw_config.get("channels", {})
+        feishu_conf = channels_conf.get("feishu", {})
+        self.feishu = FeishuConfig(
+            enabled=feishu_conf.get("enabled", False),
+            app_id=feishu_conf.get("app_id", ""),
+            app_secret=feishu_conf.get("app_secret", ""),
+            encrypt_key=feishu_conf.get("encrypt_key", ""),
+            verification_token=feishu_conf.get("verification_token", ""),
+            group_policy=feishu_conf.get("group_policy", "mention"),
+            reply_mode=feishu_conf.get("reply_mode", "chat"),
+        )
+
     def _load_config(self) -> None:
         """Load configuration from file."""
         self.home_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace_skills_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace_tools_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.config_file.exists():
             self._bootstrap_config_file()
@@ -142,6 +173,17 @@ class Config:
                 "enable_meta_tool": True,
                 "timeout": 60,
                 "tracing_endpoint": "",
+            },
+            "channels": {
+                "feishu": {
+                    "enabled": False,
+                    "app_id": "",
+                    "app_secret": "",
+                    "encrypt_key": "",
+                    "verification_token": "",
+                    "group_policy": "mention",
+                    "reply_mode": "chat",
+                }
             },
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
@@ -188,12 +230,26 @@ class Config:
                 "config_file": str(self.config_file),
                 "home_dir": str(self.home_dir),
                 "workspace_dir": str(self.workspace_dir),
+                "builtin_skills_dir": str(self.builtin_skills_dir),
+                "workspace_skills_dir": str(self.workspace_skills_dir),
+                "workspace_tools_dir": str(self.workspace_tools_dir),
             },
             "system": {
                 "console_output": self.system.console_output,
                 "enable_meta_tool": self.system.enable_meta_tool,
                 "timeout": self.system.timeout,
                 "tracing_endpoint": self.system.tracing_endpoint,
+            },
+            "channels": {
+                "feishu": {
+                    "enabled": self.feishu.enabled,
+                    "app_id": self.feishu.app_id,
+                    "app_secret": "***" if self.feishu.app_secret else "",
+                    "encrypt_key": "***" if self.feishu.encrypt_key else "",
+                    "verification_token": "***" if self.feishu.verification_token else "",
+                    "group_policy": self.feishu.group_policy,
+                    "reply_mode": self.feishu.reply_mode,
+                }
             },
         }
 

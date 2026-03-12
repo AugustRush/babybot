@@ -14,6 +14,9 @@ cp config.json.example config.json
 
 # 运行
 uv run babybot
+
+# 运行飞书通道
+uv run babybot --channel feishu
 ```
 
 ## 配置说明
@@ -33,6 +36,31 @@ uv run babybot
   }
 }
 ```
+
+### 飞书通道配置
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "app_id": "cli_xxx",
+      "app_secret": "xxx",
+      "encrypt_key": "",
+      "verification_token": "",
+      "group_policy": "mention",
+      "reply_mode": "chat"
+    }
+  }
+}
+```
+
+- `group_policy`:
+  - `mention`: 群聊中仅被 @ 时响应
+  - `open`: 群聊中所有消息都响应
+- `reply_mode`:
+  - `chat`: 回复到当前会话
+  - `p2p`: 优先按发送者 `open_id` 私聊回复
 
 ### 2. 工具组配置
 

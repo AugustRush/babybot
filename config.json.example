@@ -22,5 +22,16 @@
     "enable_meta_tool": true,
     "timeout": 60,
     "tracing_endpoint": ""
+  },
+  "channels": {
+    "feishu": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "encrypt_key": "",
+      "verification_token": "",
+      "group_policy": "mention",
+      "reply_mode": "chat"
+    }
   }
 }

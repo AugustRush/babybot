@@ -1,11 +1,22 @@
 import asyncio
+import argparse
 import logging
 from .config import Config
 from .orchestrator import OrchestratorAgent
+from .channels.feishu import FeishuChannel
 
 
 def run():
     """Run the multi-agent orchestrator CLI."""
+    parser = argparse.ArgumentParser(description="BabyBot")
+    parser.add_argument(
+        "--channel",
+        choices=["cli", "feishu"],
+        default="cli",
+        help="Run mode/channel",
+    )
+    args = parser.parse_args()
+
     print("Initializing Orchestrator...")
 
     try:
@@ -30,6 +41,22 @@ def run():
         print("\nPlease set your API key:")
         print("  1. Create a .env file with: OPENAI_API_KEY=your_key")
         print("  2. Or export it: export OPENAI_API_KEY=your_key")
+        return
+
+    if args.channel == "feishu":
+        if not config.feishu.enabled:
+            print("Feishu channel is disabled. Set channels.feishu.enabled=true in config.")
+            return
+        channel = FeishuChannel(config=config, orchestrator=orchestrator)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(channel.start())
+        except KeyboardInterrupt:
+            print("\nStopping Feishu channel...")
+        finally:
+            loop.run_until_complete(channel.stop())
+            loop.close()
         return
 
     print("\n" + "=" * 60)
