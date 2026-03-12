@@ -38,6 +38,7 @@ class WorkerFinalOutput(BaseModel):
     answer: str = ""
     evidence: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    media_paths: list[str] = Field(default_factory=list)
 
 
 class ResourceManager:
@@ -712,8 +713,8 @@ class ResourceManager:
             Args:
                 task_description: Description of the task to be completed.
             """
-            result = await self._run_worker_task(task_description)
-            return ToolResponse(content=result)
+            text, _media = await self._run_worker_task(task_description)
+            return ToolResponse(content=text)
 
         return create_worker
 
@@ -722,8 +723,8 @@ class ResourceManager:
         task_description: str,
         lease: dict[str, Any] | None = None,
         agent_name: str = "Worker",
-    ) -> str:
-        """Run one worker task and return plain text output."""
+    ) -> tuple[str, list[str]]:
+        """Run one worker task and return (text, media_paths)."""
         from .worker import create_worker_agent
 
         worker_toolkit = self.create_leased_toolkit(
@@ -742,24 +743,34 @@ class ResourceManager:
         token = self._active_write_root.set(str(write_root))
         try:
             prompt = task_description
+            text, media = "", []
             for _ in range(3):
                 result = await worker(
                     Msg("user", prompt, "user"),
                     structured_model=WorkerFinalOutput,
                 )
-                text = self._extract_worker_output(result)
+                text, media = self._extract_worker_output(result)
                 if text and not self._looks_incomplete_output(text):
-                    return text
+                    return text, media
                 prompt = (
                     "请继续执行尚未完成的步骤，并只输出最终结果。"
                     "不要输出 <tool_call> 标签或中间思考。"
                 )
-            return text or "Worker completed but returned no text."
+            return text or "Worker completed but returned no text.", media
         finally:
             self._active_write_root.reset(token)
 
-    def _extract_worker_output(self, result: Msg) -> str:
-        """Extract best-effort textual output from worker message."""
+    def _extract_media_from_text(self, text: str) -> list[str]:
+        """Extract file paths from text as fallback when structured output fails."""
+        paths = []
+        for m in self._MEDIA_PATH_RE.finditer(text):
+            p = os.path.expanduser(m.group(0))
+            if os.path.isfile(p):
+                paths.append(p)
+        return paths
+
+    def _extract_worker_output(self, result: Msg) -> tuple[str, list[str]]:
+        """Extract best-effort textual output and media paths from worker message."""
         structured = self._extract_structured_output(result, WorkerFinalOutput)
         if structured is not None:
             summary_lines: list[str] = []
@@ -772,12 +783,13 @@ class ResourceManager:
                 summary_lines.append("Errors:")
                 summary_lines.extend([f"- {item}" for item in structured.errors if item])
             summary = "\n".join(summary_lines).strip()
+            media = [p for p in structured.media_paths if p and os.path.isfile(p)]
             if summary:
-                return summary
+                return summary, media
 
         text = result.get_text_content()
         if text:
-            return text
+            return text, []
 
         # Fallback to tool_result only. Avoid leaking internal thinking/tool-call
         # traces into user-facing output.
@@ -787,7 +799,7 @@ class ResourceManager:
             if isinstance(content, str) and content.strip():
                 lines.append(content.strip())
 
-        return "\n".join(lines).strip()
+        return "\n".join(lines).strip(), []
 
     def _looks_incomplete_output(self, text: str) -> bool:
         """Heuristic: detect intermediate output that indicates unfinished execution."""
@@ -885,8 +897,11 @@ class ResourceManager:
         task_description: str,
         lease: dict[str, Any] | None = None,
         agent_name: str = "Worker",
-    ) -> str:
-        """Public API to execute one task using a dynamically leased subagent."""
+    ) -> tuple[str, list[str]]:
+        """Public API to execute one task using a dynamically leased subagent.
+
+        Returns (text_output, media_paths).
+        """
         return await self._run_worker_task(
             task_description=task_description,
             lease=lease,
@@ -917,12 +932,12 @@ class ResourceManager:
             async def run_one(index: int, task: str) -> dict[str, Any]:
                 async with semaphore:
                     try:
-                        result = await self._run_worker_task(
+                        text, _media = await self._run_worker_task(
                             task_description=task,
                             lease=lease,
                             agent_name=f"Worker-{index}",
                         )
-                        return {"index": index, "task": task, "result": result}
+                        return {"index": index, "task": task, "result": text}
                     except Exception as e:
                         return {"index": index, "task": task, "error": str(e)}
 

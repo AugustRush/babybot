@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,14 @@ from agentscope.plan import PlanNotebook
 from .config import Config
 from .resource import ResourceManager
 from .scheduler import Scheduler, TaskSpec
+
+
+@dataclass
+class TaskResponse:
+    """Structured response from process_task with text and optional media."""
+
+    text: str = ""
+    media_paths: list[str] = field(default_factory=list)
 
 
 class RouteDecision(BaseModel):
@@ -148,6 +157,7 @@ class OrchestratorAgent:
             agent.set_console_output_enabled(self.config.system.console_output)
 
         self._initialized = False
+        self._collected_media: list[str] = []
 
     def _create_formatter(self) -> OpenAIChatFormatter | DeepSeekChatFormatter:
         model_name = (self.config.model.model_name or "").lower()
@@ -334,11 +344,14 @@ class OrchestratorAgent:
         )
 
     async def _execute_subtask(self, task: TaskSpec) -> str:
-        return await self.resource_manager.run_subagent_task(
+        text, media = await self.resource_manager.run_subagent_task(
             task_description=task.description,
             lease=task.lease,
             agent_name=f"SubAgent-{task.task_id}",
         )
+        if media:
+            self._collected_media.extend(media)
+        return text
 
     async def _run_plan_with_scheduler(self, user_input: str) -> str | None:
         plan = await self._make_execution_plan(user_input)
@@ -406,11 +419,12 @@ class OrchestratorAgent:
             pass
         return None
 
-    async def process_task(self, user_input: str) -> str:
+    async def process_task(self, user_input: str) -> TaskResponse:
         if not self._initialized:
             await self.resource_manager.initialize_async()
             self._initialized = True
 
+        self._collected_media.clear()
         msg = Msg(name="user", content=user_input, role="user")
         try:
             decision = await self._route_task(user_input)
@@ -418,25 +432,28 @@ class OrchestratorAgent:
                 response = await self._direct_agent(msg)
                 text = self._extract_text(response)
                 if text:
-                    return text
+                    return TaskResponse(text=text, media_paths=list(self._collected_media))
 
             scheduled_output = await self._run_plan_with_scheduler(user_input)
             if scheduled_output:
-                return scheduled_output
+                return TaskResponse(text=scheduled_output, media_paths=list(self._collected_media))
 
             response = await self._agent(msg)
             text = self._extract_text(response)
             if text:
-                return text
+                return TaskResponse(text=text, media_paths=list(self._collected_media))
 
             print(f"Debug: Response content: {response.content}")
-            return "任务已处理，但没有生成文本回复。"
+            return TaskResponse(
+                text="任务已处理，但没有生成文本回复。",
+                media_paths=list(self._collected_media),
+            )
         except Exception as e:
             print(f"Error processing task: {e}")
             import traceback
 
             traceback.print_exc()
-            return f"处理任务时出错：{e}"
+            return TaskResponse(text=f"处理任务时出错：{e}")
 
     def reset(self) -> None:
         self.resource_manager.reset()

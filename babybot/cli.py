@@ -3,7 +3,7 @@ import argparse
 import logging
 from .config import Config
 from .orchestrator import OrchestratorAgent
-from .channels.feishu import FeishuChannel
+from .channels import ChannelManager
 
 
 def run():
@@ -11,9 +11,8 @@ def run():
     parser = argparse.ArgumentParser(description="BabyBot")
     parser.add_argument(
         "--channel",
-        choices=["cli", "feishu"],
         default="cli",
-        help="Run mode/channel",
+        help="Run mode: 'cli' for interactive terminal, or channel name (e.g. 'feishu')",
     )
     args = parser.parse_args()
 
@@ -43,19 +42,31 @@ def run():
         print("  2. Or export it: export OPENAI_API_KEY=your_key")
         return
 
-    if args.channel == "feishu":
-        if not config.feishu.enabled:
-            print("Feishu channel is disabled. Set channels.feishu.enabled=true in config.")
-            return
-        channel = FeishuChannel(config=config, orchestrator=orchestrator)
+    if args.channel != "cli":
+        # Channel mode — use ChannelManager
+        manager = ChannelManager(config, orchestrator)
+        if args.channel != "all":
+            # If a specific channel name is given, check it was enabled
+            if args.channel not in manager.channels:
+                ch_config = config.get_channel_config(args.channel)
+                if ch_config is None:
+                    print(f"Unknown channel: {args.channel}")
+                else:
+                    print(
+                        f"Channel '{args.channel}' is disabled. "
+                        f"Set channels.{args.channel}.enabled=true in config."
+                    )
+                return
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(channel.start())
+            loop.run_until_complete(manager.start_all())
+            # Keep the process alive while channels run
+            loop.run_forever()
         except KeyboardInterrupt:
-            print("\nStopping Feishu channel...")
+            print("\nStopping channels...")
         finally:
-            loop.run_until_complete(channel.stop())
+            loop.run_until_complete(manager.stop_all())
             loop.close()
         return
 
@@ -107,7 +118,9 @@ def run():
                         timeout=float(config.system.timeout),
                     )
                 )
-                print(f"\n📋 最终结果:\n{response}\n")
+                print(f"\n📋 最终结果:\n{response.text}\n")
+                if response.media_paths:
+                    print(f"📎 生成的文件: {', '.join(response.media_paths)}\n")
             except asyncio.TimeoutError:
                 print(
                     f"\n⏰ 任务执行超时（{config.system.timeout} 秒），请重试或简化任务。\n"

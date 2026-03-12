@@ -48,6 +48,8 @@ class FeishuConfig:
     verification_token: str = ""
     group_policy: Literal["open", "mention"] = "mention"
     reply_mode: Literal["chat", "p2p"] = "chat"
+    react_emoji: str = "THUMBSUP"
+    media_dir: str = ""
 
 
 class Config:
@@ -122,6 +124,8 @@ class Config:
             verification_token=feishu_conf.get("verification_token", ""),
             group_policy=feishu_conf.get("group_policy", "mention"),
             reply_mode=feishu_conf.get("reply_mode", "chat"),
+            react_emoji=feishu_conf.get("react_emoji", "THUMBSUP"),
+            media_dir=feishu_conf.get("media_dir", ""),
         )
 
     def _load_config(self) -> None:
@@ -183,12 +187,24 @@ class Config:
                     "verification_token": "",
                     "group_policy": "mention",
                     "reply_mode": "chat",
+                    "react_emoji": "THUMBSUP",
+                    "media_dir": ""
                 }
             },
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(fallback, f, ensure_ascii=False, indent=2)
         self.is_bootstrapped = True
+
+    def get_channel_config(self, name: str) -> Any:
+        """Get the config object for a specific channel.
+
+        Currently only ``feishu`` is supported; returns ``None`` for unknown
+        channel names so that ``ChannelManager`` can skip them gracefully.
+        """
+        if name == "feishu":
+            return self.feishu
+        return None
 
     def get_tool_groups(self) -> dict[str, dict]:
         """Get tool group configurations."""
@@ -249,6 +265,8 @@ class Config:
                     "verification_token": "***" if self.feishu.verification_token else "",
                     "group_policy": self.feishu.group_policy,
                     "reply_mode": self.feishu.reply_mode,
+                    "react_emoji": self.feishu.react_emoji,
+                    "media_dir": self.feishu.media_dir,
                 }
             },
         }

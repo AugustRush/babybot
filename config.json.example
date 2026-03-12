@@ -31,7 +31,9 @@
       "encrypt_key": "",
       "verification_token": "",
       "group_policy": "mention",
-      "reply_mode": "chat"
+      "reply_mode": "chat",
+      "react_emoji": "THUMBSUP",
+      "media_dir": ""
     }
   }
 }

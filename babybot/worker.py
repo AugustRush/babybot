@@ -47,9 +47,10 @@ def create_worker_agent(
 请：
 1. 仔细分析任务需求
 2. 必须优先使用工具完成需要外部信息/浏览器/文件操作的步骤
-3. 如果任务完成，输出结构化终态：status=done, answer=最终答案, evidence=关键信息列表, errors=[]
-4. 如果任务失败，输出结构化终态：status=failed, answer="", evidence=[], errors=[失败原因]
+3. 如果任务完成，输出结构化终态：status=done, answer=最终答案, evidence=关键信息列表, errors=[], media_paths=生成的文件路径列表
+4. 如果任务失败，输出结构化终态：status=failed, answer="", evidence=[], errors=[失败原因], media_paths=[]
 5. 不要只停留在 tool call 或 thinking；必须给出终态
+6. 如果生成了图片、文件等媒体资源，务必在 media_paths 中填写完整的文件绝对路径
 
 如果有不清楚的地方，请说明需要更多信息。""",
         model=OpenAIChatModel(**model_kwargs),
