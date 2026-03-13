@@ -49,3 +49,7 @@ class BaseChannel(ABC):
     ) -> None:
         """Send a TaskResponse to the given chat."""
         ...
+
+    async def health_check(self) -> dict[str, Any]:
+        """Check channel health status. Override in subclasses."""
+        return {"status": "unknown", "channel": self.name}

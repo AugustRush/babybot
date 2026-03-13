@@ -6,13 +6,14 @@ import inspect
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import sys
 import shlex
+import threading
 from pathlib import Path
-from typing import Any
-from typing import Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +30,11 @@ from agentscope.mcp import HttpStatelessClient, StdIOStatefulClient
 from agentscope.message import Msg
 
 from .config import Config
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .channels.tools import ChannelTools, ChannelToolContext
 
 
 class WorkerFinalOutput(BaseModel):
@@ -54,12 +60,18 @@ class ResourceManager:
 
     _instance: "ResourceManager | None" = None
     _initialized: bool = False
+    _lock = threading.Lock()
     _orchestration_tools = {"create_worker", "dispatch_workers"}
     _framework_internal_tools = {"reset_equipped_tools"}
+    _MEDIA_PATH_RE = re.compile(
+        r"(?:^|[\s'\"(])((?:/~|[~/])?[\w./]+(?:\.(?:png|jpg|jpeg|gif|bmp|webp|ico|tiff|tif|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|md|json|yaml|yml|py|js|ts|html|css|svg|mp4|mov|avi|mp3|wav|opus)))"
+    )
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "ResourceManager":
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self, config: Config | None = None):
@@ -69,6 +81,7 @@ class ResourceManager:
         self.config = config or Config()
         self.toolkit = Toolkit()
         self.mcp_clients: dict[str, Any] = {}
+        self.channel_tools: dict[str, ChannelTools] = {}
         self._active_write_root: contextvars.ContextVar[str] = contextvars.ContextVar(
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
@@ -222,8 +235,8 @@ class ResourceManager:
                 active=group_conf["active"],
                 notes=group_conf["notes"],
             )
-            print(
-                f"✓ Tool group '{group_name}' created (active={group_conf['active']})"
+            logger.info(
+                "Tool group '%s' created (active=%s)", group_name, group_conf["active"]
             )
 
     async def _register_mcp_servers(self, mcp_servers: dict[str, dict]) -> None:
@@ -253,11 +266,13 @@ class ResourceManager:
                 if server_conf.get("active", False):
                     group_name = server_conf.get("group_name", name)
                     self.activate_groups([group_name])
-                    print(
-                        f"✓ MCP server '{name}' registered and tool group '{group_name}' activated"
+                    logger.info(
+                        "MCP server '%s' registered and tool group '%s' activated",
+                        name,
+                        group_name,
                     )
             except Exception as e:
-                print(f"Warning: Failed to register MCP server {name}: {e}")
+                logger.warning("Failed to register MCP server %s: %s", name, e)
 
     def _register_custom_tools(self, custom_tools: dict[str, dict]) -> None:
         """Register custom tools from configuration."""
@@ -289,7 +304,7 @@ class ResourceManager:
                         preset_kwargs=preset_kwargs,
                     )
             except Exception as e:
-                print(f"Warning: Failed to register custom tool {name}: {e}")
+                logger.warning("Failed to register custom tool %s: %s", name, e)
 
     def _register_agent_skills(self, agent_skills: dict[str, dict]) -> None:
         """Register agent skills from configuration."""
@@ -302,7 +317,7 @@ class ResourceManager:
                     skill_dir,
                 )
             except Exception as e:
-                print(f"Warning: Failed to register agent skill {name}: {e}")
+                logger.warning("Failed to register agent skill %s: %s", name, e)
 
     def _discover_skills(self) -> None:
         """Auto-load skills from built-in and workspace directories."""
@@ -327,7 +342,9 @@ class ResourceManager:
                 try:
                     self.toolkit.register_agent_skill(key)
                 except Exception as e:
-                    print(f"Warning: Failed to auto-register skill {skill_dir.name}: {e}")
+                    print(
+                        f"Warning: Failed to auto-register skill {skill_dir.name}: {e}"
+                    )
 
     def _discover_workspace_tools(self) -> None:
         """Auto-load custom tools from workspace tools directory.
@@ -366,7 +383,7 @@ class ResourceManager:
                         group_name=group_name,
                     )
             except Exception as e:
-                print(f"Warning: Failed to auto-register tools from {py_file}: {e}")
+                logger.warning("Failed to auto-register tools from %s: %s", py_file, e)
 
     def _ensure_workspace_on_pythonpath(self) -> None:
         """Ensure workspace root is importable for custom tools."""
@@ -441,42 +458,39 @@ class ResourceManager:
         ws_skills = (ws / "skills").resolve()
         text = task_description or ""
 
-        skill_hint = re.search(
-            r"(?:^|[^\w])workspace/skills/([A-Za-z0-9._-]+)",
+        # Pattern 1: workspace/skills/<skill_name>
+        skill_match = re.search(
+            r"workspace/skills/([A-Za-z0-9._-]+)",
             text,
             flags=re.IGNORECASE,
         )
-        if skill_hint:
-            return (ws_skills / skill_hint.group(1)).resolve()
+        if skill_match:
+            return (ws_skills / skill_match.group(1)).resolve()
 
-        token_pattern = re.compile(
-            r"(?P<path>(?:~|/|\.{1,2}|workspace)/[^\s'\"<>()]+)",
+        # Pattern 2: workspace/... paths
+        workspace_match = re.search(
+            r"workspace/([A-Za-z0-9._/-]+)",
+            text,
             flags=re.IGNORECASE,
         )
-        for match in token_pattern.finditer(text):
-            token = match.group("path").rstrip(".,;:!?)]}")
-            lowered = token.lower()
-            if lowered.startswith(("http://", "https://")):
-                continue
+        if workspace_match:
+            candidate = (ws / workspace_match.group(1)).resolve()
+            if self._is_within(ws, candidate):
+                return candidate
 
-            if lowered.startswith("workspace/"):
-                rel = token[len("workspace/") :]
-                candidate = (ws / rel).resolve()
-            else:
-                candidate = Path(token).expanduser()
-                if not candidate.is_absolute():
-                    candidate = (ws / candidate).resolve()
-                else:
-                    candidate = candidate.resolve()
-
-            if not self._is_within(ws, candidate):
-                continue
-            if self._is_within(ws_skills, candidate):
-                rel = candidate.relative_to(ws_skills)
-                parts = rel.parts
-                if parts:
-                    return (ws_skills / parts[0]).resolve()
-            return candidate
+        # Pattern 3: absolute paths under workspace
+        abs_match = re.search(
+            r"(?<![A-Za-z0-9])(/[A-Za-z0-9._/-]+)",
+            text,
+        )
+        if abs_match:
+            candidate = Path(abs_match.group(1)).resolve()
+            if self._is_within(ws, candidate):
+                if self._is_within(ws_skills, candidate):
+                    parts = candidate.relative_to(ws_skills).parts
+                    if parts:
+                        return (ws_skills / parts[0]).resolve()
+                return candidate
 
         return ws
 
@@ -488,10 +502,7 @@ class ResourceManager:
     ) -> ToolResponse:
         """Execute python code in active workspace directory."""
         ws = self._get_active_write_root()
-        prefix = (
-            "import os\n"
-            f"os.chdir({ws.as_posix()!r})\n"
-        )
+        prefix = f"import os\nos.chdir({ws.as_posix()!r})\n"
         return await execute_python_code(prefix + code, timeout=timeout, **kwargs)
 
     async def _workspace_execute_shell_command(
@@ -608,9 +619,9 @@ class ResourceManager:
             self.mcp_clients[name] = client
 
             # Connect to the server with timeout
-            print(f"Connecting to MCP server '{name}'...")
+            logger.info("Connecting to MCP server '%s'...", name)
             await asyncio.wait_for(client.connect(), timeout=30)
-            print(f"✓ MCP server '{name}' connected")
+            logger.info("MCP server '%s' connected", name)
 
             # Register all tools from MCP server
             await self.toolkit.register_mcp_client(
@@ -618,9 +629,9 @@ class ResourceManager:
                 group_name=group_name,
             )
         except asyncio.TimeoutError:
-            print(f"Warning: Timeout connecting to MCP server '{name}'")
+            logger.warning("Timeout connecting to MCP server '%s'", name)
         except Exception as e:
-            print(f"Warning: Failed to connect MCP server '{name}': {e}")
+            logger.warning("Failed to connect MCP server '%s': %s", name, e)
 
     def activate_groups(self, group_names: list[str]) -> str:
         """Activate tool groups.
@@ -675,9 +686,7 @@ class ResourceManager:
             if not keyword or keyword in name.lower()
         ]
         mcp_servers = [
-            name
-            for name in self.mcp_clients
-            if not keyword or keyword in name.lower()
+            name for name in self.mcp_clients if not keyword or keyword in name.lower()
         ]
         skills = [
             name
@@ -699,6 +708,55 @@ class ResourceManager:
             Formatted tool prompt.
         """
         return self.toolkit.get_activated_notes()
+
+    def get_channel_prompts(self) -> str:
+        """Get combined prompts from all registered channel tools.
+
+        Returns:
+            Combined channel prompts for injection into agent system prompt.
+        """
+        prompts = []
+        for channel_name, channel_tool in self.channel_tools.items():
+            prompt = channel_tool.get_prompt()
+            if prompt:
+                prompts.append(prompt)
+        return "\n\n".join(prompts) if prompts else ""
+
+    def register_channel_tools(self, channel_tools: "ChannelTools") -> None:
+        """Register tools from a channel.
+
+        Args:
+            channel_tools: ChannelTools instance to register.
+        """
+        if not channel_tools.channel_name:
+            logger.warning("ChannelTools has no channel_name, skipping registration")
+            return
+
+        group_name = channel_tools.get_tool_group_name()
+        group_description = channel_tools.get_tool_group_description()
+
+        self.toolkit.create_tool_group(
+            group_name=group_name,
+            description=group_description,
+            active=True,
+            notes=channel_tools.get_prompt(),
+        )
+
+        for func in channel_tools.get_tools():
+            self.toolkit.register_tool_function(func, group_name=group_name)
+
+        self.channel_tools[channel_tools.channel_name] = channel_tools
+        logger.info(
+            "Registered %d tools from channel '%s'",
+            len(channel_tools.get_tools()),
+            channel_tools.channel_name,
+        )
+
+    def set_channel_context(self, ctx: "ChannelToolContext | None") -> None:
+        """Set the current channel context for tool execution."""
+        from .channels.tools import ChannelToolContext
+
+        ChannelToolContext.set_current(ctx)
 
     def create_worker_tool(self) -> Any:
         """Create the create_worker tool function.
@@ -744,7 +802,9 @@ class ResourceManager:
         try:
             prompt = task_description
             text, media = "", []
-            for _ in range(3):
+            max_retries = 3
+            base_delay = 1.0
+            for attempt in range(max_retries):
                 result = await worker(
                     Msg("user", prompt, "user"),
                     structured_model=WorkerFinalOutput,
@@ -752,10 +812,19 @@ class ResourceManager:
                 text, media = self._extract_worker_output(result)
                 if text and not self._looks_incomplete_output(text):
                     return text, media
-                prompt = (
-                    "请继续执行尚未完成的步骤，并只输出最终结果。"
-                    "不要输出 <tool_call> 标签或中间思考。"
-                )
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2**attempt)
+                    logger.debug(
+                        "Worker retry %d/%d after %.1fs",
+                        attempt + 1,
+                        max_retries,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    prompt = (
+                        "请继续执行尚未完成的步骤，并只输出最终结果。"
+                        "不要输出 <tool_call> 标签或中间思考。"
+                    )
             return text or "Worker completed but returned no text.", media
         finally:
             self._active_write_root.reset(token)
@@ -778,10 +847,14 @@ class ResourceManager:
             if answer:
                 summary_lines.append(answer)
             if structured.evidence:
-                summary_lines.extend([f"- {item}" for item in structured.evidence if item])
+                summary_lines.extend(
+                    [f"- {item}" for item in structured.evidence if item]
+                )
             if structured.status == "failed" and structured.errors:
                 summary_lines.append("Errors:")
-                summary_lines.extend([f"- {item}" for item in structured.errors if item])
+                summary_lines.extend(
+                    [f"- {item}" for item in structured.errors if item]
+                )
             summary = "\n".join(summary_lines).strip()
             media = [p for p in structured.media_paths if p and os.path.isfile(p)]
             if summary:
@@ -922,7 +995,9 @@ class ResourceManager:
                 tasks: Subtasks to execute.
                 max_concurrency: Max number of workers running at the same time.
             """
-            normalized_tasks = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
+            normalized_tasks = [
+                t.strip() for t in tasks if isinstance(t, str) and t.strip()
+            ]
             if not normalized_tasks:
                 return ToolResponse(content="No valid tasks were provided.")
 
@@ -964,13 +1039,22 @@ class ResourceManager:
                 except TypeError:
                     close_fn()
                 except Exception as e:
-                    print(f"Warning: Failed to close MCP client '{name}': {e}")
+                    logger.warning("Failed to close MCP client '%s': %s", name, e)
 
         self.toolkit.clear()
         self.mcp_clients.clear()
         ResourceManager._initialized = False
         self._load_config()
         self._register_builtin_tools()
+
+    async def __aenter__(self) -> "ResourceManager":
+        """Async context manager entry."""
+        await self.initialize_async()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit - cleanup resources."""
+        self.reset()
 
     @classmethod
     def get_instance(cls) -> "ResourceManager":

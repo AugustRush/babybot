@@ -1,11 +1,14 @@
 """Unified configuration management."""
 
 import json
+import logging
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -20,11 +23,22 @@ class ModelConfig:
 
     def validate(self) -> None:
         """Validate configuration."""
+        errors = []
         if not self.api_key:
-            raise ValueError(
+            errors.append(
                 "API key is required. Set in ~/.babybot/config.json "
                 "or OPENAI_API_KEY environment variable."
             )
+        if self.temperature < 0 or self.temperature > 2:
+            errors.append(
+                f"Temperature must be between 0 and 2, got {self.temperature}"
+            )
+        if self.max_tokens <= 0 or self.max_tokens > 32768:
+            errors.append(
+                f"max_tokens must be between 1 and 32768, got {self.max_tokens}"
+            )
+        if errors:
+            raise ValueError("; ".join(errors))
 
 
 @dataclass
@@ -35,6 +49,7 @@ class SystemConfig:
     enable_meta_tool: bool = True
     timeout: int = 60
     tracing_endpoint: str = ""
+    max_parallel: int = 4
 
 
 @dataclass
@@ -51,6 +66,18 @@ class FeishuConfig:
     react_emoji: str = "THUMBSUP"
     media_dir: str = ""
 
+    def validate(self) -> None:
+        """Validate Feishu configuration when enabled."""
+        if not self.enabled:
+            return
+        errors = []
+        if not self.app_id:
+            errors.append("app_id is required when Feishu channel is enabled")
+        if not self.app_secret:
+            errors.append("app_secret is required when Feishu channel is enabled")
+        if errors:
+            raise ValueError("; ".join(errors))
+
 
 class Config:
     """Unified configuration manager.
@@ -66,9 +93,7 @@ class Config:
             config_file: Path to config file.
                 Defaults to `$BABYBOT_CONFIG` or `~/.babybot/config.json`.
         """
-        self.home_dir = Path(
-            os.getenv("BABYBOT_HOME", "~/.babybot")
-        ).expanduser()
+        self.home_dir = Path(os.getenv("BABYBOT_HOME", "~/.babybot")).expanduser()
         self.workspace_dir = Path(
             os.getenv("BABYBOT_WORKSPACE", str(self.home_dir / "workspace"))
         ).expanduser()
@@ -108,6 +133,7 @@ class Config:
             enable_meta_tool=system_conf.get("enable_meta_tool", True),
             timeout=system_conf.get("timeout", 60),
             tracing_endpoint=system_conf.get("tracing_endpoint", ""),
+            max_parallel=system_conf.get("max_parallel", 4),
         )
 
         # Resource configuration
@@ -142,7 +168,6 @@ class Config:
             with open(self.config_file, "r", encoding="utf-8") as f:
                 self.raw_config = json.load(f)
         else:
-            # Use defaults
             self.raw_config = {}
 
     def _bootstrap_config_file(self) -> None:
@@ -158,6 +183,7 @@ class Config:
             if candidate.exists():
                 shutil.copyfile(candidate, self.config_file)
                 self.is_bootstrapped = True
+                logger.info(f"Created config file from example: {candidate}")
                 return
 
         # Fallback minimal config if example is unavailable.
@@ -188,13 +214,14 @@ class Config:
                     "group_policy": "mention",
                     "reply_mode": "chat",
                     "react_emoji": "THUMBSUP",
-                    "media_dir": ""
+                    "media_dir": "",
                 }
             },
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(fallback, f, ensure_ascii=False, indent=2)
         self.is_bootstrapped = True
+        logger.info("Created default config file (fallback)")
 
     def get_channel_config(self, name: str) -> Any:
         """Get the config object for a specific channel.
@@ -262,7 +289,9 @@ class Config:
                     "app_id": self.feishu.app_id,
                     "app_secret": "***" if self.feishu.app_secret else "",
                     "encrypt_key": "***" if self.feishu.encrypt_key else "",
-                    "verification_token": "***" if self.feishu.verification_token else "",
+                    "verification_token": "***"
+                    if self.feishu.verification_token
+                    else "",
                     "group_policy": self.feishu.group_policy,
                     "reply_mode": self.feishu.reply_mode,
                     "react_emoji": self.feishu.react_emoji,

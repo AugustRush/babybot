@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from agentscope.agent import ReActAgent
-from agentscope.formatter import DeepSeekChatFormatter, OpenAIChatFormatter
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
-from agentscope.model import OpenAIChatModel
 from agentscope.plan import PlanNotebook
 
 from .config import Config
 from .resource import ResourceManager
 from .scheduler import Scheduler, TaskSpec
+from .worker import create_agent, _create_model_kwargs, _create_formatter
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,19 +74,9 @@ class OrchestratorAgent:
         self.config.model.validate()
 
         self.resource_manager = ResourceManager(self.config)
-        self._scheduler = Scheduler(max_parallel=4)
+        self._scheduler = Scheduler(max_parallel=self.config.system.max_parallel)
 
-        model_kwargs = {
-            "model_name": self.config.model.model_name,
-            "api_key": self.config.model.api_key,
-            "stream": False,
-            "generate_kwargs": {
-                "temperature": self.config.model.temperature,
-                "max_tokens": self.config.model.max_tokens,
-            },
-        }
-        if self.config.model.api_base:
-            model_kwargs["client_kwargs"] = {"base_url": self.config.model.api_base}
+        model_kwargs = _create_model_kwargs(self.config)
 
         self._plan_notebook = PlanNotebook(max_subtasks=12)
         self._plan_events: list[dict[str, Any]] = []
@@ -94,54 +86,44 @@ class OrchestratorAgent:
                 self._on_plan_change,
             )
 
-        self._agent = ReActAgent(
+        self._agent = create_agent(
+            config=self.config,
             name="Orchestrator",
             sys_prompt=self._get_orchestrator_prompt(),
-            model=OpenAIChatModel(**model_kwargs),
-            memory=InMemoryMemory(),
-            formatter=self._create_formatter(),
             toolkit=self.resource_manager.toolkit,
             enable_meta_tool=self.config.system.enable_meta_tool,
-            parallel_tool_calls=True,
-            plan_notebook=self._plan_notebook,
             max_iters=12,
+            plan_notebook=self._plan_notebook,
+            parallel_tool_calls=True,
         )
-        self._router_agent = ReActAgent(
+        self._router_agent = create_agent(
+            config=self.config,
             name="Router",
             sys_prompt=self._get_router_prompt(),
-            model=OpenAIChatModel(**model_kwargs),
-            memory=InMemoryMemory(),
-            formatter=self._create_formatter(),
             toolkit=None,
             enable_meta_tool=False,
             max_iters=1,
         )
-        self._planner_agent = ReActAgent(
+        self._planner_agent = create_agent(
+            config=self.config,
             name="Planner",
             sys_prompt=self._get_planner_prompt(),
-            model=OpenAIChatModel(**model_kwargs),
-            memory=InMemoryMemory(),
-            formatter=self._create_formatter(),
             toolkit=None,
             enable_meta_tool=False,
             max_iters=1,
         )
-        self._direct_agent = ReActAgent(
+        self._direct_agent = create_agent(
+            config=self.config,
             name="DirectAssistant",
             sys_prompt=self._get_direct_prompt(),
-            model=OpenAIChatModel(**model_kwargs),
-            memory=InMemoryMemory(),
-            formatter=self._create_formatter(),
             toolkit=self.resource_manager.toolkit,
             enable_meta_tool=False,
             max_iters=4,
         )
-        self._synth_agent = ReActAgent(
+        self._synth_agent = create_agent(
+            config=self.config,
             name="Synthesizer",
             sys_prompt=self._get_synth_prompt(),
-            model=OpenAIChatModel(**model_kwargs),
-            memory=InMemoryMemory(),
-            formatter=self._create_formatter(),
             toolkit=None,
             enable_meta_tool=False,
             max_iters=2,
@@ -159,12 +141,6 @@ class OrchestratorAgent:
         self._initialized = False
         self._collected_media: list[str] = []
 
-    def _create_formatter(self) -> OpenAIChatFormatter | DeepSeekChatFormatter:
-        model_name = (self.config.model.model_name or "").lower()
-        if "deepseek" in model_name:
-            return DeepSeekChatFormatter()
-        return OpenAIChatFormatter()
-
     def _get_orchestrator_prompt(self) -> str:
         available_tools = self.resource_manager.get_available_tools()
         tool_names = [
@@ -177,12 +153,17 @@ class OrchestratorAgent:
             if tool_names
             else "当前没有激活的工具组"
         )
+
+        channel_prompts = self.resource_manager.get_channel_prompts()
+        channel_section = f"\n\n{channel_prompts}" if channel_prompts else ""
+
         return f"""你是主控调度 Agent，负责：
 1. 为复杂任务制定多步骤策略
 2. 使用可用工具推进关键步骤
 3. 在必要时将任务分配给子 Agent 并整合结果
 
 {tools_info}
+{channel_section}
 
 原则：
 - 能并行的子任务尽量并行
@@ -239,7 +220,9 @@ class OrchestratorAgent:
             if plan is None:
                 payload: dict[str, Any] = {"event": "plan_cleared"}
             else:
-                dump_fn = getattr(plan, "model_dump", None) or getattr(plan, "dict", None)
+                dump_fn = getattr(plan, "model_dump", None) or getattr(
+                    plan, "dict", None
+                )
                 payload = (
                     dump_fn()
                     if callable(dump_fn)
@@ -408,7 +391,9 @@ class OrchestratorAgent:
                     lines.extend(f"- {item}" for item in structured.evidence if item)
                 if structured.failed_tasks:
                     lines.append("\n失败任务：")
-                    lines.extend(f"- {item}" for item in structured.failed_tasks if item)
+                    lines.extend(
+                        f"- {item}" for item in structured.failed_tasks if item
+                    )
                 answer = "\n".join(line for line in lines if line).strip()
                 if answer:
                     return answer
@@ -432,27 +417,28 @@ class OrchestratorAgent:
                 response = await self._direct_agent(msg)
                 text = self._extract_text(response)
                 if text:
-                    return TaskResponse(text=text, media_paths=list(self._collected_media))
+                    return TaskResponse(
+                        text=text, media_paths=list(self._collected_media)
+                    )
 
             scheduled_output = await self._run_plan_with_scheduler(user_input)
             if scheduled_output:
-                return TaskResponse(text=scheduled_output, media_paths=list(self._collected_media))
+                return TaskResponse(
+                    text=scheduled_output, media_paths=list(self._collected_media)
+                )
 
             response = await self._agent(msg)
             text = self._extract_text(response)
             if text:
                 return TaskResponse(text=text, media_paths=list(self._collected_media))
 
-            print(f"Debug: Response content: {response.content}")
+            logger.debug("Response content: %s", response.content)
             return TaskResponse(
                 text="任务已处理，但没有生成文本回复。",
                 media_paths=list(self._collected_media),
             )
         except Exception as e:
-            print(f"Error processing task: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logger.error("Error processing task: %s", e, exc_info=True)
             return TaskResponse(text=f"处理任务时出错：{e}")
 
     def reset(self) -> None:
@@ -471,6 +457,8 @@ class OrchestratorAgent:
                 agent.memory.clear()
         if hasattr(self._plan_notebook, "reset"):
             self._plan_notebook.reset()
+        elif hasattr(self._plan_notebook, "clear"):
+            self._plan_notebook.clear()
 
     def get_status(self) -> dict[str, Any]:
         return {
