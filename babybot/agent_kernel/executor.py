@@ -73,6 +73,8 @@ class SingleAgentExecutor:
                     else:
                         result = await registered.tool.invoke(tool_call.arguments, tool_context)
                         tool_output = result.content if result.ok else f"Tool error: {result.error}"
+                    if heartbeat is not None:
+                        heartbeat.beat()
                     messages.append(
                         ModelMessage(
                             role="tool",
