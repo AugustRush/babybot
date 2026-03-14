@@ -917,7 +917,10 @@ class FeishuChannel(BaseChannel):
 
         # Send text content with smart formatting
         if not text or not text.strip():
-            return
+            if not media_paths:
+                text = "任务已处理，但没有生成可发送内容。"
+            else:
+                return
 
         fmt = self._detect_msg_format(text)
 

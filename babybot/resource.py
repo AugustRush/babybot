@@ -1,70 +1,144 @@
-"""Resource manager based on AgentScope Toolkit."""
+"""Lightweight resource manager based on the in-repo kernel."""
+
+from __future__ import annotations
 
 import asyncio
 import contextvars
-import inspect
 import importlib
 import importlib.util
+import inspect
 import json
 import logging
 import os
 import re
-import sys
 import shlex
+import sys
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from agentscope.tool import (
-    Toolkit,
-    ToolResponse,
-    execute_python_code,
-    execute_shell_command,
-    view_text_file,
-    write_text_file,
-    insert_text_file,
+from .agent_kernel import (
+    ExecutionContext,
+    SkillPack,
+    register_mcp_tools,
+    TaskContract,
+    ToolLease,
+    ToolRegistry,
+    ToolResult,
 )
-from agentscope.mcp import HttpStatelessClient, StdIOStatefulClient
-from agentscope.message import Msg
-
 from .config import Config
+from .mcp_runtime import (
+    BaseMCPRuntimeClient,
+    HttpMCPRuntimeClient,
+    StdioMCPRuntimeClient,
+    close_clients_best_effort,
+)
+from .model_gateway import OpenAICompatibleGateway
+from .worker import create_worker_executor
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .channels.tools import ChannelTools, ChannelToolContext
+    from .heartbeat import Heartbeat
 
 
-class WorkerFinalOutput(BaseModel):
-    """Structured final output for one subagent task."""
+@dataclass
+class ToolGroup:
+    name: str
+    description: str
+    notes: str = ""
+    active: bool = False
 
-    status: Literal["done", "failed"] = "done"
-    answer: str = ""
-    evidence: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-    media_paths: list[str] = Field(default_factory=list)
+
+@dataclass
+class LoadedSkill:
+    """Resolved skill metadata for runtime routing."""
+
+    name: str
+    description: str
+    directory: str
+    prompt: str = ""
+    keywords: tuple[str, ...] = ()
+    phrases: tuple[str, ...] = ()
+    lease: ToolLease = ToolLease()
+    source: str = "auto"
+    active: bool = True
+    tool_group: str = ""
+    tools: tuple[str, ...] = ()
+
+
+class SkillSelection(BaseModel):
+    skills: list[str] = Field(default_factory=list)
+
+
+class CallableTool:
+    """Wrap a python callable into kernel Tool protocol."""
+
+    def __init__(
+        self,
+        func: Any,
+        name: str,
+        description: str,
+        schema: dict[str, Any],
+        preset_kwargs: dict[str, Any] | None = None,
+    ):
+        self._func = func
+        self._name = name
+        self._description = description
+        self._schema = schema
+        self._preset_kwargs = dict(preset_kwargs or {})
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return self._description
+
+    @property
+    def schema(self) -> dict[str, Any]:
+        return self._schema
+
+    async def invoke(self, args: dict[str, Any], context: Any) -> ToolResult:
+        try:
+            kwargs = dict(self._preset_kwargs)
+            kwargs.update(args or {})
+            if inspect.iscoroutinefunction(self._func):
+                value = await self._func(**kwargs)
+            else:
+                # Run sync callables in a thread to avoid blocking the loop.
+                loop = asyncio.get_running_loop()
+                value = await loop.run_in_executor(None, lambda: self._func(**kwargs))
+            return ToolResult(ok=True, content=self._normalize_result(value))
+        except Exception as exc:
+            return ToolResult(ok=False, error=str(exc))
+
+    @staticmethod
+    def _normalize_result(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        return str(value)
 
 
 class ResourceManager:
-    """Centralized resource manager using Toolkit.
-
-    This is a singleton that manages:
-    - Tool functions and tool groups
-    - MCP clients and their tools
-    - Agent skills
-
-    Configuration is loaded from config.json
-    """
+    """Centralized resource manager without external agent frameworks."""
 
     _instance: "ResourceManager | None" = None
     _initialized: bool = False
     _lock = threading.Lock()
     _orchestration_tools = {"create_worker", "dispatch_workers"}
-    _framework_internal_tools = {"reset_equipped_tools"}
     _MEDIA_PATH_RE = re.compile(
-        r"(?:^|[\s'\"(])((?:/~|[~/])?[\w./]+(?:\.(?:png|jpg|jpeg|gif|bmp|webp|ico|tiff|tif|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|md|json|yaml|yml|py|js|ts|html|css|svg|mp4|mov|avi|mp3|wav|opus)))"
+        r"(?:^|[\s'\"(])((?:/~|[~/])?[\w./]+(?:\.(?:png|jpg|jpeg|gif|bmp|webp|pdf|txt|md|json|yaml|yml|csv|xlsx|pptx|docx|mp4|mp3|wav)))"
     )
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "ResourceManager":
@@ -77,95 +151,110 @@ class ResourceManager:
     def __init__(self, config: Config | None = None):
         if ResourceManager._initialized:
             return
-
         self.config = config or Config()
-        self.toolkit = Toolkit()
-        self.mcp_clients: dict[str, Any] = {}
+        self.registry = ToolRegistry()
+        self.groups: dict[str, ToolGroup] = {}
+        self.mcp_clients: dict[str, BaseMCPRuntimeClient] = {}
         self.channel_tools: dict[str, ChannelTools] = {}
+        self.skills: dict[str, LoadedSkill] = {}
+        self._gateway: OpenAICompatibleGateway | None = None
+        self._skill_route_cache: dict[str, list[SkillPack]] = {}
         self._active_write_root: contextvars.ContextVar[str] = contextvars.ContextVar(
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
         )
 
-        # Load configuration from config.json
         self._load_config()
         self._register_builtin_tools()
-
         ResourceManager._initialized = True
 
-    def _register_builtin_tools(self) -> None:
-        """Register built-in tools that must always be available."""
-        self.toolkit.register_tool_function(
-            self.create_worker_tool(),
-            group_name="basic",
-            namesake_strategy="skip",
-        )
-        self.toolkit.register_tool_function(
-            self.dispatch_workers_tool(),
-            group_name="basic",
-            namesake_strategy="skip",
-        )
-        self.toolkit.register_tool_function(
-            self._workspace_execute_python_code,
-            group_name="code",
-            func_name="execute_python_code",
-            namesake_strategy="skip",
-        )
-        self.toolkit.register_tool_function(
-            self._workspace_execute_shell_command,
-            group_name="code",
-            func_name="execute_shell_command",
-            namesake_strategy="skip",
-        )
-        self.toolkit.register_tool_function(
-            self._workspace_view_text_file,
-            group_name="code",
-            func_name="view_text_file",
-            namesake_strategy="skip",
-        )
-        self.toolkit.register_tool_function(
-            self._workspace_write_text_file,
-            group_name="code",
-            func_name="write_text_file",
-            namesake_strategy="skip",
-        )
-        self.toolkit.register_tool_function(
-            self._workspace_insert_text_file,
-            group_name="code",
-            func_name="insert_text_file",
-            namesake_strategy="skip",
-        )
-
     async def initialize_async(self) -> None:
-        """Asynchronously initialize MCP servers."""
+        """MCP initialization hook."""
         mcp_servers = {
             k: v
             for k, v in self.config.get_mcp_servers().items()
             if not k.startswith("_")
         }
-        if mcp_servers:
-            await self._register_mcp_servers(mcp_servers)
+        if not mcp_servers:
+            return None
+        await self._register_mcp_servers(mcp_servers)
+        return None
+
+    async def _register_mcp_servers(self, mcp_servers: dict[str, dict]) -> None:
+        for name, server_conf in mcp_servers.items():
+            try:
+                mcp_type = server_conf.get("type", "http")
+                group_name = server_conf.get("group_name", name)
+                if mcp_type == "stdio":
+                    await self.register_mcp_stdio(
+                        name=name,
+                        command=server_conf["command"],
+                        args=server_conf.get("args", []),
+                        group_name=group_name,
+                    )
+                else:
+                    transport = server_conf.get("transport", "streamable_http")
+                    await self.register_mcp(
+                        name=name,
+                        url=server_conf["url"],
+                        transport=transport,
+                        group_name=group_name,
+                    )
+                if server_conf.get("active", False):
+                    self.activate_groups([group_name])
+            except Exception as exc:
+                logger.warning("Failed to register MCP server %s: %s", name, exc)
+
+    async def register_mcp(
+        self,
+        name: str,
+        url: str,
+        transport: str = "streamable_http",
+        group_name: str = "mcp",
+    ) -> None:
+        if transport not in {"streamable_http", "http"}:
+            logger.warning(
+                "MCP transport '%s' is not supported yet for '%s'.",
+                transport,
+                name,
+            )
+            return
+        client = HttpMCPRuntimeClient(url=url)
+        await client.connect()
+        self.mcp_clients[name] = client
+        if group_name not in self.groups:
+            self.groups[group_name] = ToolGroup(
+                name=group_name,
+                description=f"MCP tools from {name}",
+                active=False,
+            )
+        await register_mcp_tools(self.registry, client, group=group_name)
+
+    async def register_mcp_stdio(
+        self,
+        name: str,
+        command: str,
+        args: list[str],
+        group_name: str = "mcp",
+    ) -> None:
+        client = StdioMCPRuntimeClient(command=command, args=args)
+        await client.connect()
+        self.mcp_clients[name] = client
+        if group_name not in self.groups:
+            self.groups[group_name] = ToolGroup(
+                name=group_name,
+                description=f"MCP tools from {name}",
+                active=False,
+            )
+        await register_mcp_tools(self.registry, client, group=group_name)
 
     def _load_config(self) -> None:
-        """Load configuration from Config object."""
-        # 1. Setup tool groups first (filter out comment keys)
         tool_groups = {
             k: v
             for k, v in self.config.get_tool_groups().items()
             if not k.startswith("_")
         }
         self._setup_tool_groups(tool_groups)
-
-        # 2. Register agent skills (filter out comment keys)
-        agent_skills = {
-            k: v
-            for k, v in self.config.get_agent_skills().items()
-            if not k.startswith("_")
-        }
-        if agent_skills:
-            self._register_agent_skills(agent_skills)
-
-        # 3. Register custom tools (filter out comment keys)
         custom_tools = {
             k: v
             for k, v in self.config.get_custom_tools().items()
@@ -173,250 +262,782 @@ class ResourceManager:
         }
         if custom_tools:
             self._register_custom_tools(custom_tools)
-
-        # 4. Auto-discover custom tools from workspace/tools
         self._discover_workspace_tools()
-
-        # 5. Auto-discover skills from project skills/ and workspace/skills
+        self._register_configured_skills(
+            {
+                k: v
+                for k, v in self.config.get_agent_skills().items()
+                if not k.startswith("_")
+            }
+        )
         self._discover_skills()
 
-    def _setup_tool_groups(self, tool_groups_conf: dict) -> None:
-        """Setup tool groups from configuration."""
-        # Start with empty default groups
-        all_groups = {
-            "search": {
-                "description": "Search and information retrieval tools",
-                "notes": "Use these tools for web search and information gathering.",
-                "active": False,
-            },
-            "code": {
-                "description": "Code execution and analysis tools",
-                "notes": "Use these tools for code execution and debugging.",
-                "active": True,
-            },
-            "analysis": {
-                "description": "Data analysis and visualization tools",
-                "notes": "Use these tools for data analysis tasks.",
-                "active": False,
-            },
-            "browser": {
-                "description": "Browser automation tools",
-                "notes": "Use Playwright for web interaction and automation.",
-                "active": False,
-            },
-        }
-
-        # Merge with config
-        for group_name, user_conf in tool_groups_conf.items():
-            if group_name in all_groups:
-                # Update existing group
-                all_groups[group_name]["active"] = user_conf.get(
-                    "active", all_groups[group_name]["active"]
-                )
-                all_groups[group_name]["description"] = user_conf.get(
-                    "description", all_groups[group_name]["description"]
-                )
-                all_groups[group_name]["notes"] = user_conf.get(
-                    "notes", all_groups[group_name]["notes"]
-                )
-            else:
-                # Add new group from config
-                all_groups[group_name] = {
-                    "description": user_conf.get("description", f"{group_name} tools"),
-                    "notes": user_conf.get("notes", ""),
-                    "active": user_conf.get("active", False),
-                }
-
-        # Create all tool groups
-        for group_name, group_conf in all_groups.items():
-            self.toolkit.create_tool_group(
-                group_name=group_name,
-                description=group_conf["description"],
-                active=group_conf["active"],
-                notes=group_conf["notes"],
-            )
-            logger.info(
-                "Tool group '%s' created (active=%s)", group_name, group_conf["active"]
-            )
-
-    async def _register_mcp_servers(self, mcp_servers: dict[str, dict]) -> None:
-        """Register MCP servers from configuration."""
-        for name, server_conf in mcp_servers.items():
+    def _register_configured_skills(self, configured: dict[str, dict]) -> None:
+        for name, conf in configured.items():
             try:
-                mcp_type = server_conf.get("type", "http")
+                directory = conf.get("directory", "")
+                if not directory:
+                    continue
+                skill_dir = Path(self.config.resolve_workspace_path(directory))
+                if not skill_dir.exists() or not skill_dir.is_dir():
+                    logger.warning("Configured skill not found: %s", skill_dir)
+                    continue
+                meta, prompt = self._read_skill_document(skill_dir)
+                resolved_name = meta.get("name", name)
+                tool_group, tool_names = self._register_skill_tools(
+                    skill_name=resolved_name,
+                    skill_dir=skill_dir,
+                )
+                description = conf.get("description") or meta.get("description", "")
+                keywords = self._normalize_keywords(
+                    conf.get("keywords"),
+                    fallback=(description, name),
+                )
+                phrases = self._normalize_phrases(
+                    conf.get("keywords"),
+                    fallback=(description, name),
+                )
+                self._upsert_skill(
+                    LoadedSkill(
+                        name=meta.get("name", name),
+                        description=description or f"Skill: {name}",
+                        directory=str(skill_dir.resolve()),
+                        prompt=prompt,
+                        keywords=keywords,
+                        phrases=phrases,
+                        lease=ToolLease(
+                            include_groups=tuple(
+                                set(conf.get("include_groups") or ()) | ({tool_group} if tool_group else set())
+                            ),
+                            include_tools=tuple(conf.get("include_tools") or ()),
+                            exclude_tools=tuple(conf.get("exclude_tools") or ()),
+                        ),
+                        source="config",
+                        active=bool(conf.get("active", True)),
+                        tool_group=tool_group,
+                        tools=tool_names,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to load configured skill %s: %s", name, exc)
 
-                if mcp_type == "stdio":
-                    # StdIO MCP server (e.g., Playwright)
-                    await self.register_mcp_stdio(
-                        name=name,
-                        command=server_conf["command"],
-                        args=server_conf.get("args", []),
-                        group_name=server_conf.get("group_name", name),
+    def _discover_skills(self) -> None:
+        roots = [self.config.builtin_skills_dir, self.config.workspace_skills_dir]
+        for root in roots:
+            if not root.exists() or not root.is_dir():
+                continue
+            for child in sorted(root.iterdir()):
+                if not child.is_dir():
+                    continue
+                if not (child / "SKILL.md").exists():
+                    continue
+                try:
+                    meta, prompt = self._read_skill_document(child)
+                    name = meta.get("name", child.name)
+                    tool_group, tool_names = self._register_skill_tools(
+                        skill_name=name,
+                        skill_dir=child,
                     )
-                else:
-                    # HTTP MCP server
-                    await self.register_mcp(
-                        name=name,
-                        url=server_conf["url"],
-                        transport=server_conf.get("transport", "streamable_http"),
-                        group_name=server_conf.get("group_name", name),
+                    key = name.strip().lower()
+                    if key in self.skills:
+                        continue
+                    description = meta.get("description", f"Skill: {name}")
+                    keywords = self._normalize_keywords(
+                        None,
+                        fallback=(description, name, prompt[:400]),
                     )
+                    phrases = self._normalize_phrases(
+                        None,
+                        fallback=(description, name),
+                    )
+                    self._upsert_skill(
+                        LoadedSkill(
+                            name=name,
+                            description=description,
+                            directory=str(child.resolve()),
+                            prompt=prompt,
+                            keywords=keywords,
+                            phrases=phrases,
+                            source="auto",
+                            active=True,
+                            lease=ToolLease(
+                                include_groups=(tool_group,) if tool_group else (),
+                            ),
+                            tool_group=tool_group,
+                            tools=tool_names,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to auto-load skill %s: %s", child, exc)
 
-                # Activate if specified
-                if server_conf.get("active", False):
-                    group_name = server_conf.get("group_name", name)
-                    self.activate_groups([group_name])
-                    logger.info(
-                        "MCP server '%s' registered and tool group '%s' activated",
-                        name,
-                        group_name,
-                    )
-            except Exception as e:
-                logger.warning("Failed to register MCP server %s: %s", name, e)
+    def _upsert_skill(self, skill: LoadedSkill) -> None:
+        self.skills[skill.name.strip().lower()] = skill
+
+    def _register_skill_tools(
+        self,
+        skill_name: str,
+        skill_dir: Path,
+    ) -> tuple[str, tuple[str, ...]]:
+        """Register callable tools from `<skill_dir>/scripts/*.py`.
+
+        Returns `(group_name, tool_names)`.
+        """
+        scripts_dir = skill_dir / "scripts"
+        if not scripts_dir.exists() or not scripts_dir.is_dir():
+            return "", ()
+        slug = re.sub(r"[^a-zA-Z0-9_]+", "_", skill_name.strip().lower()).strip("_")
+        if not slug:
+            slug = "skill"
+        group_name = f"skill_{slug}"
+        if group_name not in self.groups:
+            self.groups[group_name] = ToolGroup(
+                name=group_name,
+                description=f"Tools from skill {skill_name}",
+                notes=f"Skill tools for {skill_name}",
+                active=False,
+            )
+        tool_names: list[str] = []
+        for py_file in sorted(scripts_dir.rglob("*.py")):
+            if py_file.name.startswith("_"):
+                continue
+            try:
+                module = self._load_tool_module(str(py_file))
+            except Exception as exc:
+                logger.warning("Failed to import skill script %s: %s", py_file, exc)
+                continue
+            for func_name, func in inspect.getmembers(module, inspect.isfunction):
+                if func.__module__ != module.__name__ or func_name.startswith("_"):
+                    continue
+                tool_name = f"{slug}__{func_name}"
+                self.register_tool(
+                    func=func,
+                    group_name=group_name,
+                    func_name=tool_name,
+                )
+                tool_names.append(tool_name)
+        return group_name, tuple(sorted(set(tool_names)))
+
+    @staticmethod
+    def _normalize_keywords(
+        raw_keywords: Any,
+        fallback: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        values: list[str] = []
+        if isinstance(raw_keywords, (list, tuple)):
+            values.extend(str(x) for x in raw_keywords if str(x).strip())
+        elif isinstance(raw_keywords, str) and raw_keywords.strip():
+            values.extend([w for w in re.split(r"[,\n]+", raw_keywords) if w.strip()])
+        values.extend(str(item) for item in fallback if str(item).strip())
+        terms: set[str] = set()
+        for value in values:
+            terms.update(ResourceManager._tokenize(str(value)))
+        return tuple(sorted(terms))
+
+    @staticmethod
+    def _normalize_phrases(
+        raw_keywords: Any,
+        fallback: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        phrases: list[str] = []
+        if isinstance(raw_keywords, (list, tuple)):
+            phrases.extend(str(x).strip().lower() for x in raw_keywords if str(x).strip())
+        elif isinstance(raw_keywords, str) and raw_keywords.strip():
+            phrases.extend(
+                p.strip().lower()
+                for p in re.split(r"[,\n]+", raw_keywords)
+                if p.strip()
+            )
+        phrases.extend(str(x).strip().lower() for x in fallback if str(x).strip())
+        normalized = []
+        for phrase in phrases:
+            phrase = re.sub(r"\s+", " ", phrase).strip()
+            if phrase and len(phrase) >= 2:
+                normalized.append(phrase)
+        return tuple(sorted(set(normalized)))
+
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        """Language-agnostic tokenizer for skill retrieval.
+
+        - English/latin: lowercase words and 3-gram word chunks for fuzzy matching.
+        - CJK: contiguous Han segments + bi-grams.
+        """
+        text = (text or "").lower()
+        tokens: set[str] = set()
+        # Latin words
+        words = re.findall(r"[a-z0-9_]{2,}", text)
+        tokens.update(words)
+        for word in words:
+            if len(word) >= 5:
+                for i in range(0, len(word) - 2):
+                    tokens.add(word[i : i + 3])
+        # CJK segments + bi-grams
+        for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            tokens.add(seg)
+            if len(seg) >= 2:
+                for i in range(0, len(seg) - 1):
+                    tokens.add(seg[i : i + 2])
+        return {t for t in tokens if t}
+
+    @staticmethod
+    def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+        if not text.startswith("---\n"):
+            return {}, text.strip()
+        end = text.find("\n---", 4)
+        if end == -1:
+            return {}, text.strip()
+        header = text[4:end].strip()
+        body = text[end + 4 :].strip()
+        meta: dict[str, str] = {}
+        for line in header.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            meta[key.strip()] = value.strip().strip("'\"")
+        return meta, body
+
+    @classmethod
+    def _read_skill_document(cls, skill_dir: Path) -> tuple[dict[str, str], str]:
+        skill_md = skill_dir / "SKILL.md"
+        text = skill_md.read_text(encoding="utf-8", errors="ignore")
+        meta, body = cls._parse_frontmatter(text)
+        prompt = body.strip()
+        if len(prompt) > 4000:
+            prompt = prompt[:4000]
+        return meta, prompt
+
+    def _setup_tool_groups(self, user_groups: dict[str, dict]) -> None:
+        defaults = {
+            "basic": ToolGroup("basic", "Core orchestration tools", active=True),
+            "code": ToolGroup(
+                "code",
+                "Code execution and file operations",
+                active=True,
+                notes="Use these tools for coding and filesystem tasks.",
+            ),
+            "search": ToolGroup("search", "Search tools", active=False),
+            "analysis": ToolGroup("analysis", "Analysis tools", active=False),
+            "browser": ToolGroup("browser", "Browser automation tools", active=False),
+        }
+        self.groups = defaults
+        for name, conf in user_groups.items():
+            old = self.groups.get(name)
+            self.groups[name] = ToolGroup(
+                name=name,
+                description=conf.get("description", old.description if old else f"{name} tools"),
+                notes=conf.get("notes", old.notes if old else ""),
+                active=conf.get("active", old.active if old else False),
+            )
+
+    def _register_builtin_tools(self) -> None:
+        self.register_tool(self.create_worker_tool(), group_name="basic")
+        self.register_tool(self.dispatch_workers_tool(), group_name="basic")
+        self.register_tool(self._workspace_execute_python_code, group_name="code")
+        self.register_tool(self._workspace_execute_shell_command, group_name="code")
+        self.register_tool(self._workspace_view_text_file, group_name="code")
+        self.register_tool(self._workspace_write_text_file, group_name="code")
+        self.register_tool(self._workspace_insert_text_file, group_name="code")
+
+    def register_tool(
+        self,
+        func: Any,
+        group_name: str = "basic",
+        preset_kwargs: dict[str, Any] | None = None,
+        func_name: str | None = None,
+    ) -> None:
+        if group_name not in self.groups:
+            self.groups[group_name] = ToolGroup(
+                name=group_name,
+                description=f"{group_name} tools",
+                active=False,
+            )
+        name = func_name or getattr(func, "__name__", "tool")
+        self.registry.register(
+            CallableTool(
+                func=func,
+                name=name,
+                description=(inspect.getdoc(func) or "").splitlines()[0] if inspect.getdoc(func) else name,
+                schema=self._json_schema_for_callable(func),
+                preset_kwargs=preset_kwargs,
+            ),
+            group=group_name,
+        )
 
     def _register_custom_tools(self, custom_tools: dict[str, dict]) -> None:
-        """Register custom tools from configuration."""
         self._ensure_workspace_on_pythonpath()
         for name, tool_conf in custom_tools.items():
             try:
-                # Load tool function from module
-                module_name = tool_conf["module"]
+                module = self._load_tool_module(tool_conf["module"])
                 func_name = tool_conf.get("function", name)
-
-                module = self._load_tool_module(module_name)
-                tool_func = getattr(module, func_name, None)
-
-                if tool_func:
-                    # Process preset kwargs (substitute env variables)
-                    preset_kwargs = tool_conf.get("preset_kwargs", {})
-                    for key, value in preset_kwargs.items():
-                        if (
-                            isinstance(value, str)
-                            and value.startswith("${")
-                            and value.endswith("}")
-                        ):
-                            env_var = value[2:-1]
-                            preset_kwargs[key] = os.getenv(env_var, value)
-
-                    self.register_tool(
-                        func=tool_func,
-                        group_name=tool_conf.get("group_name", "basic"),
-                        preset_kwargs=preset_kwargs,
-                    )
-            except Exception as e:
-                logger.warning("Failed to register custom tool %s: %s", name, e)
-
-    def _register_agent_skills(self, agent_skills: dict[str, dict]) -> None:
-        """Register agent skills from configuration."""
-        for name, skill_conf in agent_skills.items():
-            try:
-                raw = skill_conf["directory"]
-                workspace_skill = Path(self.config.resolve_workspace_path(raw))
-                skill_dir = str(workspace_skill)
-                self.toolkit.register_agent_skill(
-                    skill_dir,
+                func = getattr(module, func_name, None)
+                if func is None:
+                    continue
+                preset_kwargs = dict(tool_conf.get("preset_kwargs", {}))
+                for key, value in preset_kwargs.items():
+                    if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+                        preset_kwargs[key] = os.getenv(value[2:-1], value)
+                self.register_tool(
+                    func=func,
+                    group_name=tool_conf.get("group_name", "basic"),
+                    preset_kwargs=preset_kwargs,
+                    func_name=func_name,
                 )
-            except Exception as e:
-                logger.warning("Failed to register agent skill %s: %s", name, e)
-
-    def _discover_skills(self) -> None:
-        """Auto-load skills from built-in and workspace directories."""
-        candidates = [
-            self.config.builtin_skills_dir,
-            self.config.workspace_skills_dir,
-        ]
-        seen: set[str] = set()
-        for root in candidates:
-            if not root.exists() or not root.is_dir():
-                continue
-            for skill_dir in sorted(root.iterdir()):
-                if not skill_dir.is_dir():
-                    continue
-                skill_md = skill_dir / "SKILL.md"
-                if not skill_md.exists():
-                    continue
-                key = str(skill_dir.resolve())
-                if key in seen:
-                    continue
-                seen.add(key)
-                try:
-                    self.toolkit.register_agent_skill(key)
-                except Exception as e:
-                    print(
-                        f"Warning: Failed to auto-register skill {skill_dir.name}: {e}"
-                    )
+            except Exception as exc:
+                logger.warning("Failed to register custom tool %s: %s", name, exc)
 
     def _discover_workspace_tools(self) -> None:
-        """Auto-load custom tools from workspace tools directory.
-
-        Convention:
-        - Place `.py` files under `workspace/tools/`
-        - Group name defaults to the first subdirectory under `tools/`
-        """
-        tools_root = self.config.workspace_dir / "tools"
-        if not tools_root.exists() or not tools_root.is_dir():
+        tools_root = self.config.workspace_tools_dir
+        if not tools_root.exists():
             return
-
         self._ensure_workspace_on_pythonpath()
         for py_file in sorted(tools_root.rglob("*.py")):
             if py_file.name.startswith("_"):
                 continue
             rel = py_file.relative_to(tools_root)
-            parts = rel.parts
-            group_name = parts[0] if len(parts) > 1 else "basic"
-            if group_name != "basic" and group_name not in self.toolkit.groups:
-                self.toolkit.create_tool_group(
-                    group_name=group_name,
-                    description=f"{group_name} tools",
-                    active=False,
-                    notes="Auto-discovered from workspace/tools",
-                )
+            group_name = rel.parts[0] if len(rel.parts) > 1 else "basic"
             try:
                 module = self._load_tool_module(str(Path("tools") / rel))
                 for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                    if func.__module__ != module.__name__:
+                    if func.__module__ != module.__name__ or func_name.startswith("_"):
                         continue
-                    if func_name.startswith("_"):
-                        continue
-                    self.register_tool(
-                        func=func,
-                        group_name=group_name,
-                    )
-            except Exception as e:
-                logger.warning("Failed to auto-register tools from %s: %s", py_file, e)
+                    self.register_tool(func, group_name=group_name, func_name=func_name)
+            except Exception as exc:
+                logger.warning("Failed to load tools from %s: %s", py_file, exc)
 
     def _ensure_workspace_on_pythonpath(self) -> None:
-        """Ensure workspace root is importable for custom tools."""
-        workspace = str(self.config.workspace_dir)
+        workspace = str(self.config.workspace_dir.resolve())
         if workspace not in sys.path:
             sys.path.insert(0, workspace)
 
     def _load_tool_module(self, module_name: str) -> Any:
-        """Load tool module by python module name or workspace-relative file path."""
         try:
             return importlib.import_module(module_name)
         except ModuleNotFoundError:
             pass
+        resolved = self.config.resolve_workspace_path(module_name)
+        spec = importlib.util.spec_from_file_location(
+            f"babybot_custom_{abs(hash(resolved))}",
+            resolved,
+        )
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        raise ModuleNotFoundError(f"Cannot import custom module: {module_name}")
 
-        module_path = module_name
-        if module_path.endswith(".py") or "/" in module_path or "\\" in module_path:
-            resolved = self.config.resolve_workspace_path(module_path)
-            spec = importlib.util.spec_from_file_location(
-                f"babybot_custom_{abs(hash(resolved))}",
-                resolved,
+    def activate_groups(self, group_names: list[str]) -> str:
+        for name in group_names:
+            if name in self.groups:
+                self.groups[name].active = True
+        return self.get_tool_prompt()
+
+    def deactivate_groups(self, group_names: list[str]) -> None:
+        for name in group_names:
+            if name in self.groups:
+                self.groups[name].active = False
+
+    def get_tool_prompt(self) -> str:
+        notes = [g.notes for g in self.groups.values() if g.active and g.notes]
+        return "\n\n".join(notes)
+
+    def get_available_tools(self) -> list[dict]:
+        active_groups = [name for name, g in self.groups.items() if g.active]
+        lease = ToolLease(include_groups=tuple(active_groups))
+        return list(self.registry.tool_schemas(lease))
+
+    def search_resources(self, query: str | None = None) -> dict[str, Any]:
+        keyword = (query or "").strip().lower()
+        groups = [
+            {
+                "name": g.name,
+                "active": g.active,
+                "description": g.description,
+            }
+            for g in self.groups.values()
+            if not keyword or keyword in g.name.lower() or keyword in g.description.lower()
+        ]
+        tools = []
+        for registered in self.registry.list():
+            if keyword and keyword not in registered.tool.name.lower():
+                continue
+            tools.append({"name": registered.tool.name, "group": registered.group})
+        skills = []
+        for skill in self.skills.values():
+            if keyword and keyword not in skill.name.lower() and keyword not in skill.description.lower():
+                continue
+            skills.append(
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "source": skill.source,
+                    "active": skill.active,
+                }
             )
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                return module
+        return {
+            "query": query or "",
+            "groups": groups,
+            "tools": tools,
+            "mcp_servers": list(self.mcp_clients.keys()),
+            "skills": skills,
+        }
 
-        raise ModuleNotFoundError(
-            f"Cannot import custom tool module '{module_name}'. "
-            f"Checked python path and workspace path '{self.config.workspace_dir}'."
+    def get_channel_prompts(self) -> str:
+        prompts: list[str] = []
+        for tools in self.channel_tools.values():
+            prompt = tools.get_prompt()
+            if prompt:
+                prompts.append(prompt)
+        return "\n\n".join(prompts)
+
+    def register_channel_tools(self, channel_tools: "ChannelTools") -> None:
+        group_name = channel_tools.get_tool_group_name()
+        if group_name not in self.groups:
+            self.groups[group_name] = ToolGroup(
+                name=group_name,
+                description=channel_tools.get_tool_group_description(),
+                notes=channel_tools.get_prompt(),
+                active=True,
+            )
+        for func in channel_tools.get_tools():
+            self.register_tool(func, group_name=group_name)
+        self.channel_tools[channel_tools.channel_name] = channel_tools
+
+    def set_channel_context(self, ctx: "ChannelToolContext | None") -> None:
+        from .channels.tools import ChannelToolContext
+
+        ChannelToolContext.set_current(ctx)
+
+    async def run_subagent_task(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        heartbeat: "Heartbeat | None" = None,
+    ) -> tuple[str, list[str]]:
+        write_root = self._infer_write_root(task_description)
+        token = self._active_write_root.set(str(write_root))
+        started = time.perf_counter()
+        try:
+            merged_lease = self._build_task_lease(lease or {})
+            skill_packs = await self._select_skill_packs(task_description)
+            for skill in skill_packs:
+                merged_lease = ToolLease(
+                    include_groups=tuple(
+                        sorted(
+                            set(merged_lease.include_groups) | set(skill.tool_lease.include_groups)
+                        )
+                    ),
+                    include_tools=tuple(
+                        sorted(
+                            set(merged_lease.include_tools) | set(skill.tool_lease.include_tools)
+                        )
+                    ),
+                    exclude_tools=tuple(
+                        sorted(
+                            set(merged_lease.exclude_tools) | set(skill.tool_lease.exclude_tools)
+                        )
+                    ),
+                )
+            tools_text = ", ".join(
+                sorted(t.tool.name for t in self.registry.list(merged_lease))
+            ) or "无"
+            logger.info(
+                "Run subagent agent=%s write_root=%s selected_skills=%s include_groups=%s include_tools=%s exclude_tools=%s",
+                agent_name,
+                write_root,
+                [s.name for s in skill_packs],
+                list(merged_lease.include_groups),
+                list(merged_lease.include_tools),
+                list(merged_lease.exclude_tools),
+            )
+            sys_prompt = self._build_worker_sys_prompt(
+                agent_name=agent_name,
+                task_description=task_description,
+                tools_text=tools_text,
+                selected_skill_packs=skill_packs,
+            )
+            # Strip tool_leases from skill packs before passing to executor:
+            # run_subagent_task already merged skill groups into merged_lease
+            # via UNION.  If we pass the original skill packs, the executor's
+            # merge_leases() would INTERSECT them again, dropping basic/code/
+            # channel groups and potentially leaving tools=[].
+            executor_skills = [
+                SkillPack(name=sp.name, system_prompt=sp.system_prompt)
+                for sp in skill_packs
+            ]
+            executor = create_worker_executor(
+                config=self.config,
+                tools=self.registry,
+                sys_prompt=sys_prompt,
+                skill_packs=executor_skills,
+            )
+            result = await executor.execute(
+                TaskContract(
+                    task_id=agent_name,
+                    description=task_description,
+                    lease=merged_lease,
+                    retries=0,
+                ),
+                ExecutionContext(
+                    session_id=agent_name,
+                    state={"heartbeat": heartbeat} if heartbeat else {},
+                ),
+            )
+            text = result.output if result.status == "succeeded" else result.error
+            if result.status != "succeeded":
+                logger.error(
+                    "Subagent failed agent=%s status=%s error=%s metadata=%s",
+                    agent_name,
+                    result.status,
+                    result.error,
+                    (result.metadata or {}),
+                )
+            logger.info(
+                "Run subagent done agent=%s status=%s elapsed=%.2fs output_len=%d",
+                agent_name,
+                result.status,
+                time.perf_counter() - started,
+                len(text or ""),
+            )
+            return text.strip() or "任务完成但没有文本输出。", self._extract_media_from_text(text)
+        except Exception:
+            logger.exception("Run subagent crashed agent=%s", agent_name)
+            raise
+        finally:
+            self._active_write_root.reset(token)
+
+    def _build_task_lease(self, lease: dict[str, Any]) -> ToolLease:
+        include_groups = lease.get("include_groups")
+        if include_groups is None:
+            include_groups = [name for name, group in self.groups.items() if group.active]
+
+        # Validate include_tools against registered tool names.
+        # The LLM planner may hallucinate tool names; drop any that don't exist
+        # so they don't accidentally filter out all real tools.
+        raw_include_tools = lease.get("include_tools") or ()
+        known_tools = set(self.registry._tools.keys())
+        valid_include_tools = [t for t in raw_include_tools if t in known_tools]
+        if raw_include_tools and not valid_include_tools:
+            logger.warning(
+                "Lease include_tools contained no valid names, ignoring: %s",
+                list(raw_include_tools),
+            )
+
+        return ToolLease(
+            include_groups=tuple(include_groups or ()),
+            include_tools=tuple(valid_include_tools),
+            exclude_tools=tuple(lease.get("exclude_tools") or ()),
         )
 
+    def create_worker_tool(self) -> Any:
+        async def create_worker(task_description: str) -> str:
+            text, _ = await self.run_subagent_task(task_description)
+            return text
+
+        return create_worker
+
+    def dispatch_workers_tool(self) -> Any:
+        async def dispatch_workers(
+            tasks: list[str],
+            max_concurrency: int = 3,
+            lease: dict[str, Any] | None = None,
+        ) -> str:
+            normalized = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
+            if not normalized:
+                return "No valid tasks were provided."
+            limit = max(1, min(int(max_concurrency), len(normalized), 8))
+            semaphore = asyncio.Semaphore(limit)
+
+            async def run_one(index: int, task: str) -> dict[str, Any]:
+                async with semaphore:
+                    try:
+                        text, _ = await self.run_subagent_task(
+                            task_description=task,
+                            lease=lease,
+                            agent_name=f"Worker-{index}",
+                        )
+                        return {"index": index, "task": task, "result": text}
+                    except Exception as exc:
+                        return {"index": index, "task": task, "error": str(exc)}
+
+            results = await asyncio.gather(
+                *(run_one(i, task) for i, task in enumerate(normalized, start=1))
+            )
+            return json.dumps(
+                {"max_concurrency": limit, "results": results},
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        return dispatch_workers
+
+    def reset(self) -> None:
+        close_clients_best_effort(self.mcp_clients)
+        self.registry = ToolRegistry()
+        self.groups.clear()
+        self.channel_tools.clear()
+        self.mcp_clients.clear()
+        self.skills.clear()
+        self._gateway = None
+        self._skill_route_cache.clear()
+        self._load_config()
+        self._register_builtin_tools()
+
+    async def _select_skill_packs(self, task_description: str) -> list[SkillPack]:
+        active = [s for s in self.skills.values() if s.active]
+        if not active:
+            return []
+        text = (task_description or "").strip().lower()
+        explicit = []
+        for skill in active:
+            slug = skill.name.lower()
+            if self._is_explicit_skill_mention(text, slug):
+                explicit.append(skill)
+        if explicit:
+            return [
+                SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
+                for s in explicit[:3]
+            ]
+        # Check cache: reuse routing result for identical task descriptions
+        cache_key = task_description.strip()
+        if cache_key in self._skill_route_cache:
+            logger.info("Skill routing cache hit for task: %s", cache_key[:80])
+            return list(self._skill_route_cache[cache_key])
+        semantic = await self._select_skill_packs_semantic(task_description, active)
+        if semantic is None:
+            # Routing failed (timeout/error): fall back to a small active skill set.
+            fallback = sorted(active, key=lambda s: s.name.lower())[:2]
+            logger.warning(
+                "Skill routing unavailable, fallback skills=%s",
+                [s.name for s in fallback],
+            )
+            result = [
+                SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
+                for s in fallback
+            ]
+            self._skill_route_cache[cache_key] = result
+            return result
+        self._skill_route_cache[cache_key] = semantic
+        if semantic:
+            return semantic
+        return []
+
+    @staticmethod
+    def _is_explicit_skill_mention(text: str, skill_name: str) -> bool:
+        if not skill_name:
+            return False
+        if f"${skill_name}" in text:
+            return True
+        # Strict word-boundary match for latin-like skill names to avoid
+        # accidental single-letter substring hits.
+        if re.fullmatch(r"[a-z0-9_-]+", skill_name):
+            if len(skill_name) < 2:
+                return False
+            pattern = rf"(?<![a-z0-9_-]){re.escape(skill_name)}(?![a-z0-9_-])"
+            return re.search(pattern, text) is not None
+        # Non-latin names keep substring match.
+        return skill_name in text
+
+    async def _select_skill_packs_semantic(
+        self,
+        task_description: str,
+        active_skills: list[LoadedSkill],
+    ) -> list[SkillPack] | None:
+        catalog = [
+            {
+                "name": s.name,
+                "description": s.description,
+                "tools": list(s.tools),
+            }
+            for s in active_skills
+        ]
+        try:
+            if self._gateway is None:
+                self._gateway = OpenAICompatibleGateway(self.config)
+            selection = await asyncio.wait_for(
+                self._gateway.complete_structured(
+                    system_prompt=(
+                        "你是技能路由器。根据任务从技能目录选择最相关的 0-3 个技能名。"
+                        "只输出 JSON：{\"skills\": [\"name1\", \"name2\"]}"
+                    ),
+                    user_prompt=(
+                        f"任务：{task_description}\n"
+                        f"技能目录：{json.dumps(catalog, ensure_ascii=False)}"
+                    ),
+                    model_cls=SkillSelection,
+                ),
+                timeout=self.config.system.skill_route_timeout,
+            )
+        except Exception as exc:
+            logger.warning("Skill routing failed: %r", exc)
+            return None
+        if not selection:
+            return []
+        lookup = {s.name.lower(): s for s in active_skills}
+        packs: list[SkillPack] = []
+        for name in selection.skills[:3]:
+            skill = lookup.get((name or "").strip().lower())
+            if not skill:
+                continue
+            packs.append(
+                SkillPack(
+                    name=skill.name,
+                    system_prompt=skill.prompt,
+                    tool_lease=skill.lease,
+                )
+            )
+        return packs
+
+    def _build_worker_sys_prompt(
+        self,
+        agent_name: str,
+        task_description: str,
+        tools_text: str,
+        selected_skill_packs: list[SkillPack],
+    ) -> str:
+        selected_names = ", ".join(skill.name for skill in selected_skill_packs) or "无"
+        skill_catalog = self._format_skill_catalog(max_items=24)
+        lines = [
+            "你是 %s，请完成任务并输出最终答案。" % agent_name,
+            "任务：%s" % task_description,
+            "已激活技能（本次强相关）：%s" % selected_names,
+            "可用技能目录（按需选择）：\n%s" % skill_catalog,
+            "可用工具：%s" % tools_text,
+            "要求：",
+            "1. 当任务需要生成图片、查询信息、发送消息等操作时，必须调用对应工具，不能仅用文字描述。",
+            "2. 禁止编造工具执行结果或虚构文件路径。",
+            "3. 用户询问你能做什么或能力范围时，必须优先介绍可用技能目录与工具能力。",
+            "4. 如需某技能但本次未激活，可在回答中明确指出可切换到该技能处理。",
+        ]
+        return "\n".join(lines)
+
+    def _format_skill_catalog(self, max_items: int = 20) -> str:
+        skills = [s for s in self.skills.values() if s.active]
+        if not skills:
+            return "- 无"
+        lines: list[str] = []
+        for idx, skill in enumerate(sorted(skills, key=lambda s: s.name.lower()), start=1):
+            if idx > max_items:
+                lines.append(f"- ... 还有 {len(skills) - max_items} 个技能")
+                break
+            desc = skill.description.strip() or "无描述"
+            lines.append(f"- {skill.name}: {desc}")
+        return "\n".join(lines)
+
+    async def __aenter__(self) -> "ResourceManager":
+        await self.initialize_async()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.reset()
+
+    @classmethod
+    def get_instance(cls) -> "ResourceManager":
+        if cls._instance is None:
+            raise RuntimeError("ResourceManager not initialized yet")
+        return cls._instance
+
     def _resolve_workspace_file(self, file_path: str) -> tuple[str | None, str | None]:
-        """Resolve file path under active write root and block path traversal."""
         ws = self.config.workspace_dir.resolve()
         active_root = self._get_active_write_root()
         target = Path(file_path).expanduser()
@@ -430,8 +1051,8 @@ class ResourceManager:
             )
         return str(target), None
 
-    def _is_within(self, parent: Path, child: Path) -> bool:
-        """Return True if child is equal to or under parent."""
+    @staticmethod
+    def _is_within(parent: Path, child: Path) -> bool:
         try:
             child.relative_to(parent)
             return True
@@ -439,7 +1060,6 @@ class ResourceManager:
             return False
 
     def _get_active_write_root(self) -> Path:
-        """Get current active write root, always constrained to workspace."""
         ws = self.config.workspace_dir.resolve()
         raw = Path(self._active_write_root.get()).expanduser().resolve()
         if self._is_within(ws, raw):
@@ -447,18 +1067,10 @@ class ResourceManager:
         return ws
 
     def _infer_write_root(self, task_description: str) -> Path:
-        """Infer per-task write root from task text.
-
-        Priority:
-        1. Explicit path under workspace/skills/<skill_name>/...
-        2. Explicit path under workspace
-        3. Workspace root fallback
-        """
         ws = self.config.workspace_dir.resolve()
         ws_skills = (ws / "skills").resolve()
         text = task_description or ""
 
-        # Pattern 1: workspace/skills/<skill_name>
         skill_match = re.search(
             r"workspace/skills/([A-Za-z0-9._-]+)",
             text,
@@ -467,7 +1079,6 @@ class ResourceManager:
         if skill_match:
             return (ws_skills / skill_match.group(1)).resolve()
 
-        # Pattern 2: workspace/... paths
         workspace_match = re.search(
             r"workspace/([A-Za-z0-9._/-]+)",
             text,
@@ -477,588 +1088,200 @@ class ResourceManager:
             candidate = (ws / workspace_match.group(1)).resolve()
             if self._is_within(ws, candidate):
                 return candidate
-
-        # Pattern 3: absolute paths under workspace
-        abs_match = re.search(
-            r"(?<![A-Za-z0-9])(/[A-Za-z0-9._/-]+)",
-            text,
-        )
-        if abs_match:
-            candidate = Path(abs_match.group(1)).resolve()
-            if self._is_within(ws, candidate):
-                if self._is_within(ws_skills, candidate):
-                    parts = candidate.relative_to(ws_skills).parts
-                    if parts:
-                        return (ws_skills / parts[0]).resolve()
-                return candidate
-
         return ws
 
     async def _workspace_execute_python_code(
         self,
         code: str,
-        timeout: float = 300,
+        timeout: float | int | str | None = 300,
         **kwargs: Any,
-    ) -> ToolResponse:
-        """Execute python code in active workspace directory."""
-        ws = self._get_active_write_root()
-        prefix = f"import os\nos.chdir({ws.as_posix()!r})\n"
-        return await execute_python_code(prefix + code, timeout=timeout, **kwargs)
+    ) -> str:
+        ws = str(self._get_active_write_root())
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            f"import os\nos.chdir({ws!r})\n{code}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        timeout_s = self._coerce_timeout(timeout, default=300.0)
+        communicate_coro = proc.communicate()
+        try:
+            if timeout_s and timeout_s > 0:
+                stdout, stderr = await asyncio.wait_for(communicate_coro, timeout=timeout_s)
+            else:
+                stdout, stderr = await communicate_coro
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
+            return f"Timeout: python execution exceeded {timeout_s}s."
+        except Exception:
+            try:
+                communicate_coro.close()
+            except Exception:
+                pass
+            raise
+        out = (stdout or b"").decode("utf-8", errors="ignore")
+        err = (stderr or b"").decode("utf-8", errors="ignore")
+        text = out.strip()
+        if err.strip():
+            text = f"{text}\n{err.strip()}".strip()
+        return text
 
     async def _workspace_execute_shell_command(
         self,
         command: str,
-        timeout: int = 300,
+        timeout: float | int | str | None = 300,
         **kwargs: Any,
-    ) -> ToolResponse:
-        """Execute shell command in active workspace directory."""
+    ) -> str:
         ws = shlex.quote(str(self._get_active_write_root()))
         guarded = f"cd {ws} && {command}"
-        return await execute_shell_command(guarded, timeout=timeout, **kwargs)
+        proc = await asyncio.create_subprocess_shell(
+            guarded,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        timeout_s = self._coerce_timeout(timeout, default=300.0)
+        communicate_coro = proc.communicate()
+        try:
+            if timeout_s and timeout_s > 0:
+                stdout, stderr = await asyncio.wait_for(communicate_coro, timeout=timeout_s)
+            else:
+                stdout, stderr = await communicate_coro
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
+            return f"Timeout: shell command exceeded {timeout_s}s."
+        except Exception:
+            try:
+                communicate_coro.close()
+            except Exception:
+                pass
+            raise
+        out = (stdout or b"").decode("utf-8", errors="ignore")
+        err = (stderr or b"").decode("utf-8", errors="ignore")
+        text = out.strip()
+        if err.strip():
+            text = f"{text}\n{err.strip()}".strip()
+        return text
 
     async def _workspace_view_text_file(
         self,
         file_path: str,
         ranges: list[int] | None = None,
-    ) -> ToolResponse:
-        """View text file only inside workspace."""
+    ) -> str:
         resolved, err = self._resolve_workspace_file(file_path)
         if err:
-            return ToolResponse(content=err)
-        return await view_text_file(resolved, ranges=ranges)
+            return err
+        with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        if not ranges:
+            return "".join(lines)
+        chunks: list[str] = []
+        for i in range(0, len(ranges), 2):
+            start = max(1, int(ranges[i]))
+            end = int(ranges[i + 1]) if i + 1 < len(ranges) else start
+            chunks.extend(lines[start - 1 : end])
+        return "".join(chunks)
 
     async def _workspace_write_text_file(
         self,
         file_path: str,
         content: str,
-        ranges: None | list[int] = None,
-    ) -> ToolResponse:
-        """Write text file only inside workspace."""
+        ranges: list[int] | None = None,
+    ) -> str:
         resolved, err = self._resolve_workspace_file(file_path)
         if err:
-            return ToolResponse(content=err)
+            return err
         target = Path(resolved)
         target.parent.mkdir(parents=True, exist_ok=True)
-        return await write_text_file(str(target), content, ranges=ranges)
+        if not ranges:
+            target.write_text(content, encoding="utf-8")
+            return f"Wrote file: {target}"
+        lines = target.read_text(encoding="utf-8").splitlines(keepends=True) if target.exists() else []
+        start = max(1, int(ranges[0])) if ranges else 1
+        end = int(ranges[1]) if ranges and len(ranges) > 1 else start
+        replacement = content.splitlines(keepends=True)
+        lines[start - 1 : end] = replacement
+        target.write_text("".join(lines), encoding="utf-8")
+        return f"Updated file range in: {target}"
 
     async def _workspace_insert_text_file(
         self,
         file_path: str,
         content: str,
         line_number: int,
-    ) -> ToolResponse:
-        """Insert text into file only inside workspace."""
+    ) -> str:
         resolved, err = self._resolve_workspace_file(file_path)
         if err:
-            return ToolResponse(content=err)
-        return await insert_text_file(resolved, content, line_number)
-
-    def register_tool(
-        self,
-        func: Any,
-        group_name: str = "basic",
-        preset_kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        """Register a tool function.
-
-        Args:
-            func: The tool function to register.
-            group_name: Group name to organize the tool.
-            preset_kwargs: Optional preset keyword arguments.
-        """
-        self.toolkit.register_tool_function(
-            func,
-            group_name=group_name,
-            preset_kwargs=preset_kwargs or {},
-        )
-
-    async def register_mcp(
-        self,
-        name: str,
-        url: str,
-        transport: str = "streamable_http",
-        group_name: str = "basic",
-    ) -> None:
-        """Register an HTTP MCP server.
-
-        Args:
-            name: The name to identify the MCP server.
-            url: The MCP server URL.
-            transport: Transport protocol (streamable_http or sse).
-            group_name: Group name for the MCP tools.
-        """
-        client = HttpStatelessClient(
-            name=name,
-            transport=transport,  # type: ignore
-            url=url,
-        )
-
-        self.mcp_clients[name] = client
-
-        # Register all tools from MCP server
-        await self.toolkit.register_mcp_client(
-            client,
-            group_name=group_name,
-        )
-
-    async def register_mcp_stdio(
-        self,
-        name: str,
-        command: str,
-        args: list[str],
-        group_name: str = "basic",
-    ) -> None:
-        """Register a StdIO MCP server."""
-        try:
-            client = StdIOStatefulClient(
-                name=name,
-                command=command,
-                args=args,
-            )
-
-            self.mcp_clients[name] = client
-
-            # Connect to the server with timeout
-            logger.info("Connecting to MCP server '%s'...", name)
-            await asyncio.wait_for(client.connect(), timeout=30)
-            logger.info("MCP server '%s' connected", name)
-
-            # Register all tools from MCP server
-            await self.toolkit.register_mcp_client(
-                client,
-                group_name=group_name,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Timeout connecting to MCP server '%s'", name)
-        except Exception as e:
-            logger.warning("Failed to connect MCP server '%s': %s", name, e)
-
-    def activate_groups(self, group_names: list[str]) -> str:
-        """Activate tool groups.
-
-        Args:
-            group_names: List of group names to activate.
-
-        Returns:
-            Notes of activated groups.
-        """
-        self.toolkit.update_tool_groups(group_names=group_names, active=True)
-        return self.toolkit.get_activated_notes()
-
-    def deactivate_groups(self, group_names: list[str]) -> None:
-        """Deactivate tool groups.
-
-        Args:
-            group_names: List of group names to deactivate.
-        """
-        self.toolkit.update_tool_groups(group_names=group_names, active=False)
-
-    def get_available_tools(self) -> list[dict]:
-        """Get JSON schemas of available tools.
-
-        Returns:
-            List of tool JSON schemas.
-        """
-        return self.toolkit.get_json_schemas()
-
-    def search_resources(self, query: str | None = None) -> dict[str, Any]:
-        """Search registered resources by name."""
-        keyword = (query or "").strip().lower()
-
-        groups = [
-            {
-                "name": group.name,
-                "active": group.active,
-                "description": group.description,
-            }
-            for group in self.toolkit.groups.values()
-            if not keyword
-            or keyword in group.name.lower()
-            or keyword in (group.description or "").lower()
-        ]
-        tools = [
-            {
-                "name": name,
-                "group": registered.group,
-                "source": str(registered.source),
-            }
-            for name, registered in self.toolkit.tools.items()
-            if not keyword or keyword in name.lower()
-        ]
-        mcp_servers = [
-            name for name in self.mcp_clients if not keyword or keyword in name.lower()
-        ]
-        skills = [
-            name
-            for name in getattr(self.toolkit, "skills", {})
-            if not keyword or keyword in name.lower()
-        ]
-        return {
-            "query": query or "",
-            "groups": groups,
-            "tools": tools,
-            "mcp_servers": mcp_servers,
-            "skills": skills,
-        }
-
-    def get_tool_prompt(self) -> str:
-        """Get prompt for available tools.
-
-        Returns:
-            Formatted tool prompt.
-        """
-        return self.toolkit.get_activated_notes()
-
-    def get_channel_prompts(self) -> str:
-        """Get combined prompts from all registered channel tools.
-
-        Returns:
-            Combined channel prompts for injection into agent system prompt.
-        """
-        prompts = []
-        for channel_name, channel_tool in self.channel_tools.items():
-            prompt = channel_tool.get_prompt()
-            if prompt:
-                prompts.append(prompt)
-        return "\n\n".join(prompts) if prompts else ""
-
-    def register_channel_tools(self, channel_tools: "ChannelTools") -> None:
-        """Register tools from a channel.
-
-        Args:
-            channel_tools: ChannelTools instance to register.
-        """
-        if not channel_tools.channel_name:
-            logger.warning("ChannelTools has no channel_name, skipping registration")
-            return
-
-        group_name = channel_tools.get_tool_group_name()
-        group_description = channel_tools.get_tool_group_description()
-
-        self.toolkit.create_tool_group(
-            group_name=group_name,
-            description=group_description,
-            active=True,
-            notes=channel_tools.get_prompt(),
-        )
-
-        for func in channel_tools.get_tools():
-            self.toolkit.register_tool_function(func, group_name=group_name)
-
-        self.channel_tools[channel_tools.channel_name] = channel_tools
-        logger.info(
-            "Registered %d tools from channel '%s'",
-            len(channel_tools.get_tools()),
-            channel_tools.channel_name,
-        )
-
-    def set_channel_context(self, ctx: "ChannelToolContext | None") -> None:
-        """Set the current channel context for tool execution."""
-        from .channels.tools import ChannelToolContext
-
-        ChannelToolContext.set_current(ctx)
-
-    def create_worker_tool(self) -> Any:
-        """Create the create_worker tool function.
-
-        Returns:
-            A tool function that creates workers with inherited resources.
-        """
-
-        async def create_worker(task_description: str) -> ToolResponse:
-            """Create a specialized worker to complete a given task.
-
-            Args:
-                task_description: Description of the task to be completed.
-            """
-            text, _media = await self._run_worker_task(task_description)
-            return ToolResponse(content=text)
-
-        return create_worker
-
-    async def _run_worker_task(
-        self,
-        task_description: str,
-        lease: dict[str, Any] | None = None,
-        agent_name: str = "Worker",
-    ) -> tuple[str, list[str]]:
-        """Run one worker task and return (text, media_paths)."""
-        from .worker import create_worker_agent
-
-        worker_toolkit = self.create_leased_toolkit(
-            agent_id=agent_name,
-            include_groups=(lease or {}).get("include_groups"),
-            include_tools=(lease or {}).get("include_tools"),
-            exclude_tools=(lease or {}).get("exclude_tools"),
-        )
-        worker = create_worker_agent(
-            config=self.config,
-            toolkit=worker_toolkit,
-            name=agent_name,
-        )
-        worker.set_console_output_enabled(self.config.system.console_output)
-        write_root = self._infer_write_root(task_description)
-        token = self._active_write_root.set(str(write_root))
-        try:
-            prompt = task_description
-            text, media = "", []
-            max_retries = 3
-            base_delay = 1.0
-            for attempt in range(max_retries):
-                result = await worker(
-                    Msg("user", prompt, "user"),
-                    structured_model=WorkerFinalOutput,
-                )
-                text, media = self._extract_worker_output(result)
-                if text and not self._looks_incomplete_output(text):
-                    return text, media
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2**attempt)
-                    logger.debug(
-                        "Worker retry %d/%d after %.1fs",
-                        attempt + 1,
-                        max_retries,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                    prompt = (
-                        "请继续执行尚未完成的步骤，并只输出最终结果。"
-                        "不要输出 <tool_call> 标签或中间思考。"
-                    )
-            return text or "Worker completed but returned no text.", media
-        finally:
-            self._active_write_root.reset(token)
+            return err
+        target = Path(resolved)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = target.read_text(encoding="utf-8").splitlines(keepends=True) if target.exists() else []
+        idx = max(0, min(len(lines), int(line_number) - 1))
+        lines[idx:idx] = content.splitlines(keepends=True)
+        target.write_text("".join(lines), encoding="utf-8")
+        return f"Inserted text into: {target}"
 
     def _extract_media_from_text(self, text: str) -> list[str]:
-        """Extract file paths from text as fallback when structured output fails."""
-        paths = []
-        for m in self._MEDIA_PATH_RE.finditer(text):
-            p = os.path.expanduser(m.group(0))
-            if os.path.isfile(p):
-                paths.append(p)
-        return paths
+        paths: list[str] = []
+        for match in self._MEDIA_PATH_RE.finditer(text or ""):
+            raw = match.group(1)
+            path = Path(os.path.expanduser(raw))
+            if path.is_file():
+                paths.append(str(path.resolve()))
+        return sorted(set(paths))
 
-    def _extract_worker_output(self, result: Msg) -> tuple[str, list[str]]:
-        """Extract best-effort textual output and media paths from worker message."""
-        structured = self._extract_structured_output(result, WorkerFinalOutput)
-        if structured is not None:
-            summary_lines: list[str] = []
-            answer = structured.answer.strip()
-            if answer:
-                summary_lines.append(answer)
-            if structured.evidence:
-                summary_lines.extend(
-                    [f"- {item}" for item in structured.evidence if item]
-                )
-            if structured.status == "failed" and structured.errors:
-                summary_lines.append("Errors:")
-                summary_lines.extend(
-                    [f"- {item}" for item in structured.errors if item]
-                )
-            summary = "\n".join(summary_lines).strip()
-            media = [p for p in structured.media_paths if p and os.path.isfile(p)]
-            if summary:
-                return summary, media
-
-        text = result.get_text_content()
-        if text:
-            return text, []
-
-        # Fallback to tool_result only. Avoid leaking internal thinking/tool-call
-        # traces into user-facing output.
-        lines: list[str] = []
-        for block in result.get_content_blocks("tool_result"):
-            content = block.get("content", "")
-            if isinstance(content, str) and content.strip():
-                lines.append(content.strip())
-
-        return "\n".join(lines).strip(), []
-
-    def _looks_incomplete_output(self, text: str) -> bool:
-        """Heuristic: detect intermediate output that indicates unfinished execution."""
-        lowered = text.lower()
-        markers = [
-            "<tool_call>",
-            "</tool_call>",
-            "<function=",
-            "现在我需要",
-            "next i need to",
-            "i need to",
-        ]
-        return any(marker in lowered for marker in markers)
-
-    def _extract_structured_output(
-        self,
-        result: Msg,
-        model_cls: type[BaseModel],
-    ) -> BaseModel | None:
-        metadata = getattr(result, "metadata", None)
-        if not isinstance(metadata, dict):
-            return None
-        payload = metadata.get("structured_output")
-        if not isinstance(payload, dict):
-            return None
+    @staticmethod
+    def _coerce_timeout(
+        timeout: float | int | str | None,
+        default: float = 300.0,
+    ) -> float:
+        if timeout is None:
+            return default
+        if isinstance(timeout, str):
+            timeout = timeout.strip()
+            if not timeout:
+                return default
         try:
-            validate_fn = getattr(model_cls, "model_validate", None)
-            if callable(validate_fn):
-                return validate_fn(payload)
-            parse_fn = getattr(model_cls, "parse_obj", None)
-            if callable(parse_fn):
-                return parse_fn(payload)
-        except Exception:
-            return None
-        return None
+            value = float(timeout)
+        except (TypeError, ValueError):
+            return default
+        if value < 0:
+            return default
+        return value
 
-    def create_leased_toolkit(
-        self,
-        agent_id: str,
-        include_groups: list[str] | None = None,
-        include_tools: list[str] | None = None,
-        exclude_tools: list[str] | None = None,
-        allow_orchestration_tools: bool = False,
-    ) -> Toolkit:
-        """Create a toolkit lease for one subagent.
-
-        The lease enforces least-privilege access:
-        - optional group-based filtering
-        - optional tool allow/deny lists
-        - orchestration tools are excluded by default
-        """
-        worker_toolkit = Toolkit()
-        include_group_set = set(include_groups or [])
-        include_tool_set = set(include_tools or [])
-        exclude_tool_set = set(exclude_tools or [])
-
-        # Mirror group definitions from root toolkit.
-        for group_name, group in self.toolkit.groups.items():
-            if include_groups is None:
-                active = group.active
-            else:
-                active = group_name in include_group_set
-            worker_toolkit.create_tool_group(
-                group_name=group_name,
-                description=group.description,
-                active=active,
-                notes=group.notes,
-            )
-
-        for tool_name, registered in self.toolkit.tools.items():
-            if not allow_orchestration_tools and tool_name in self._orchestration_tools:
+    @staticmethod
+    def _json_schema_for_callable(func: Any) -> dict[str, Any]:
+        sig = inspect.signature(func)
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for name, param in sig.parameters.items():
+            if name in {"self", "context"}:
                 continue
-            if tool_name in self._framework_internal_tools:
-                continue
-            if registered.group == "plan_related":
-                continue
-            if include_tool_set and tool_name not in include_tool_set:
-                continue
-            if tool_name in exclude_tool_set:
-                continue
-            if (
-                include_groups is not None
-                and registered.group != "basic"
-                and registered.group not in include_group_set
-            ):
-                continue
-            # Keep original registered metadata and runtime binding (especially
-            # for MCP tools) by sharing the registered object reference.
-            worker_toolkit.tools[tool_name] = registered
-
-        return worker_toolkit
-
-    async def run_subagent_task(
-        self,
-        task_description: str,
-        lease: dict[str, Any] | None = None,
-        agent_name: str = "Worker",
-    ) -> tuple[str, list[str]]:
-        """Public API to execute one task using a dynamically leased subagent.
-
-        Returns (text_output, media_paths).
-        """
-        return await self._run_worker_task(
-            task_description=task_description,
-            lease=lease,
-            agent_name=agent_name,
-        )
-
-    def dispatch_workers_tool(self) -> Any:
-        """Create a batch worker tool with optional concurrency control."""
-
-        async def dispatch_workers(
-            tasks: list[str],
-            max_concurrency: int = 3,
-            lease: dict[str, Any] | None = None,
-        ) -> ToolResponse:
-            """Execute multiple tasks with workers concurrently.
-
-            Args:
-                tasks: Subtasks to execute.
-                max_concurrency: Max number of workers running at the same time.
-            """
-            normalized_tasks = [
-                t.strip() for t in tasks if isinstance(t, str) and t.strip()
-            ]
-            if not normalized_tasks:
-                return ToolResponse(content="No valid tasks were provided.")
-
-            limit = max(1, min(int(max_concurrency), len(normalized_tasks), 8))
-            semaphore = asyncio.Semaphore(limit)
-
-            async def run_one(index: int, task: str) -> dict[str, Any]:
-                async with semaphore:
-                    try:
-                        text, _media = await self._run_worker_task(
-                            task_description=task,
-                            lease=lease,
-                            agent_name=f"Worker-{index}",
-                        )
-                        return {"index": index, "task": task, "result": text}
-                    except Exception as e:
-                        return {"index": index, "task": task, "error": str(e)}
-
-            results = await asyncio.gather(
-                *(run_one(i, task) for i, task in enumerate(normalized_tasks, start=1))
-            )
-            return ToolResponse(
-                content=json.dumps(
-                    {"max_concurrency": limit, "results": results},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-
-        return dispatch_workers
-
-    def reset(self) -> None:
-        """Reset resource manager to default state."""
-        for name, client in list(self.mcp_clients.items()):
-            close_fn = getattr(client, "close", None)
-            if callable(close_fn):
-                try:
-                    close_fn(ignore_errors=True)
-                except TypeError:
-                    close_fn()
-                except Exception as e:
-                    logger.warning("Failed to close MCP client '%s': %s", name, e)
-
-        self.toolkit.clear()
-        self.mcp_clients.clear()
-        ResourceManager._initialized = False
-        self._load_config()
-        self._register_builtin_tools()
-
-    async def __aenter__(self) -> "ResourceManager":
-        """Async context manager entry."""
-        await self.initialize_async()
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Async context manager exit - cleanup resources."""
-        self.reset()
-
-    @classmethod
-    def get_instance(cls) -> "ResourceManager":
-        """Get the singleton instance."""
-        if cls._instance is None:
-            raise RuntimeError("ResourceManager not initialized yet")
-        return cls._instance
+            anno = param.annotation
+            field_type = "string"
+            if anno in {int}:
+                field_type = "integer"
+            elif anno in {float}:
+                field_type = "number"
+            elif anno in {bool}:
+                field_type = "boolean"
+            elif getattr(anno, "__origin__", None) in {list, tuple}:
+                field_type = "array"
+            elif getattr(anno, "__origin__", None) is dict:
+                field_type = "object"
+            properties[name] = {"type": field_type}
+            if param.default is inspect._empty:
+                required.append(name)
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }

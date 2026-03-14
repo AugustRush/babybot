@@ -1,10 +1,10 @@
 [project]
 name = "babybot"
 version = "0.1.0"
-description = "A production-ready conversational agent built with agentscope"
+description = "A lightweight production-ready conversational agent runtime"
 requires-python = ">=3.10"
 dependencies = [
-    "agentscope>=1.0.0",
+    "openai>=1.40.0",
     "python-dotenv>=1.0.0",
     "lark-oapi>=1.5.0,<2.0.0",
 ]

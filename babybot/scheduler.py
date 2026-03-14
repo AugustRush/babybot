@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
+
+if TYPE_CHECKING:
+    from .heartbeat import Heartbeat
 
 
 TaskStatus = Literal["pending", "running", "succeeded", "failed", "blocked", "skipped"]
@@ -68,6 +71,7 @@ class Scheduler:
         tasks: list[TaskSpec],
         executor: Callable[[TaskSpec], Awaitable[str]],
         mode: ScheduleMode = "hybrid",
+        heartbeat: Heartbeat | None = None,
     ) -> dict[str, TaskResult]:
         """Run tasks according to dependency constraints and scheduling mode."""
         self.reset()
@@ -82,23 +86,24 @@ class Scheduler:
         if mode == "serial":
             order = self._topological_order(tasks_map)
             for task_id in order:
-                await self._run_task(tasks_map[task_id], executor)
+                await self._run_task(tasks_map[task_id], executor, heartbeat)
             return dict(self.results)
 
         if mode == "parallel" and any(task.deps for task in tasks):
             mode = "hybrid"
 
         if mode == "parallel":
-            await asyncio.gather(*(self._run_task(task, executor) for task in tasks))
+            await asyncio.gather(*(self._run_task(task, executor, heartbeat) for task in tasks))
             return dict(self.results)
 
-        await self._run_hybrid(tasks_map, executor)
+        await self._run_hybrid(tasks_map, executor, heartbeat)
         return dict(self.results)
 
     async def _run_hybrid(
         self,
         tasks_map: dict[str, TaskSpec],
         executor: Callable[[TaskSpec], Awaitable[str]],
+        heartbeat: Heartbeat | None = None,
     ) -> None:
         semaphore = asyncio.Semaphore(max(1, self.max_parallel))
         pending = set(tasks_map.keys())
@@ -140,7 +145,7 @@ class Scheduler:
 
             async def run_with_limit(task: TaskSpec) -> None:
                 async with semaphore:
-                    await self._run_task(task, executor)
+                    await self._run_task(task, executor, heartbeat)
 
             await asyncio.gather(*(run_with_limit(tasks_map[task_id]) for task_id in ready))
             pending -= set(ready)
@@ -149,7 +154,10 @@ class Scheduler:
         self,
         task: TaskSpec,
         executor: Callable[[TaskSpec], Awaitable[str]],
+        heartbeat: Heartbeat | None = None,
     ) -> None:
+        if heartbeat is not None:
+            heartbeat.beat()
         self.status[task.task_id] = "running"
         self.events.append({"task_id": task.task_id, "event": "running"})
         attempts = max(0, int(task.retries)) + 1
@@ -169,6 +177,8 @@ class Scheduler:
                     output=output,
                 )
                 self.events.append({"task_id": task.task_id, "event": "succeeded"})
+                if heartbeat is not None:
+                    heartbeat.beat()
                 return
             except Exception as e:
                 if attempt < attempts:

@@ -1,9 +1,6 @@
 """Example search tools."""
 
-from agentscope.tool import ToolResponse
-
-
-def web_search(query: str, api_key: str | None = None) -> ToolResponse:
+def web_search(query: str, api_key: str | None = None) -> str:
     """Search the web for information.
 
     Args:
@@ -12,18 +9,14 @@ def web_search(query: str, api_key: str | None = None) -> ToolResponse:
     """
     # TODO: Implement actual search logic
     # This is a placeholder
-    return ToolResponse(
-        content=f"Search results for '{query}' (placeholder - implement actual search)",
-    )
+    return f"Search results for '{query}' (placeholder - implement actual search)"
 
 
-def search_documentation(query: str) -> ToolResponse:
+def search_documentation(query: str) -> str:
     """Search documentation.
 
     Args:
         query: The search query.
     """
     # TODO: Implement documentation search
-    return ToolResponse(
-        content=f"Documentation results for '{query}' (placeholder)",
-    )
+    return f"Documentation results for '{query}' (placeholder)"

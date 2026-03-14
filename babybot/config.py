@@ -47,9 +47,15 @@ class SystemConfig:
 
     console_output: bool = False
     enable_meta_tool: bool = True
-    timeout: int = 60
+    timeout: int = 600
+    subtask_timeout: int = 60
+    skill_route_timeout: float = 3.0
     tracing_endpoint: str = ""
     max_parallel: int = 4
+    idle_timeout: int = 60
+    max_concurrency: int = 8
+    max_per_chat: int = 1
+    send_ack: bool = True
 
 
 @dataclass
@@ -131,9 +137,15 @@ class Config:
         self.system = SystemConfig(
             console_output=system_conf.get("console_output", False),
             enable_meta_tool=system_conf.get("enable_meta_tool", True),
-            timeout=system_conf.get("timeout", 60),
+            timeout=system_conf.get("timeout", 180),
+            subtask_timeout=system_conf.get("subtask_timeout", 60),
+            skill_route_timeout=system_conf.get("skill_route_timeout", 3.0),
             tracing_endpoint=system_conf.get("tracing_endpoint", ""),
             max_parallel=system_conf.get("max_parallel", 4),
+            idle_timeout=system_conf.get("idle_timeout", 60),
+            max_concurrency=system_conf.get("max_concurrency", 8),
+            max_per_chat=system_conf.get("max_per_chat", 1),
+            send_ack=system_conf.get("send_ack", True),
         )
 
         # Resource configuration
@@ -201,8 +213,14 @@ class Config:
             "system": {
                 "console_output": False,
                 "enable_meta_tool": True,
-                "timeout": 60,
+                "timeout": 600,
+                "subtask_timeout": 60,
+                "skill_route_timeout": 3.0,
                 "tracing_endpoint": "",
+                "idle_timeout": 60,
+                "max_concurrency": 8,
+                "max_per_chat": 1,
+                "send_ack": True,
             },
             "channels": {
                 "feishu": {
@@ -281,7 +299,13 @@ class Config:
                 "console_output": self.system.console_output,
                 "enable_meta_tool": self.system.enable_meta_tool,
                 "timeout": self.system.timeout,
+                "subtask_timeout": self.system.subtask_timeout,
+                "skill_route_timeout": self.system.skill_route_timeout,
                 "tracing_endpoint": self.system.tracing_endpoint,
+                "idle_timeout": self.system.idle_timeout,
+                "max_concurrency": self.system.max_concurrency,
+                "max_per_chat": self.system.max_per_chat,
+                "send_ack": self.system.send_ack,
             },
             "channels": {
                 "feishu": {

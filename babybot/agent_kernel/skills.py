@@ -20,26 +20,16 @@ class SkillPack:
 
 
 def merge_leases(primary: ToolLease, secondary: ToolLease) -> ToolLease:
-    """Merge two leases with conservative defaults.
+    """Merge two leases with additive include semantics.
 
-    - include_* are intersected when both sides define constraints
-      (empty means "no explicit include constraint")
+    - include_groups/include_tools are UNIONED (additive access)
     - exclude_tools are unioned (deny wins)
+
+    This means skills ADD their tool groups to the available set rather
+    than restricting them.
     """
-    primary_groups = set(primary.include_groups)
-    secondary_groups = set(secondary.include_groups)
-    primary_tools = set(primary.include_tools)
-    secondary_tools = set(secondary.include_tools)
-
-    if primary_groups and secondary_groups:
-        include_groups = primary_groups & secondary_groups
-    else:
-        include_groups = primary_groups | secondary_groups
-
-    if primary_tools and secondary_tools:
-        include_tools = primary_tools & secondary_tools
-    else:
-        include_tools = primary_tools | secondary_tools
+    include_groups = set(primary.include_groups) | set(secondary.include_groups)
+    include_tools = set(primary.include_tools) | set(secondary.include_tools)
 
     return ToolLease(
         include_groups=tuple(sorted(include_groups)),

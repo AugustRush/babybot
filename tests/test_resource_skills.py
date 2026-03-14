@@ -118,6 +118,7 @@ def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
 
 def test_select_skill_packs_fallback_when_semantic_router_unavailable() -> None:
     manager = object.__new__(ResourceManager)
+    manager._skill_route_cache = {}
     manager.skills = {
         "a": LoadedSkill(
             name="a",

@@ -14,14 +14,27 @@
         "args": ["@playwright/mcp@latest"],
         "group_name": "browser",
         "active": false
+      },
+      "gaode_map": {
+        "type": "http",
+        "url": "https://mcp.amap.com/mcp?key=YOUR_KEY",
+        "transport": "streamable_http",
+        "group_name": "map_services",
+        "active": false
       }
     }
   },
   "system": {
     "console_output": false,
     "enable_meta_tool": true,
-    "timeout": 60,
-    "tracing_endpoint": ""
+    "timeout": 600,
+    "subtask_timeout": 60,
+    "skill_route_timeout": 3.0,
+    "tracing_endpoint": "",
+    "idle_timeout": 60,
+    "max_concurrency": 8,
+    "max_per_chat": 1,
+    "send_ack": true
   },
   "channels": {
     "feishu": {

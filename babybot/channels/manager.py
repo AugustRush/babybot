@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from ..config import Config
+from ..message_bus import MessageBus
 from ..orchestrator import OrchestratorAgent, TaskResponse
 from .base import BaseChannel, InboundMessage
 from .registry import discover_channels
@@ -22,9 +23,13 @@ class ChannelManager:
         self.config = config
         self.orchestrator = orchestrator
         self.channels: dict[str, BaseChannel] = {}
-        self._chat_locks: dict[str, asyncio.Lock] = {}
         self._init_channels()
         self._register_channel_tools()
+        self._bus = MessageBus(
+            config=config,
+            orchestrator=orchestrator,
+            channels=self.channels,
+        )
 
     # ── Bootstrap ────────────────────────────────────────────────────
 
@@ -55,39 +60,22 @@ class ChannelManager:
     # ── Message handling ─────────────────────────────────────────────
 
     async def handle_message(self, msg: InboundMessage) -> None:
-        """Route an inbound message through orchestrator → channel reply."""
-        lock_key = f"{msg.channel}:{msg.chat_id}"
-        lock = self._chat_locks.setdefault(lock_key, asyncio.Lock())
-
-        ctx = ChannelToolContext(
-            chat_id=msg.chat_id,
-            sender_id=msg.sender_id,
-            metadata=msg.metadata,
+        """Enqueue an inbound message for async processing."""
+        logger.info(
+            "Inbound message channel=%s chat_id=%s sender_id=%s message_id=%s content=%s",
+            msg.channel,
+            msg.chat_id,
+            msg.sender_id,
+            (msg.metadata.get("message_id") if isinstance(msg.metadata, dict) else ""),
+            (msg.content or "")[:120],
         )
-        self.orchestrator.resource_manager.set_channel_context(ctx)
-
-        async with lock:
-            try:
-                response = await self.orchestrator.process_task(msg.content)
-            except Exception as e:
-                logger.error("Error processing task: %s", e)
-                response = TaskResponse(text=f"处理失败：{e}")
-            finally:
-                self.orchestrator.resource_manager.set_channel_context(None)
-
-        channel = self.channels.get(msg.channel)
-        if channel:
-            await channel.send_response(
-                msg.chat_id,
-                response,
-                sender_id=msg.sender_id,
-                metadata=msg.metadata,
-            )
+        await self._bus.enqueue(msg)
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def start_all(self) -> None:
-        """Start every enabled channel concurrently."""
+        """Start every enabled channel and the message bus."""
+        await self._bus.start()
         if not self.channels:
             logger.info("No enabled channels found")
             return
@@ -95,7 +83,8 @@ class ChannelManager:
         await asyncio.gather(*tasks)
 
     async def stop_all(self) -> None:
-        """Gracefully stop every running channel."""
+        """Gracefully stop the message bus and every running channel."""
+        await self._bus.stop()
         for ch in self.channels.values():
             try:
                 await ch.stop()

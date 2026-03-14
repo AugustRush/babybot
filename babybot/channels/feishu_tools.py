@@ -7,9 +7,6 @@ import logging
 import os
 from typing import Any
 
-from agentscope.tool import ToolResponse
-from agentscope.message import TextBlock
-
 from .tools import ChannelCapabilities, ChannelTools, ChannelToolContext
 
 logger = logging.getLogger(__name__)
@@ -119,7 +116,7 @@ class FeishuChannelTools(ChannelTools):
             return "发送成功"
         return f"发送失败: {response.msg}"
 
-    def send_text(self, text: str) -> ToolResponse:
+    def send_text(self, text: str) -> str:
         """发送文字消息到飞书。
 
         Args:
@@ -127,78 +124,60 @@ class FeishuChannelTools(ChannelTools):
         """
         content = json.dumps({"text": text}, ensure_ascii=False)
         result = self._send_message("text", content)
-        return ToolResponse(content=[TextBlock(type="text", text=result)])
+        return result
 
-    def send_image(self, file_path: str) -> ToolResponse:
+    def send_image(self, file_path: str) -> str:
         """发送图片到飞书。
 
         Args:
             file_path (str): 图片文件的绝对路径。
         """
         if not os.path.isfile(file_path):
-            return ToolResponse(
-                content=[TextBlock(type="text", text=f"文件不存在: {file_path}")]
-            )
+            return f"文件不存在: {file_path}"
 
         key = self._channel._upload_image_sync(file_path)
         if not key:
-            return ToolResponse(content=[TextBlock(type="text", text="图片上传失败")])
+            return "图片上传失败"
 
         content = json.dumps({"image_key": key}, ensure_ascii=False)
         result = self._send_message("image", content)
-        return ToolResponse(
-            content=[
-                TextBlock(type="text", text=f"{result}: {os.path.basename(file_path)}")
-            ]
-        )
+        return f"{result}: {os.path.basename(file_path)}"
 
-    def send_file(self, file_path: str) -> ToolResponse:
+    def send_file(self, file_path: str) -> str:
         """发送文件到飞书。
 
         Args:
             file_path (str): 文件的绝对路径。
         """
         if not os.path.isfile(file_path):
-            return ToolResponse(
-                content=[TextBlock(type="text", text=f"文件不存在: {file_path}")]
-            )
+            return f"文件不存在: {file_path}"
 
         key = self._channel._upload_file_sync(file_path)
         if not key:
-            return ToolResponse(content=[TextBlock(type="text", text="文件上传失败")])
+            return "文件上传失败"
 
         content = json.dumps({"file_key": key}, ensure_ascii=False)
         result = self._send_message("file", content)
-        return ToolResponse(
-            content=[
-                TextBlock(type="text", text=f"{result}: {os.path.basename(file_path)}")
-            ]
-        )
+        return f"{result}: {os.path.basename(file_path)}"
 
-    def send_audio(self, file_path: str) -> ToolResponse:
+    def send_audio(self, file_path: str) -> str:
         """发送音频文件到飞书。
 
         Args:
             file_path (str): 音频文件的绝对路径。
         """
         if not os.path.isfile(file_path):
-            return ToolResponse(
-                content=[TextBlock(type="text", text=f"文件不存在: {file_path}")]
-            )
+            return f"文件不存在: {file_path}"
 
         key = self._channel._upload_file_sync(file_path)
         if not key:
-            return ToolResponse(content=[TextBlock(type="text", text="音频上传失败")])
+            return "音频上传失败"
 
         content = json.dumps({"file_key": key}, ensure_ascii=False)
         result = self._send_message("media", content)
-        return ToolResponse(
-            content=[
-                TextBlock(type="text", text=f"{result}: {os.path.basename(file_path)}")
-            ]
-        )
+        return f"{result}: {os.path.basename(file_path)}"
 
-    def send_card(self, content: str, title: str = "") -> ToolResponse:
+    def send_card(self, content: str, title: str = "") -> str:
         """发送交互卡片到飞书，适合展示结构化信息。
 
         Args:
@@ -218,9 +197,9 @@ class FeishuChannelTools(ChannelTools):
         card = {"config": {"wide_screen_mode": True}, "elements": elements}
         card_content = json.dumps(card, ensure_ascii=False)
         result = self._send_message("interactive", card_content)
-        return ToolResponse(content=[TextBlock(type="text", text=result)])
+        return result
 
-    def add_reaction(self, emoji: str = "THUMBSUP") -> ToolResponse:
+    def add_reaction(self, emoji: str = "THUMBSUP") -> str:
         """对消息添加表情反应。
 
         Args:
@@ -228,7 +207,7 @@ class FeishuChannelTools(ChannelTools):
         """
         ctx = self._get_context()
         if not ctx or not ctx.message_id:
-            return ToolResponse(content=[TextBlock(type="text", text="无法获取消息ID")])
+            return "无法获取消息ID"
 
         from lark_oapi.api.im.v1 import (
             CreateMessageReactionRequest,
@@ -249,9 +228,5 @@ class FeishuChannelTools(ChannelTools):
 
         response = self._channel._client.im.v1.message_reaction.create(request)
         if response.success():
-            return ToolResponse(
-                content=[TextBlock(type="text", text=f"已添加表情: {emoji}")]
-            )
-        return ToolResponse(
-            content=[TextBlock(type="text", text=f"添加失败: {response.msg}")]
-        )
+            return f"已添加表情: {emoji}"
+        return f"添加失败: {response.msg}"

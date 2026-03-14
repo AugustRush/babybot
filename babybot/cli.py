@@ -6,6 +6,19 @@ from .orchestrator import OrchestratorAgent
 from .channels import ChannelManager
 
 
+def _setup_logging(channel_mode: bool, console_output: bool) -> None:
+    level = logging.INFO if (channel_mode or console_output) else logging.WARNING
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+    else:
+        root.setLevel(level)
+    logging.getLogger("babybot").setLevel(level)
+
+
 def run():
     """Run the multi-agent orchestrator CLI."""
     parser = argparse.ArgumentParser(description="BabyBot")
@@ -20,20 +33,19 @@ def run():
 
     try:
         config = Config()
+        _setup_logging(channel_mode=(args.channel != "cli"), console_output=config.system.console_output)
         if config.is_bootstrapped:
             print(f"\n已初始化配置文件：{config.config_file}")
             print(f"工作目录：{config.workspace_dir}")
             print("请先编辑配置文件后再运行 babybot。")
             return
         if config.system.tracing_endpoint:
-            try:
-                from agentscope.tracing import setup_tracing
-
-                setup_tracing(config.system.tracing_endpoint)
-            except Exception as e:
-                print(f"Warning: Failed to setup tracing: {e}")
+            print(
+                "Warning: tracing_endpoint is configured but tracing integration "
+                "is not enabled in the lightweight kernel runtime."
+            )
         if not config.system.console_output:
-            logging.getLogger("agentscope").setLevel(logging.WARNING)
+            logging.getLogger("openai").setLevel(logging.WARNING)
         orchestrator = OrchestratorAgent(config)
     except ValueError as e:
         print(f"Error: {e}")

@@ -5,9 +5,14 @@ Channels expose tools that agents can use for rich media interactions.
 
 from __future__ import annotations
 
+import contextvars
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+_channel_ctx_var: contextvars.ContextVar[ChannelToolContext | None] = contextvars.ContextVar(
+    "_channel_ctx", default=None
+)
 
 
 @dataclass
@@ -56,18 +61,18 @@ class ChannelToolContext:
 
     @classmethod
     def get_current(cls) -> "ChannelToolContext | None":
-        return cls._current
+        return _channel_ctx_var.get(None)
 
     @classmethod
     def set_current(cls, ctx: "ChannelToolContext | None") -> None:
-        cls._current = ctx
+        _channel_ctx_var.set(ctx)
 
 
 class ChannelTools(ABC):
     """Base class for channel-specific tools.
 
     Implement get_tools() to return tool functions.
-    AgentScope will auto-extract JSON schema from docstrings.
+    Kernel runtime will extract JSON schema from signatures/docstrings.
     """
 
     channel_name: str = ""
@@ -85,7 +90,7 @@ class ChannelTools(ABC):
 
         Each function should:
         - Have a descriptive docstring with Args section
-        - Return ToolResponse
+        - Return string-like result
         - Use self._get_context() to access current chat info
         """
         ...

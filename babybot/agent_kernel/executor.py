@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -9,6 +11,8 @@ from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, Mod
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import ExecutionContext, TaskContract, TaskResult, ToolLease
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,22 +47,46 @@ class SingleAgentExecutor:
             messages.append(ModelMessage(role="system", content=system_prompt))
         messages.append(ModelMessage(role="user", content=task.description))
 
+        available_tools = self.tools.tool_schemas(base_lease)
+        tool_names = [t["function"]["name"] for t in available_tools]
+        if not tool_names:
+            # Debug: dump registry contents when no tools found
+            all_tools = {n: rt.group for n, rt in self.tools._tools.items()}
+            logger.warning(
+                "Executor NO TOOLS task=%s lease=%s registry_tools=%s",
+                task.task_id, base_lease, all_tools,
+            )
+        logger.info(
+            "Executor start task=%s max_steps=%d tools=%s lease_groups=%s include_tools=%s exclude_tools=%s",
+            task.task_id, self.policy.max_steps, tool_names,
+            list(base_lease.include_groups),
+            list(base_lease.include_tools),
+            list(base_lease.exclude_tools),
+        )
+
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
         for step in range(1, max(1, self.policy.max_steps) + 1):
             if heartbeat is not None:
                 heartbeat.beat()
             context.emit("executor.step", task_id=task.task_id, step=step)
+            logger.info("Executor step=%d/%d task=%s", step, self.policy.max_steps, task.task_id)
+
             response = await self.model.generate(
                 ModelRequest(
                     messages=tuple(messages),
-                    tools=self.tools.tool_schemas(base_lease),
+                    tools=available_tools,
                     metadata={"task_id": task.task_id, "step": step},
                 ),
                 context,
             )
 
             if response.tool_calls:
+                logger.info(
+                    "Executor tool_calls task=%s step=%d calls=%s",
+                    task.task_id, step,
+                    [tc.name for tc in response.tool_calls],
+                )
                 messages.append(
                     ModelMessage(
                         role="assistant",
@@ -70,9 +98,25 @@ class SingleAgentExecutor:
                     registered = self.tools.get(tool_call.name)
                     if not registered or not self._tool_allowed(registered.group, tool_call.name, base_lease):
                         tool_output = f"Tool unavailable: {tool_call.name}"
+                        logger.warning(
+                            "Executor tool unavailable task=%s tool=%s",
+                            task.task_id, tool_call.name,
+                        )
                     else:
+                        logger.info(
+                            "Executor invoke task=%s tool=%s args_keys=%s",
+                            task.task_id, tool_call.name,
+                            list(tool_call.arguments.keys()),
+                        )
+                        started = time.perf_counter()
                         result = await registered.tool.invoke(tool_call.arguments, tool_context)
+                        elapsed = time.perf_counter() - started
                         tool_output = result.content if result.ok else f"Tool error: {result.error}"
+                        logger.info(
+                            "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
+                            task.task_id, tool_call.name, result.ok,
+                            elapsed, len(tool_output),
+                        )
                     if heartbeat is not None:
                         heartbeat.beat()
                     messages.append(
@@ -87,8 +131,16 @@ class SingleAgentExecutor:
 
             text = response.text.strip()
             if text:
+                logger.info(
+                    "Executor final answer task=%s step=%d output_len=%d",
+                    task.task_id, step, len(text),
+                )
                 return TaskResult(task_id=task.task_id, status="succeeded", output=text)
 
+        logger.warning(
+            "Executor exhausted steps task=%s max_steps=%d",
+            task.task_id, self.policy.max_steps,
+        )
         return TaskResult(
             task_id=task.task_id,
             status="failed",

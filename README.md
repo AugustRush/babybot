@@ -1,6 +1,6 @@
 # BabyBot
 
-基于 agentscope 1.0+ 的多 Agent 协同系统，支持统一的 JSON 配置。
+基于轻量内核（无 AgentScope 依赖）的多 Agent 协同系统，支持统一的 JSON 配置。
 
 ## 快速开始
 
