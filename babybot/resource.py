@@ -38,7 +38,6 @@ from .mcp_runtime import (
     StdioMCPRuntimeClient,
     close_clients_best_effort,
 )
-from .model_gateway import OpenAICompatibleGateway
 from .worker import create_worker_executor
 
 logger = logging.getLogger(__name__)
@@ -73,8 +72,6 @@ class LoadedSkill:
     tools: tuple[str, ...] = ()
 
 
-class SkillSelection(BaseModel):
-    skills: list[str] = Field(default_factory=list)
 
 
 class CallableTool:
@@ -177,8 +174,6 @@ class ResourceManager:
         self.mcp_clients: dict[str, BaseMCPRuntimeClient] = {}
         self.channel_tools: dict[str, ChannelTools] = {}
         self.skills: dict[str, LoadedSkill] = {}
-        self._gateway: OpenAICompatibleGateway | None = None
-        self._skill_route_cache: dict[str, list[SkillPack]] = {}
         self._active_write_root: contextvars.ContextVar[str] = contextvars.ContextVar(
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
@@ -899,8 +894,6 @@ class ResourceManager:
         self.channel_tools.clear()
         self.mcp_clients.clear()
         self.skills.clear()
-        self._gateway = None
-        self._skill_route_cache.clear()
         self._load_config()
         self._register_builtin_tools()
 
@@ -908,106 +901,11 @@ class ResourceManager:
         active = [s for s in self.skills.values() if s.active]
         if not active:
             return []
-        text = (task_description or "").strip().lower()
-        explicit = []
-        for skill in active:
-            slug = skill.name.lower()
-            if self._is_explicit_skill_mention(text, slug):
-                explicit.append(skill)
-        if explicit:
-            return [
-                SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
-                for s in explicit[:3]
-            ]
-        # Check cache: reuse routing result for identical task descriptions
-        cache_key = task_description.strip()
-        if cache_key in self._skill_route_cache:
-            logger.info("Skill routing cache hit for task: %s", cache_key[:80])
-            return list(self._skill_route_cache[cache_key])
-        semantic = await self._select_skill_packs_semantic(task_description, active)
-        if semantic is None:
-            # Routing failed (timeout/error): fall back to a small active skill set.
-            fallback = sorted(active, key=lambda s: s.name.lower())[:2]
-            logger.warning(
-                "Skill routing unavailable, fallback skills=%s",
-                [s.name for s in fallback],
-            )
-            result = [
-                SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
-                for s in fallback
-            ]
-            self._skill_route_cache[cache_key] = result
-            return result
-        self._skill_route_cache[cache_key] = semantic
-        if semantic:
-            return semantic
-        return []
-
-    @staticmethod
-    def _is_explicit_skill_mention(text: str, skill_name: str) -> bool:
-        if not skill_name:
-            return False
-        if f"${skill_name}" in text:
-            return True
-        # Strict word-boundary match for latin-like skill names to avoid
-        # accidental single-letter substring hits.
-        if re.fullmatch(r"[a-z0-9_-]+", skill_name):
-            if len(skill_name) < 2:
-                return False
-            pattern = rf"(?<![a-z0-9_-]){re.escape(skill_name)}(?![a-z0-9_-])"
-            return re.search(pattern, text) is not None
-        # Non-latin names keep substring match.
-        return skill_name in text
-
-    async def _select_skill_packs_semantic(
-        self,
-        task_description: str,
-        active_skills: list[LoadedSkill],
-    ) -> list[SkillPack] | None:
-        catalog = [
-            {
-                "name": s.name,
-                "description": s.description,
-                "tools": list(s.tools),
-            }
-            for s in active_skills
+        return [
+            SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
+            for s in active
         ]
-        try:
-            if self._gateway is None:
-                self._gateway = OpenAICompatibleGateway(self.config)
-            selection = await asyncio.wait_for(
-                self._gateway.complete_structured(
-                    system_prompt=(
-                        "你是技能路由器。根据任务从技能目录选择最相关的 0-3 个技能名。"
-                        "只输出 JSON：{\"skills\": [\"name1\", \"name2\"]}"
-                    ),
-                    user_prompt=(
-                        f"任务：{task_description}\n"
-                        f"技能目录：{json.dumps(catalog, ensure_ascii=False)}"
-                    ),
-                    model_cls=SkillSelection,
-                ),
-                timeout=self.config.system.skill_route_timeout,
-            )
-        except Exception as exc:
-            logger.warning("Skill routing failed: %r", exc)
-            return None
-        if not selection:
-            return []
-        lookup = {s.name.lower(): s for s in active_skills}
-        packs: list[SkillPack] = []
-        for name in selection.skills[:3]:
-            skill = lookup.get((name or "").strip().lower())
-            if not skill:
-                continue
-            packs.append(
-                SkillPack(
-                    name=skill.name,
-                    system_prompt=skill.prompt,
-                    tool_lease=skill.lease,
-                )
-            )
-        return packs
+
 
     def _build_worker_sys_prompt(
         self,

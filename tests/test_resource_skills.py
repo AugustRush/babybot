@@ -23,7 +23,6 @@ Do something.
 
 def test_select_skill_packs_returns_all_active_skills() -> None:
     manager = object.__new__(ResourceManager)
-    manager._gateway = None
     manager.skills = {
         "code-review": LoadedSkill(
             name="code-review",
@@ -48,8 +47,8 @@ def test_select_skill_packs_returns_all_active_skills() -> None:
         ),
     }
     packs = asyncio.run(manager._select_skill_packs("请使用 $text-to-image 画一只兔子"))
-    names = [p.name for p in packs]
-    assert names == ["text-to-image"]
+    names = sorted(p.name for p in packs)
+    assert names == ["code-review", "text-to-image"]
 
 
 def test_tokenize_supports_cjk_and_latin_terms() -> None:
@@ -116,9 +115,8 @@ def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
     assert any(name.endswith("__generate_image") for name in tools)
 
 
-def test_select_skill_packs_fallback_when_semantic_router_unavailable() -> None:
+def test_select_skill_packs_loads_all_active_skills() -> None:
     manager = object.__new__(ResourceManager)
-    manager._skill_route_cache = {}
     manager.skills = {
         "a": LoadedSkill(
             name="a",
@@ -143,9 +141,5 @@ def test_select_skill_packs_fallback_when_semantic_router_unavailable() -> None:
         ),
     }
 
-    async def _router_fail(task_description: str, active_skills: list[LoadedSkill]):
-        return None
-
-    manager._select_skill_packs_semantic = _router_fail  # type: ignore[attr-defined]
     packs = asyncio.run(manager._select_skill_packs("draw an image"))
-    assert [p.name for p in packs] == ["a", "b"]
+    assert sorted(p.name for p in packs) == ["a", "b", "c"]
