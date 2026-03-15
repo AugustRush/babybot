@@ -34,7 +34,8 @@
     "idle_timeout": 60,
     "max_concurrency": 8,
     "max_per_chat": 1,
-    "send_ack": true
+    "send_ack": true,
+    "python_executable": ""
   },
   "channels": {
     "feishu": {

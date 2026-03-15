@@ -70,7 +70,12 @@ class OpenAICompatibleGateway(ModelProvider):
         )
         started = time.perf_counter()
         try:
-            completion = await client.chat.completions.create(**kwargs)
+            heartbeat = context.state.get("heartbeat")
+            if heartbeat is not None:
+                async with heartbeat.keep_alive():
+                    completion = await client.chat.completions.create(**kwargs)
+            else:
+                completion = await client.chat.completions.create(**kwargs)
         except Exception:
             logger.exception("LLM request failed task=%s step=%s", task_id, step)
             raise
@@ -106,14 +111,19 @@ class OpenAICompatibleGateway(ModelProvider):
             finish_reason=choice.finish_reason or "stop",
         )
 
-    async def complete(self, system_prompt: str, user_prompt: str) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, heartbeat: Any = None
+    ) -> str:
         req = ModelRequest(
             messages=(
                 ModelMessage(role="system", content=system_prompt),
                 ModelMessage(role="user", content=user_prompt),
             )
         )
-        resp = await self.generate(req, ExecutionContext())
+        state: dict[str, Any] = {}
+        if heartbeat is not None:
+            state["heartbeat"] = heartbeat
+        resp = await self.generate(req, ExecutionContext(state=state))
         return resp.text.strip()
 
     async def complete_structured(
@@ -121,6 +131,7 @@ class OpenAICompatibleGateway(ModelProvider):
         system_prompt: str,
         user_prompt: str,
         model_cls: type[T],
+        heartbeat: Any = None,
     ) -> T | None:
         instruction = (
             "请严格输出 JSON 对象，不要输出 markdown 或额外解释。"
@@ -129,6 +140,7 @@ class OpenAICompatibleGateway(ModelProvider):
         text = await self.complete(
             system_prompt=system_prompt,
             user_prompt=f"{user_prompt}\n\n{instruction}",
+            heartbeat=heartbeat,
         )
         start = text.find("{")
         end = text.rfind("}")

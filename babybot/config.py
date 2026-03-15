@@ -56,6 +56,7 @@ class SystemConfig:
     max_concurrency: int = 8
     max_per_chat: int = 1
     send_ack: bool = True
+    python_executable: str = ""
 
 
 @dataclass
@@ -146,6 +147,7 @@ class Config:
             max_concurrency=system_conf.get("max_concurrency", 8),
             max_per_chat=system_conf.get("max_per_chat", 1),
             send_ack=system_conf.get("send_ack", True),
+            python_executable=system_conf.get("python_executable", ""),
         )
 
         # Resource configuration
@@ -221,6 +223,7 @@ class Config:
                 "max_concurrency": 8,
                 "max_per_chat": 1,
                 "send_ack": True,
+                "python_executable": "",
             },
             "channels": {
                 "feishu": {
@@ -306,6 +309,7 @@ class Config:
                 "max_concurrency": self.system.max_concurrency,
                 "max_per_chat": self.system.max_per_chat,
                 "send_ack": self.system.send_ack,
+                "python_executable": self.system.python_executable,
             },
             "channels": {
                 "feishu": {

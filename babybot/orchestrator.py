@@ -100,7 +100,9 @@ class OrchestratorAgent:
 - evidence: 支撑结论的关键证据列表
 - failed_tasks: 失败任务与原因列表"""
 
-    async def _route_task(self, user_input: str) -> RouteDecision:
+    async def _route_task(
+        self, user_input: str, heartbeat: Heartbeat | None = None
+    ) -> RouteDecision:
         heuristic_complex = any(
             key in user_input.lower()
             for key in ["调研", "规划", "并行", "分步", "实现", "重构", "multi", "agent"]
@@ -110,6 +112,7 @@ class OrchestratorAgent:
             self._get_router_prompt(),
             user_input,
             RouteDecision,
+            heartbeat=heartbeat,
         )
         decision = structured or RouteDecision(
             route="complex" if heuristic_complex else "complex",
@@ -140,12 +143,15 @@ class OrchestratorAgent:
             )
         return ExecutionPlan(mode=plan.mode, tasks=normalized, rationale=plan.rationale)
 
-    async def _make_execution_plan(self, user_input: str) -> ExecutionPlan:
+    async def _make_execution_plan(
+        self, user_input: str, heartbeat: Heartbeat | None = None
+    ) -> ExecutionPlan:
         logger.info("Making execution plan (calling LLM)...")
         plan = await self.gateway.complete_structured(
             self._get_planner_prompt(),
             user_input,
             ExecutionPlan,
+            heartbeat=heartbeat,
         )
         if not plan or not plan.tasks:
             plan = ExecutionPlan(
@@ -195,7 +201,9 @@ class OrchestratorAgent:
             self._collected_media.extend(media)
         if text.strip():
             return text
-        return await self.gateway.complete(self._get_direct_prompt(), user_input)
+        return await self.gateway.complete(
+            self._get_direct_prompt(), user_input, heartbeat=heartbeat
+        )
 
     async def _execute_subtask(
         self, task: TaskSpec, heartbeat: Heartbeat | None = None
@@ -228,7 +236,7 @@ class OrchestratorAgent:
     async def _run_plan_with_scheduler(
         self, user_input: str, heartbeat: Heartbeat | None = None
     ) -> str | None:
-        plan = await self._make_execution_plan(user_input)
+        plan = await self._make_execution_plan(user_input, heartbeat)
         if heartbeat is not None:
             heartbeat.beat()
         logger.info("Plan ready, building task specs...")
@@ -288,6 +296,7 @@ class OrchestratorAgent:
             self._get_synth_prompt(),
             json.dumps(payload, ensure_ascii=False, indent=2),
             SynthesizedAnswer,
+            heartbeat=heartbeat,
         )
         if heartbeat is not None:
             heartbeat.beat()
@@ -320,7 +329,7 @@ class OrchestratorAgent:
             heartbeat.beat()
 
         try:
-            decision = await self._route_task(user_input)
+            decision = await self._route_task(user_input, heartbeat)
             if heartbeat is not None:
                 heartbeat.beat()
 

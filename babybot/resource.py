@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import sys
 import threading
 import time
@@ -113,8 +114,27 @@ class CallableTool:
                 value = await self._func(**kwargs)
             else:
                 # Run sync callables in a thread to avoid blocking the loop.
+                # Use contextvars.copy_context() so channel context etc.
+                # are visible inside the thread (Python <3.12 doesn't copy
+                # context automatically in run_in_executor).
+                # Also chdir to the active write root so relative paths
+                # (e.g. result_image.jpg) resolve inside the workspace.
                 loop = asyncio.get_running_loop()
-                value = await loop.run_in_executor(None, lambda: self._func(**kwargs))
+                ctx = contextvars.copy_context()
+                mgr = ResourceManager.get_instance()
+                write_root = str(mgr._get_active_write_root())
+
+                def _run_in_workspace() -> Any:
+                    saved_cwd = os.getcwd()
+                    try:
+                        os.chdir(write_root)
+                        return self._func(**kwargs)
+                    finally:
+                        os.chdir(saved_cwd)
+
+                value = await loop.run_in_executor(
+                    None, ctx.run, _run_in_workspace
+                )
             return ToolResult(ok=True, content=self._normalize_result(value))
         except Exception as exc:
             return ToolResult(ok=False, error=str(exc))
@@ -742,10 +762,11 @@ class ResourceManager:
                 sorted(t.tool.name for t in self.registry.list(merged_lease))
             ) or "无"
             logger.info(
-                "Run subagent agent=%s write_root=%s selected_skills=%s include_groups=%s include_tools=%s exclude_tools=%s",
+                "Run subagent agent=%s write_root=%s selected_skills=%s tools=%s include_groups=%s include_tools=%s exclude_tools=%s",
                 agent_name,
                 write_root,
                 [s.name for s in skill_packs],
+                tools_text,
                 list(merged_lease.include_groups),
                 list(merged_lease.include_tools),
                 list(merged_lease.exclude_tools),
@@ -1090,6 +1111,25 @@ class ResourceManager:
                 return candidate
         return ws
 
+    def _get_user_python(self) -> str:
+        """Return a Python executable for user code, avoiding the project venv."""
+        configured = self.config.system.python_executable
+        if configured:
+            return configured
+        found = shutil.which("python3")
+        if found and "venv" not in found:
+            return found
+        return sys.executable
+
+    def _clean_env(self) -> dict[str, str]:
+        """Build an env dict with VIRTUAL_ENV removed and .venv/bin stripped from PATH."""
+        env = dict(os.environ)
+        env.pop("VIRTUAL_ENV", None)
+        path = env.get("PATH", "")
+        parts = [p for p in path.split(os.pathsep) if ".venv" not in p]
+        env["PATH"] = os.pathsep.join(parts)
+        return env
+
     async def _workspace_execute_python_code(
         self,
         code: str,
@@ -1098,11 +1138,12 @@ class ResourceManager:
     ) -> str:
         ws = str(self._get_active_write_root())
         proc = await asyncio.create_subprocess_exec(
-            sys.executable,
+            self._get_user_python(),
             "-c",
             f"import os\nos.chdir({ws!r})\n{code}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._clean_env(),
         )
         timeout_s = self._coerce_timeout(timeout, default=300.0)
         communicate_coro = proc.communicate()
@@ -1143,6 +1184,7 @@ class ResourceManager:
             guarded,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._clean_env(),
         )
         timeout_s = self._coerce_timeout(timeout, default=300.0)
         communicate_coro = proc.communicate()

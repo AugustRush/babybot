@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
-from typing import TypeVar
+from typing import AsyncIterator, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,10 @@ class Heartbeat:
         # within *idle_timeout* seconds.
 
         result = await hb.watch(some_coro(), hard_timeout=180)
+
+        # For long LLM calls that can't beat internally, use keep_alive:
+        async with hb.keep_alive():
+            result = await slow_llm_call()
     """
 
     def __init__(self, idle_timeout: float = 60.0) -> None:
@@ -35,6 +40,30 @@ class Heartbeat:
         """Record a heartbeat (called by agent steps / tool invocations)."""
         self._last_beat = time.monotonic()
         self._event.set()
+
+    @contextlib.asynccontextmanager
+    async def keep_alive(self, interval: float | None = None) -> AsyncIterator[None]:
+        """Background ticker that beats periodically.
+
+        Use this around long-running awaits (e.g. LLM calls) that cannot
+        beat on their own.  Beats every *interval* seconds (default:
+        ``idle_timeout / 3``).
+        """
+        if interval is None:
+            interval = max(5.0, self.idle_timeout / 3)
+
+        async def _ticker() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                self.beat()
+
+        task = asyncio.create_task(_ticker())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     async def watch(self, coro, hard_timeout: float | None = None) -> T:  # type: ignore[type-var]
         """Run *coro* as a task while monitoring heartbeat liveness.
