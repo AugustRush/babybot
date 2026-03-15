@@ -4,11 +4,18 @@ from .resource import ResourceManager
 from .scheduler import Scheduler
 
 __version__ = "0.1.0"
-__all__ = ["Config", "OrchestratorAgent", "ResourceManager", "Scheduler", "main"]
+__all__ = ["Config", "OrchestratorAgent", "ResourceManager", "Scheduler", "main", "gateway"]
 
 
 def main():
-    """Entry point for the babybot CLI."""
+    """Entry point for the interactive babybot CLI."""
     from .cli import run
 
     run()
+
+
+def gateway():
+    """Entry point for the channel gateway (starts all enabled channels)."""
+    from .cli import run_gateway
+
+    run_gateway()

@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 babybot = "babybot:main"
+gateway = "babybot:gateway"
 
 [build-system]
 requires = ["hatchling"]
