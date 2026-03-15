@@ -130,12 +130,13 @@ class OrchestratorAgent:
         try:
             async with lock:
                 threshold = self.config.system.context_compact_threshold
-                if tape.total_tokens_since_anchor() <= threshold:
-                    return
 
-                # Collect entries to summarize
+                # Collect entries once, compute tokens from them
                 old_entries = tape.entries_since_anchor()
                 if not old_entries:
+                    return
+                total_tokens = sum(e.token_estimate for e in old_entries)
+                if total_tokens <= threshold:
                     return
 
                 # Build text to summarize

@@ -186,8 +186,7 @@ class TestTapeStore:
         assert "chat0" not in store._cache
         assert "chat1" not in store._cache
         # But they're still in DB
-        store._cache.clear()
-        store._access_order.clear()
+        store.clear()
         tape0 = store.get_or_create("chat0")
         assert len(tape0.entries) == 1
 
@@ -266,6 +265,24 @@ class TestTapeStore:
 
         results = store.search_relevant("chat1", "zzzznotexist", limit=5)
         assert results == []
+
+    def test_search_relevant_bm25_idf_ranking(self, tmp_path):
+        """BM25 should rank entries with rare keywords higher than common ones."""
+        store = self._make_store(tmp_path)
+        tape = store.get_or_create("chat1")
+        # "你好" appears in many messages (common), "小猪" only in one (rare)
+        entries = [
+            tape.append("message", {"role": "user", "content": "你好，今天天气不错"}),
+            tape.append("message", {"role": "user", "content": "你好，我想聊天"}),
+            tape.append("message", {"role": "user", "content": "你好，帮我查东西"}),
+            tape.append("message", {"role": "user", "content": "画一只小猪，你好"}),
+        ]
+        store.save_entries("chat1", entries)
+
+        # Search for "小猪 你好" — the entry with rare "小猪" should rank first
+        results = store.search_relevant("chat1", "小猪你好", limit=4)
+        assert len(results) >= 1
+        assert "小猪" in results[0].payload["content"]
 
 
 # ── _build_history_messages ────────────────────────────────────────

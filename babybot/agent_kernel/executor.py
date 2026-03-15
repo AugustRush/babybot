@@ -11,6 +11,7 @@ from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, Mod
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import ExecutionContext, TaskContract, TaskResult, ToolLease
+from ..context import _extract_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +302,6 @@ def _build_history_messages(
 
     # 3. Recent entries → hybrid recency+relevance scoring
     if msg_entries and query:
-        from ..context import _extract_keywords
         kws = _extract_keywords(query)
     else:
         kws = []

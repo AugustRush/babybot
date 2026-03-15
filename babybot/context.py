@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sqlite3
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,19 @@ logger = logging.getLogger(__name__)
 # CJK Unicode ranges for keyword extraction
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+")
 _LATIN_WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
+
+# High-frequency CJK bigrams that carry little semantic value
+_CJK_STOPWORDS: set[str] = {
+    "的是", "是的", "了吗", "吗？", "怎么", "什么", "这个", "那个",
+    "一个", "不是", "没有", "可以", "我们", "他们", "她们", "你们",
+    "已经", "就是", "还是", "但是", "因为", "所以", "如果", "虽然",
+    "而且", "或者", "以及", "不过", "然后", "这样", "那样", "现在",
+    "知道", "觉得", "应该", "需要", "能够", "可能", "时候", "地方",
+}
+_LATIN_STOPWORDS: set[str] = {
+    "the", "is", "at", "in", "on", "to", "of", "and", "or", "for",
+    "it", "be", "as", "by", "an", "no", "do", "if", "so",
+}
 
 
 def _extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
@@ -33,14 +48,14 @@ def _extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
         segment = match.group()
         for i in range(len(segment) - 1):
             bigram = segment[i:i + 2]
-            if bigram not in seen:
+            if bigram not in seen and bigram not in _CJK_STOPWORDS:
                 seen.add(bigram)
                 keywords.append(bigram)
 
     # Latin words
     for match in _LATIN_WORD_RE.finditer(text):
         word = match.group().lower()
-        if word not in seen:
+        if word not in seen and word not in _LATIN_STOPWORDS:
             seen.add(word)
             keywords.append(word)
 
@@ -56,11 +71,16 @@ class Entry:
     payload: dict[str, Any]
     meta: dict[str, Any]
     timestamp: float
+    _token_est: int = field(default=-1, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token_est < 0:
+            est = len(json.dumps(self.payload, ensure_ascii=False)) // 3
+            object.__setattr__(self, "_token_est", est)
 
     @property
     def token_estimate(self) -> int:
-        text = json.dumps(self.payload, ensure_ascii=False)
-        return len(text) // 3
+        return self._token_est
 
     @staticmethod
     def message(entry_id: int, role: str, content: str, **meta: Any) -> Entry:
@@ -121,8 +141,7 @@ class TapeStore:
     def __init__(self, db_path: Path, max_chats: int = 500):
         self._db_path = db_path
         self._max_chats = max_chats
-        self._cache: dict[str, Tape] = {}
-        self._access_order: list[str] = []
+        self._cache: OrderedDict[str, Tape] = OrderedDict()
         self._db: sqlite3.Connection | None = None
 
     def _ensure_db(self) -> sqlite3.Connection:
@@ -148,12 +167,23 @@ class TapeStore:
                 kind      TEXT NOT NULL,
                 payload   TEXT NOT NULL,
                 meta      TEXT DEFAULT '{}',
+                content   TEXT DEFAULT '',
                 timestamp REAL NOT NULL,
                 PRIMARY KEY (chat_id, entry_id)
             );
             CREATE INDEX IF NOT EXISTS idx_entries_kind
                 ON entries(chat_id, kind);
         """)
+        # Migration: add content column if missing (existing DBs)
+        try:
+            db.execute("SELECT content FROM entries LIMIT 0")
+        except sqlite3.OperationalError:
+            db.execute("ALTER TABLE entries ADD COLUMN content TEXT DEFAULT ''")
+            db.execute(
+                "UPDATE entries SET content = json_extract(payload, '$.content') "
+                "WHERE kind = 'message' AND (content IS NULL OR content = '')"
+            )
+            db.commit()
 
     def get_or_create(self, chat_id: str) -> Tape:
         if chat_id in self._cache:
@@ -179,8 +209,8 @@ class TapeStore:
             (chat_id, chat_id, now, now),
         )
         db.executemany(
-            "INSERT INTO entries (entry_id, chat_id, kind, payload, meta, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO entries (entry_id, chat_id, kind, payload, meta, content, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     entry.entry_id,
@@ -188,6 +218,7 @@ class TapeStore:
                     entry.kind,
                     json.dumps(entry.payload, ensure_ascii=False),
                     json.dumps(entry.meta, ensure_ascii=False),
+                    entry.payload.get("content", "") if entry.kind == "message" else "",
                     entry.timestamp,
                 )
                 for entry in entries
@@ -201,9 +232,8 @@ class TapeStore:
     ) -> list[Entry]:
         """Search across ALL message entries for this chat (cross-anchor recall).
 
-        Uses keyword extraction + LIKE substring matching to support both
-        CJK and Latin text without external dependencies.
-        Returns entries ranked by match count, excluding any in *exclude_ids*.
+        Uses keyword extraction + LIKE candidate fetching + BM25 ranking.
+        Supports both CJK and Latin text without external dependencies.
         """
         query = query.strip()
         if not query:
@@ -211,16 +241,15 @@ class TapeStore:
         db = self._ensure_db()
         exclude = exclude_ids or set()
 
-        # Extract search keywords (2+ char segments for CJK, words for Latin)
         keywords = _extract_keywords(query)
         if not keywords:
             return []
 
-        # Build LIKE conditions — match ANY keyword
+        # Fetch candidates via LIKE on content column (any keyword match)
         conditions = []
         params: list[str | int] = [chat_id, "message"]
         for kw in keywords:
-            conditions.append("payload LIKE ?")
+            conditions.append("content LIKE ?")
             params.append(f"%{kw}%")
 
         where_clause = " OR ".join(conditions)
@@ -234,7 +263,28 @@ class TapeStore:
         if not rows:
             return []
 
-        # Score by number of keyword hits and filter excludes
+        # Fetch total message count + avg content length for BM25
+        stats = db.execute(
+            "SELECT COUNT(*), AVG(LENGTH(content)) FROM entries "
+            "WHERE chat_id=? AND kind='message'",
+            (chat_id,),
+        ).fetchone()
+        total_docs = max(1, stats[0])
+        avg_dl = max(1.0, float(stats[1] or 100))
+
+        # Batch doc frequency: one query per keyword on content column
+        doc_freq: dict[str, int] = {}
+        for kw in keywords:
+            df_row = db.execute(
+                "SELECT COUNT(*) FROM entries "
+                "WHERE chat_id=? AND kind='message' AND content LIKE ?",
+                (chat_id, f"%{kw}%"),
+            ).fetchone()
+            doc_freq[kw] = df_row[0] if df_row else 0
+
+        # BM25 scoring (k1=1.5, b=0.75)
+        k1 = 1.5
+        b = 0.75
         scored: list[tuple[float, Entry]] = []
         for r in rows:
             eid = r[0]
@@ -242,9 +292,18 @@ class TapeStore:
                 continue
             entry = Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[4])
             content = entry.payload.get("content", "")
-            hits = sum(1 for kw in keywords if kw in content)
-            if hits > 0:
-                scored.append((hits, entry))
+            dl = len(content)
+            score = 0.0
+            for kw in keywords:
+                tf = content.count(kw)
+                if tf == 0:
+                    continue
+                df = max(1, doc_freq.get(kw, 1))
+                idf = math.log((total_docs - df + 0.5) / (df + 0.5) + 1.0)
+                tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avg_dl))
+                score += idf * tf_norm
+            if score > 0:
+                scored.append((score, entry))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [entry for _, entry in scored[:limit]]
@@ -279,15 +338,11 @@ class TapeStore:
         return Tape(chat_id, entries)
 
     def _touch(self, chat_id: str) -> None:
-        if chat_id in self._access_order:
-            self._access_order.remove(chat_id)
-        self._access_order.append(chat_id)
+        self._cache.move_to_end(chat_id)
 
     def _evict_if_needed(self) -> None:
-        while len(self._cache) > self._max_chats and self._access_order:
-            oldest = self._access_order.pop(0)
-            self._cache.pop(oldest, None)
+        while len(self._cache) > self._max_chats:
+            self._cache.popitem(last=False)
 
     def clear(self) -> None:
         self._cache.clear()
-        self._access_order.clear()
