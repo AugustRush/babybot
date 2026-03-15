@@ -734,7 +734,7 @@ class ResourceManager:
         agent_name: str = "Worker",
         heartbeat: "Heartbeat | None" = None,
     ) -> tuple[str, list[str]]:
-        write_root = self._infer_write_root(task_description)
+        write_root = self._get_output_dir()
         token = self._active_write_root.set(str(write_root))
         started = time.perf_counter()
         try:
@@ -1087,29 +1087,10 @@ class ResourceManager:
             return raw
         return ws
 
-    def _infer_write_root(self, task_description: str) -> Path:
-        ws = self.config.workspace_dir.resolve()
-        ws_skills = (ws / "skills").resolve()
-        text = task_description or ""
-
-        skill_match = re.search(
-            r"workspace/skills/([A-Za-z0-9._-]+)",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if skill_match:
-            return (ws_skills / skill_match.group(1)).resolve()
-
-        workspace_match = re.search(
-            r"workspace/([A-Za-z0-9._/-]+)",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if workspace_match:
-            candidate = (ws / workspace_match.group(1)).resolve()
-            if self._is_within(ws, candidate):
-                return candidate
-        return ws
+    def _get_output_dir(self) -> Path:
+        output = self.config.workspace_dir.resolve() / "output"
+        output.mkdir(parents=True, exist_ok=True)
+        return output
 
     def _get_user_python(self) -> str:
         """Return a Python executable for user code, avoiding the project venv."""
@@ -1273,9 +1254,12 @@ class ResourceManager:
 
     def _extract_media_from_text(self, text: str) -> list[str]:
         paths: list[str] = []
+        write_root = self._get_active_write_root()
         for match in self._MEDIA_PATH_RE.finditer(text or ""):
             raw = match.group(1)
             path = Path(os.path.expanduser(raw))
+            if not path.is_absolute():
+                path = write_root / path
             if path.is_file():
                 paths.append(str(path.resolve()))
         return sorted(set(paths))
