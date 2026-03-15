@@ -57,6 +57,9 @@ class SystemConfig:
     max_per_chat: int = 1
     send_ack: bool = True
     python_executable: str = ""
+    context_history_tokens: int = 2000
+    context_compact_threshold: int = 3000
+    context_max_chats: int = 500
 
 
 @dataclass

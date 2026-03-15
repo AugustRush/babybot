@@ -36,7 +36,7 @@ class _Orchestrator:
     def __init__(self) -> None:
         self.resource_manager = _Resource()
 
-    async def process_task(self, user_input: str, heartbeat: Any = None) -> TaskResponse:
+    async def process_task(self, user_input: str, chat_key: str = "", heartbeat: Any = None) -> TaskResponse:
         # Simulate a stuck task that never beats the heartbeat.
         await asyncio.sleep(10)
         return TaskResponse(text="late")

@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .channels.tools import ChannelTools, ChannelToolContext
+    from .context import Tape
     from .heartbeat import Heartbeat
 
 
@@ -727,6 +728,7 @@ class ResourceManager:
         task_description: str,
         lease: dict[str, Any] | None = None,
         agent_name: str = "Worker",
+        tape: "Tape | None" = None,
         heartbeat: "Heartbeat | None" = None,
     ) -> tuple[str, list[str]]:
         write_root = self._get_output_dir()
@@ -796,7 +798,13 @@ class ResourceManager:
                 ),
                 ExecutionContext(
                     session_id=agent_name,
-                    state={"heartbeat": heartbeat} if heartbeat else {},
+                    state={
+                        k: v for k, v in [
+                            ("heartbeat", heartbeat),
+                            ("tape", tape),
+                            ("context_history_tokens", self.config.system.context_history_tokens),
+                        ] if v
+                    },
                 ),
             )
             text = result.output if result.status == "succeeded" else result.error

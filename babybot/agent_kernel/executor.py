@@ -45,6 +45,13 @@ class SingleAgentExecutor:
         messages: list[ModelMessage] = []
         if system_prompt:
             messages.append(ModelMessage(role="system", content=system_prompt))
+
+        # Inject history from tape (anchor summary + recent entries)
+        tape = context.state.get("tape")
+        if tape is not None:
+            history_budget = context.state.get("context_history_tokens", 2000)
+            messages.extend(_build_history_messages(tape, history_budget))
+
         messages.append(ModelMessage(role="user", content=task.description))
 
         available_tools = self.tools.tool_schemas(base_lease)
@@ -206,3 +213,49 @@ class EchoModelProvider:
                 ),
             )
         return ModelResponse(text=last.content)
+
+
+def _build_history_messages(tape: object, token_budget: int) -> list[ModelMessage]:
+    """Build history context messages from a Tape.
+
+    Extracts anchor summary as a system message, then recent message entries
+    as user/assistant messages within the token budget.
+    """
+    messages: list[ModelMessage] = []
+
+    last_anchor = getattr(tape, "last_anchor", None)
+    if last_anchor is None:
+        return messages
+    anchor = last_anchor()
+
+    # 1. Anchor summary → system message
+    if anchor is not None:
+        state = anchor.payload.get("state", {})
+        summary = state.get("summary", "") if isinstance(state, dict) else ""
+        if summary:
+            messages.append(ModelMessage(role="system", content=f"[对话背景]\n{summary}"))
+
+    # 2. Entries since anchor → user/assistant messages (skip the last user msg,
+    #    it will be added as the current task description by the executor)
+    entries_since = getattr(tape, "entries_since_anchor", None)
+    if entries_since is None:
+        return messages
+
+    recent = entries_since()
+    # Filter to message entries only, exclude the last user message
+    msg_entries = [e for e in recent if e.kind == "message"]
+    if msg_entries and msg_entries[-1].payload.get("role") == "user":
+        msg_entries = msg_entries[:-1]
+
+    budget_remaining = token_budget
+    for entry in msg_entries:
+        est = entry.token_estimate
+        if est > budget_remaining:
+            break
+        budget_remaining -= est
+        messages.append(ModelMessage(
+            role=entry.payload["role"],
+            content=entry.payload["content"],
+        ))
+
+    return messages
