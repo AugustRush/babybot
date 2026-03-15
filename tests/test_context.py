@@ -213,6 +213,60 @@ class TestTapeStore:
         assert tape2.entries[0].payload["name"] == "a2"
         assert tape2.entries[1].payload["content"] == "recent"
 
+    def test_save_entries_batch(self, tmp_path):
+        store = self._make_store(tmp_path)
+        tape = store.get_or_create("chat1")
+        e1 = tape.append("anchor", {"name": "start", "state": {}})
+        e2 = tape.append("message", {"role": "user", "content": "hello"})
+        e3 = tape.append("message", {"role": "assistant", "content": "world"})
+        store.save_entries("chat1", [e1, e2, e3])
+
+        store.clear()
+        tape2 = store.get_or_create("chat1")
+        assert len(tape2.entries) == 3
+        assert tape2.entries[1].payload["content"] == "hello"
+        assert tape2.entries[2].payload["content"] == "world"
+
+    def test_search_relevant_basic(self, tmp_path):
+        store = self._make_store(tmp_path)
+        tape = store.get_or_create("chat1")
+        e1 = tape.append("message", {"role": "user", "content": "画一只黑色小猪"})
+        e2 = tape.append("message", {"role": "assistant", "content": "好的，已生成黑色小猪图片"})
+        e3 = tape.append("anchor", {"name": "compact/1", "state": {"summary": "画了小猪"}})
+        e4 = tape.append("message", {"role": "user", "content": "今天天气怎么样"})
+        store.save_entries("chat1", [e1, e2, e3, e4])
+
+        # Search for "小猪" — should find pre-anchor entries
+        results = store.search_relevant("chat1", "小猪", limit=5)
+        assert len(results) >= 1
+        contents = [r.payload.get("content", "") for r in results]
+        assert any("小猪" in c for c in contents)
+
+    def test_search_relevant_excludes_ids(self, tmp_path):
+        store = self._make_store(tmp_path)
+        tape = store.get_or_create("chat1")
+        e1 = tape.append("message", {"role": "user", "content": "画一只小猪"})
+        e2 = tape.append("message", {"role": "user", "content": "小猪很可爱"})
+        store.save_entries("chat1", [e1, e2])
+
+        results = store.search_relevant("chat1", "小猪", limit=5, exclude_ids={e1.entry_id})
+        ids = {r.entry_id for r in results}
+        assert e1.entry_id not in ids
+
+    def test_search_relevant_empty_query(self, tmp_path):
+        store = self._make_store(tmp_path)
+        results = store.search_relevant("chat1", "", limit=5)
+        assert results == []
+
+    def test_search_relevant_no_match(self, tmp_path):
+        store = self._make_store(tmp_path)
+        tape = store.get_or_create("chat1")
+        e1 = tape.append("message", {"role": "user", "content": "hello world"})
+        store.save_entries("chat1", [e1])
+
+        results = store.search_relevant("chat1", "zzzznotexist", limit=5)
+        assert results == []
+
 
 # ── _build_history_messages ────────────────────────────────────────
 
@@ -241,6 +295,24 @@ class TestBuildHistoryMessages:
         # Last user message should be excluded (it's the current turn)
         assert len(msgs) == 1
 
+    def test_structured_anchor_state(self):
+        from babybot.agent_kernel.executor import _build_history_messages
+        tape = Tape("chat1")
+        tape.append("anchor", {"name": "compact/1", "state": {
+            "summary": "用户要求画小猪",
+            "entities": ["小猪", "黑色"],
+            "user_intent": "生成图片",
+            "pending": "等待用户确认颜色",
+        }})
+        tape.append("message", {"role": "user", "content": "继续"})
+
+        msgs = _build_history_messages(tape, 2000)
+        content = msgs[0].content
+        assert "用户要求画小猪" in content
+        assert "小猪" in content
+        assert "生成图片" in content
+        assert "等待用户确认颜色" in content
+
     def test_with_history_messages(self):
         from babybot.agent_kernel.executor import _build_history_messages
         tape = Tape("chat1")
@@ -268,3 +340,85 @@ class TestBuildHistoryMessages:
         msgs = _build_history_messages(tape, 500)
         # Should be limited by budget, not all 40 messages
         assert len(msgs) < 40
+
+    def test_token_budget_prefers_recent_entries(self):
+        from babybot.agent_kernel.executor import _build_history_messages
+
+        tape = Tape("chat1")
+        tape.append("anchor", {"name": "start", "state": {}})
+        tape.append("message", {"role": "user", "content": "old user " * 60})
+        tape.append("message", {"role": "assistant", "content": "old assistant " * 60})
+        tape.append("message", {"role": "user", "content": "recent user " * 60})
+        recent_asst = tape.append("message", {"role": "assistant", "content": "recent assistant " * 60})
+        tape.append("message", {"role": "user", "content": "current"})
+
+        msgs = _build_history_messages(tape, recent_asst.token_estimate + 2)
+        assert len(msgs) == 1
+        assert msgs[0].role == "assistant"
+        assert "recent assistant" in msgs[0].content
+
+    def test_token_budget_skips_oversized_recent_entry(self):
+        from babybot.agent_kernel.executor import _build_history_messages
+
+        tape = Tape("chat1")
+        tape.append("anchor", {"name": "start", "state": {}})
+        tape.append("message", {"role": "assistant", "content": "small keep me"})
+        tape.append("message", {"role": "assistant", "content": "x" * 5000})
+        tape.append("message", {"role": "user", "content": "current"})
+
+        msgs = _build_history_messages(tape, 50)
+        assert len(msgs) == 1
+        assert msgs[0].role == "assistant"
+        assert "small keep me" in msgs[0].content
+
+    def test_hybrid_scoring_prefers_relevant_recent(self):
+        """P1: When budget is tight, hybrid scoring picks relevant entries over purely old ones."""
+        from babybot.agent_kernel.executor import _build_history_messages
+
+        tape = Tape("chat1")
+        tape.append("anchor", {"name": "start", "state": {}})
+        # Old irrelevant message
+        tape.append("message", {"role": "user", "content": "无关内容填充" * 30})
+        tape.append("message", {"role": "assistant", "content": "好的无关回复" * 30})
+        # Relevant message about 小猪
+        tape.append("message", {"role": "user", "content": "画一只小猪"})
+        tape.append("message", {"role": "assistant", "content": "好的已生成小猪图片"})
+        # More irrelevant filler
+        tape.append("message", {"role": "user", "content": "其他话题讨论" * 30})
+        tape.append("message", {"role": "assistant", "content": "其他回复内容" * 30})
+        # Current turn
+        tape.append("message", {"role": "user", "content": "把小猪改成白色"})
+
+        # Tight budget: can only fit ~2 messages
+        msgs = _build_history_messages(tape, 120, query="把小猪改成白色")
+        contents = " ".join(m.content for m in msgs)
+        # Relevant "小猪" entries should be picked despite not being the most recent
+        assert "小猪" in contents
+
+    def test_cross_anchor_recall(self, tmp_path):
+        from babybot.agent_kernel.executor import _build_history_messages
+
+        store = TapeStore(db_path=tmp_path / "test.db")
+        tape = store.get_or_create("chat1")
+
+        # Pre-anchor history about "小猪"
+        e1 = tape.append("message", {"role": "user", "content": "画一只黑色小猪"})
+        e2 = tape.append("message", {"role": "assistant", "content": "好的，已生成黑色小猪图片"})
+        e3 = tape.append("anchor", {"name": "compact/1", "state": {"summary": "画了小猪"}})
+        # Post-anchor: unrelated topic
+        e4 = tape.append("message", {"role": "user", "content": "今天天气怎么样"})
+        e5 = tape.append("message", {"role": "assistant", "content": "今天晴天"})
+        # Current turn: user asks about 小猪 again
+        e6 = tape.append("message", {"role": "user", "content": "之前那个小猪改成白色"})
+        store.save_entries("chat1", [e1, e2, e3, e4, e5, e6])
+
+        msgs = _build_history_messages(
+            tape, 2000,
+            query="之前那个小猪改成白色",
+            tape_store=store,
+        )
+
+        # Should have: [对话背景], [相关历史] with 小猪 content, recent msgs
+        all_content = " ".join(m.content for m in msgs)
+        assert "画了小猪" in all_content  # anchor summary
+        assert "黑色小猪" in all_content  # BM25 recalled from pre-anchor

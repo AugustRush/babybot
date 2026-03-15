@@ -33,7 +33,10 @@
     "max_concurrency": 8,
     "max_per_chat": 1,
     "send_ack": true,
-    "python_executable": ""
+    "python_executable": "",
+    "context_history_tokens": 2000,
+    "context_compact_threshold": 3000,
+    "context_max_chats": 500
   },
   "channels": {
     "feishu": {

@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .channels.tools import ChannelTools, ChannelToolContext
-    from .context import Tape
+    from .context import Tape, TapeStore
     from .heartbeat import Heartbeat
 
 
@@ -729,6 +729,7 @@ class ResourceManager:
         lease: dict[str, Any] | None = None,
         agent_name: str = "Worker",
         tape: "Tape | None" = None,
+        tape_store: "TapeStore | None" = None,
         heartbeat: "Heartbeat | None" = None,
     ) -> tuple[str, list[str]]:
         write_root = self._get_output_dir()
@@ -802,8 +803,9 @@ class ResourceManager:
                         k: v for k, v in [
                             ("heartbeat", heartbeat),
                             ("tape", tape),
+                            ("tape_store", tape_store),
                             ("context_history_tokens", self.config.system.context_history_tokens),
-                        ] if v
+                        ] if v is not None
                     },
                 ),
             )

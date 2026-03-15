@@ -151,6 +151,9 @@ class Config:
             max_per_chat=system_conf.get("max_per_chat", 1),
             send_ack=system_conf.get("send_ack", True),
             python_executable=system_conf.get("python_executable", ""),
+            context_history_tokens=system_conf.get("context_history_tokens", 2000),
+            context_compact_threshold=system_conf.get("context_compact_threshold", 3000),
+            context_max_chats=system_conf.get("context_max_chats", 500),
         )
 
         # Resource configuration — support both flat keys and legacy "resources" wrapper
@@ -237,6 +240,9 @@ class Config:
                 "max_per_chat": 1,
                 "send_ack": True,
                 "python_executable": "",
+                "context_history_tokens": 2000,
+                "context_compact_threshold": 3000,
+                "context_max_chats": 500,
             },
             "channels": {
                 "feishu": {
@@ -323,6 +329,9 @@ class Config:
                 "max_per_chat": self.system.max_per_chat,
                 "send_ack": self.system.send_ack,
                 "python_executable": self.system.python_executable,
+                "context_history_tokens": self.system.context_history_tokens,
+                "context_compact_threshold": self.system.context_compact_threshold,
+                "context_max_chats": self.system.context_max_chats,
             },
             "channels": {
                 "feishu": {

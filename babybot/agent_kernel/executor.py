@@ -46,11 +46,16 @@ class SingleAgentExecutor:
         if system_prompt:
             messages.append(ModelMessage(role="system", content=system_prompt))
 
-        # Inject history from tape (anchor summary + recent entries)
+        # Inject history from tape (anchor summary + recent entries + BM25 recall)
         tape = context.state.get("tape")
         if tape is not None:
             history_budget = context.state.get("context_history_tokens", 2000)
-            messages.extend(_build_history_messages(tape, history_budget))
+            tape_store = context.state.get("tape_store")
+            messages.extend(_build_history_messages(
+                tape, history_budget,
+                query=task.description,
+                tape_store=tape_store,
+            ))
 
         messages.append(ModelMessage(role="user", content=task.description))
 
@@ -215,11 +220,18 @@ class EchoModelProvider:
         return ModelResponse(text=last.content)
 
 
-def _build_history_messages(tape: object, token_budget: int) -> list[ModelMessage]:
+def _build_history_messages(
+    tape: object,
+    token_budget: int,
+    query: str = "",
+    tape_store: object | None = None,
+) -> list[ModelMessage]:
     """Build history context messages from a Tape.
 
-    Extracts anchor summary as a system message, then recent message entries
-    as user/assistant messages within the token budget.
+    Three sections (all sharing token_budget):
+    1. Anchor summary → system message
+    2. BM25 cross-anchor recall → [相关历史] system message
+    3. Recent entries since anchor → user/assistant messages
     """
     messages: list[ModelMessage] = []
 
@@ -228,34 +240,106 @@ def _build_history_messages(tape: object, token_budget: int) -> list[ModelMessag
         return messages
     anchor = last_anchor()
 
-    # 1. Anchor summary → system message
+    # 1. Anchor summary → system message (with structured fields if available)
     if anchor is not None:
         state = anchor.payload.get("state", {})
         summary = state.get("summary", "") if isinstance(state, dict) else ""
         if summary:
-            messages.append(ModelMessage(role="system", content=f"[对话背景]\n{summary}"))
+            parts = [f"[对话背景]\n{summary}"]
+            entities = state.get("entities")
+            if entities and isinstance(entities, list):
+                parts.append(f"关键实体: {', '.join(entities)}")
+            intent = state.get("user_intent")
+            if intent:
+                parts.append(f"用户意图: {intent}")
+            pending = state.get("pending")
+            if pending:
+                parts.append(f"待办: {pending}")
+            messages.append(ModelMessage(role="system", content="\n".join(parts)))
 
-    # 2. Entries since anchor → user/assistant messages (skip the last user msg,
-    #    it will be added as the current task description by the executor)
+    # Collect recent entries (for both section 2 exclusion and section 3)
     entries_since = getattr(tape, "entries_since_anchor", None)
     if entries_since is None:
         return messages
 
     recent = entries_since()
-    # Filter to message entries only, exclude the last user message
     msg_entries = [e for e in recent if e.kind == "message"]
+    # Exclude the last user message (it's the current turn, added by executor)
     if msg_entries and msg_entries[-1].payload.get("role") == "user":
         msg_entries = msg_entries[:-1]
 
-    budget_remaining = token_budget
-    for entry in msg_entries:
-        est = entry.token_estimate
-        if est > budget_remaining:
+    budget_remaining = max(0, int(token_budget))
+
+    # 2. BM25 cross-anchor recall — search for relevant entries before the anchor
+    search_fn = getattr(tape_store, "search_relevant", None) if tape_store else None
+    chat_id = getattr(tape, "chat_id", None)
+    if search_fn and chat_id and query:
+        recent_ids = {e.entry_id for e in recent}
+        recall_budget = budget_remaining // 4  # Reserve up to 25% for recall
+        try:
+            recalled = search_fn(chat_id, query, limit=5, exclude_ids=recent_ids)
+        except Exception:
+            recalled = []
+
+        if recalled:
+            recall_lines: list[str] = []
+            recall_tokens = 0
+            for entry in recalled:
+                est = max(1, int(entry.token_estimate))
+                if recall_tokens + est > recall_budget:
+                    break
+                role = entry.payload.get("role", "?")
+                content = entry.payload.get("content", "")
+                recall_lines.append(f"{role}: {content}")
+                recall_tokens += est
+            if recall_lines:
+                messages.append(ModelMessage(
+                    role="system",
+                    content="[相关历史]\n" + "\n".join(recall_lines),
+                ))
+                budget_remaining -= recall_tokens
+
+    # 3. Recent entries → hybrid recency+relevance scoring
+    if msg_entries and query:
+        from ..context import _extract_keywords
+        kws = _extract_keywords(query)
+    else:
+        kws = []
+
+    n = len(msg_entries)
+    scored_entries: list[tuple[float, int, object]] = []
+    for idx, entry in enumerate(msg_entries):
+        # Recency: linear 0→1, most recent = 1.0
+        recency = (idx + 1) / n if n else 0.0
+        # Relevance: fraction of keywords found in content
+        if kws:
+            content = entry.payload.get("content", "")
+            hits = sum(1 for kw in kws if kw in content)
+            relevance = hits / len(kws)
+        else:
+            relevance = 0.0
+        # Weighted blend: recency dominates (0.6) to preserve conversation flow
+        score = 0.6 * recency + 0.4 * relevance
+        scored_entries.append((score, idx, entry))
+
+    # Sort by score descending, greedily pick within budget
+    scored_entries.sort(key=lambda x: x[0], reverse=True)
+    picked_indices: set[int] = set()
+    for score, idx, entry in scored_entries:
+        if budget_remaining <= 0:
             break
+        est = max(1, int(entry.token_estimate))
+        if est > budget_remaining:
+            continue
         budget_remaining -= est
-        messages.append(ModelMessage(
-            role=entry.payload["role"],
-            content=entry.payload["content"],
-        ))
+        picked_indices.add(idx)
+
+    # Emit in original chronological order
+    for idx, entry in enumerate(msg_entries):
+        if idx in picked_indices:
+            messages.append(ModelMessage(
+                role=entry.payload["role"],
+                content=entry.payload["content"],
+            ))
 
     return messages

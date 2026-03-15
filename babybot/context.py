@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -11,6 +12,39 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# CJK Unicode ranges for keyword extraction
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+")
+_LATIN_WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
+
+
+def _extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
+    """Extract search keywords from text.
+
+    For CJK: sliding 2-gram windows (bigrams) over contiguous CJK runs.
+    For Latin: whole words (2+ chars).
+    Returns deduplicated keywords, most useful first.
+    """
+    keywords: list[str] = []
+    seen: set[str] = set()
+
+    # CJK bigrams
+    for match in _CJK_RE.finditer(text):
+        segment = match.group()
+        for i in range(len(segment) - 1):
+            bigram = segment[i:i + 2]
+            if bigram not in seen:
+                seen.add(bigram)
+                keywords.append(bigram)
+
+    # Latin words
+    for match in _LATIN_WORD_RE.finditer(text):
+        word = match.group().lower()
+        if word not in seen:
+            seen.add(word)
+            keywords.append(word)
+
+    return keywords[:max_keywords]
 
 
 @dataclass(frozen=True)
@@ -132,6 +166,11 @@ class TapeStore:
         return tape
 
     def save_entry(self, chat_id: str, entry: Entry) -> None:
+        self.save_entries(chat_id, [entry])
+
+    def save_entries(self, chat_id: str, entries: list[Entry]) -> None:
+        if not entries:
+            return
         db = self._ensure_db()
         now = time.time()
         db.execute(
@@ -139,19 +178,76 @@ class TapeStore:
             "VALUES (?, COALESCE((SELECT created_at FROM tapes WHERE chat_id=?), ?), ?)",
             (chat_id, chat_id, now, now),
         )
-        db.execute(
+        db.executemany(
             "INSERT INTO entries (entry_id, chat_id, kind, payload, meta, timestamp) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                entry.entry_id,
-                chat_id,
-                entry.kind,
-                json.dumps(entry.payload, ensure_ascii=False),
-                json.dumps(entry.meta, ensure_ascii=False),
-                entry.timestamp,
-            ),
+            [
+                (
+                    entry.entry_id,
+                    chat_id,
+                    entry.kind,
+                    json.dumps(entry.payload, ensure_ascii=False),
+                    json.dumps(entry.meta, ensure_ascii=False),
+                    entry.timestamp,
+                )
+                for entry in entries
+            ],
         )
         db.commit()
+
+    def search_relevant(
+        self, chat_id: str, query: str, limit: int = 5,
+        exclude_ids: set[int] | None = None,
+    ) -> list[Entry]:
+        """Search across ALL message entries for this chat (cross-anchor recall).
+
+        Uses keyword extraction + LIKE substring matching to support both
+        CJK and Latin text without external dependencies.
+        Returns entries ranked by match count, excluding any in *exclude_ids*.
+        """
+        query = query.strip()
+        if not query:
+            return []
+        db = self._ensure_db()
+        exclude = exclude_ids or set()
+
+        # Extract search keywords (2+ char segments for CJK, words for Latin)
+        keywords = _extract_keywords(query)
+        if not keywords:
+            return []
+
+        # Build LIKE conditions — match ANY keyword
+        conditions = []
+        params: list[str | int] = [chat_id, "message"]
+        for kw in keywords:
+            conditions.append("payload LIKE ?")
+            params.append(f"%{kw}%")
+
+        where_clause = " OR ".join(conditions)
+        rows = db.execute(
+            f"SELECT entry_id, kind, payload, meta, timestamp FROM entries "
+            f"WHERE chat_id=? AND kind=? AND ({where_clause}) "
+            f"ORDER BY entry_id DESC LIMIT ?",
+            [*params, limit * 3],
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        # Score by number of keyword hits and filter excludes
+        scored: list[tuple[float, Entry]] = []
+        for r in rows:
+            eid = r[0]
+            if eid in exclude:
+                continue
+            entry = Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[4])
+            content = entry.payload.get("content", "")
+            hits = sum(1 for kw in keywords if kw in content)
+            if hits > 0:
+                scored.append((hits, entry))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [entry for _, entry in scored[:limit]]
 
     def _load_from_db(self, chat_id: str) -> Tape:
         db = self._ensure_db()

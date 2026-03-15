@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .config import Config
-from .context import Tape, TapeStore
+from .context import Tape, TapeStore, _extract_keywords
 from .model_gateway import OpenAICompatibleGateway
 from .resource import ResourceManager
 
@@ -18,8 +19,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SUMMARIZE_PROMPT = (
-    "请用中文将以下对话历史浓缩为一段简短摘要（不超过200字），"
-    "保留关键事实、用户意图和已完成的操作，省略冗余细节：\n\n"
+    "请将以下对话历史浓缩为 JSON 格式（用中文填写），严格按以下结构输出，不要输出其他内容：\n"
+    '{"summary":"不超过200字的摘要，保留关键事实和已完成操作",'
+    '"entities":["提到的关键实体，如人名、物品、话题等，最多5个"],'
+    '"user_intent":"用户当前最可能的意图，一句话",'
+    '"pending":"未完成的事项，如无则为空字符串"}\n\n'
 )
 
 
@@ -40,9 +44,10 @@ class OrchestratorAgent:
         self.resource_manager = ResourceManager(self.config)
         self.gateway = OpenAICompatibleGateway(self.config)
         self.tape_store = TapeStore(
-            db_path=self.config.home_dir / "context.db",
+            db_path=self.config.home_dir / "memory" / "context.db",
             max_chats=self.config.system.context_max_chats,
         )
+        self._handoff_locks: dict[str, asyncio.Lock] = {}
         self._initialized = False
         self._collected_media: list[str] = []
 
@@ -62,6 +67,7 @@ class OrchestratorAgent:
             lease={},
             agent_name="DirectAssistant",
             tape=tape,
+            tape_store=self.tape_store if tape else None,
             heartbeat=heartbeat,
         )
         logger.info("_answer_direct subagent done text_len=%d media=%d", len(text or ""), len(media or []))
@@ -91,13 +97,15 @@ class OrchestratorAgent:
         tape: Tape | None = None
         if chat_key:
             tape = self.tape_store.get_or_create(chat_key)
+            pending_entries = []
             # Ensure bootstrap anchor exists
             if tape.last_anchor() is None:
                 anchor = tape.append("anchor", {"name": "session/start", "state": {}})
-                self.tape_store.save_entry(chat_key, anchor)
+                pending_entries.append(anchor)
             # Append user message
             user_entry = tape.append("message", {"role": "user", "content": user_input})
-            self.tape_store.save_entry(chat_key, user_entry)
+            pending_entries.append(user_entry)
+            self.tape_store.save_entries(chat_key, pending_entries)
 
         try:
             text = await self._answer_direct(user_input, tape=tape, heartbeat=heartbeat)
@@ -118,47 +126,88 @@ class OrchestratorAgent:
 
     async def _maybe_handoff(self, tape: Tape, chat_key: str) -> None:
         """Check if entries since last anchor exceed threshold; if so, create a new anchor."""
+        lock = self._handoff_locks.setdefault(chat_key, asyncio.Lock())
         try:
-            threshold = self.config.system.context_compact_threshold
-            if tape.total_tokens_since_anchor() <= threshold:
-                return
+            async with lock:
+                threshold = self.config.system.context_compact_threshold
+                if tape.total_tokens_since_anchor() <= threshold:
+                    return
 
-            # Collect entries to summarize
-            old_entries = tape.entries_since_anchor()
-            if not old_entries:
-                return
+                # Collect entries to summarize
+                old_entries = tape.entries_since_anchor()
+                if not old_entries:
+                    return
 
-            # Build text to summarize
-            lines: list[str] = []
-            for e in old_entries:
-                if e.kind == "message":
-                    role = e.payload.get("role", "?")
-                    content = e.payload.get("content", "")
-                    lines.append(f"{role}: {content}")
-            if not lines:
-                return
+                # Build text to summarize
+                lines: list[str] = []
+                for e in old_entries:
+                    if e.kind == "message":
+                        role = e.payload.get("role", "?")
+                        content = e.payload.get("content", "")
+                        lines.append(f"{role}: {content}")
+                if not lines:
+                    return
 
-            history_text = "\n".join(lines)
-            summary = await self.gateway.complete(
-                _SUMMARIZE_PROMPT, history_text
-            )
+                history_text = "\n".join(lines)
+                raw_summary = await self.gateway.complete(
+                    _SUMMARIZE_PROMPT, history_text
+                )
 
-            source_ids = [e.entry_id for e in old_entries]
-            anchor = tape.append("anchor", {
-                "name": f"compact/{tape.turn_count()}",
-                "state": {
-                    "summary": summary.strip(),
-                    "phase": "continuation",
-                    "source_ids": source_ids,
-                    "turn_count": tape.turn_count(),
-                },
-            })
-            self.tape_store.save_entry(chat_key, anchor)
-            tape.compact_entries()
-            logger.info(
-                "Handoff created anchor chat_key=%s entry_id=%d summarized=%d entries",
-                chat_key, anchor.entry_id, len(source_ids),
-            )
+                # Parse structured JSON from LLM, fallback to plain summary
+                structured: dict[str, Any] = {}
+                try:
+                    # Strip markdown code fences if present
+                    text = raw_summary.strip()
+                    if text.startswith("```"):
+                        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                    structured = json.loads(text)
+                except (json.JSONDecodeError, ValueError):
+                    structured = {"summary": raw_summary.strip()}
+
+                summary_text = structured.get("summary", raw_summary.strip())
+
+                source_ids = [e.entry_id for e in old_entries]
+
+                # Detect topic shift: compare current segment keywords vs previous anchor summary
+                phase = "continuation"
+                prev_anchor = tape.last_anchor()
+                if prev_anchor:
+                    prev_summary = (prev_anchor.payload.get("state") or {}).get("summary", "")
+                    prev_kws = set(_extract_keywords(prev_summary, max_keywords=12))
+                    # Collect recent user messages for keyword comparison
+                    recent_user_text = " ".join(
+                        e.payload.get("content", "")
+                        for e in old_entries
+                        if e.kind == "message" and e.payload.get("role") == "user"
+                    )
+                    curr_kws = set(_extract_keywords(recent_user_text, max_keywords=12))
+                    if prev_kws and curr_kws:
+                        overlap = len(prev_kws & curr_kws) / max(len(prev_kws), len(curr_kws))
+                        if overlap < 0.15:
+                            phase = "topic_shift"
+                            logger.info(
+                                "Topic shift detected chat_key=%s overlap=%.2f",
+                                chat_key, overlap,
+                            )
+
+                anchor = tape.append("anchor", {
+                    "name": f"compact/{tape.turn_count()}",
+                    "state": {
+                        "summary": summary_text,
+                        "entities": structured.get("entities", []),
+                        "user_intent": structured.get("user_intent", ""),
+                        "pending": structured.get("pending", ""),
+                        "phase": phase,
+                        "source_ids": source_ids,
+                        "turn_count": tape.turn_count(),
+                    },
+                })
+                self.tape_store.save_entry(chat_key, anchor)
+                tape.compact_entries()
+                logger.info(
+                    "Handoff created anchor chat_key=%s entry_id=%d summarized=%d entries",
+                    chat_key, anchor.entry_id, len(source_ids),
+                )
         except Exception:
             logger.exception("Error in _maybe_handoff for chat_key=%s", chat_key)
 
