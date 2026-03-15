@@ -58,7 +58,12 @@ class SingleAgentExecutor:
                 tape_store=tape_store,
             ))
 
-        messages.append(ModelMessage(role="user", content=task.description))
+        media_paths = context.state.get("media_paths") or ()
+        messages.append(ModelMessage(
+            role="user",
+            content=task.description,
+            images=tuple(media_paths),
+        ))
 
         available_tools = self.tools.tool_schemas(base_lease)
         tool_names = [t["function"]["name"] for t in available_tools]

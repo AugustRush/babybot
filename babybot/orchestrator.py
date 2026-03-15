@@ -60,6 +60,7 @@ class OrchestratorAgent:
     async def _answer_direct(
         self, user_input: str, tape: Tape | None = None,
         heartbeat: Heartbeat | None = None,
+        media_paths: list[str] | None = None,
     ) -> str:
         logger.info("_answer_direct calling run_subagent_task...")
         text, media = await self.resource_manager.run_subagent_task(
@@ -69,6 +70,7 @@ class OrchestratorAgent:
             tape=tape,
             tape_store=self.tape_store if tape else None,
             heartbeat=heartbeat,
+            media_paths=media_paths,
         )
         logger.info("_answer_direct subagent done text_len=%d media=%d", len(text or ""), len(media or []))
         if media:
@@ -82,6 +84,7 @@ class OrchestratorAgent:
     async def process_task(
         self, user_input: str, chat_key: str = "",
         heartbeat: Heartbeat | None = None,
+        media_paths: list[str] | None = None,
     ) -> TaskResponse:
         if not self._initialized:
             logger.info("Initializing resource manager...")
@@ -103,12 +106,18 @@ class OrchestratorAgent:
                 anchor = tape.append("anchor", {"name": "session/start", "state": {}})
                 pending_entries.append(anchor)
             # Append user message
-            user_entry = tape.append("message", {"role": "user", "content": user_input})
+            content_for_tape = user_input
+            if media_paths:
+                content_for_tape = f"{user_input}\n[附带 {len(media_paths)} 张图片]"
+            user_entry = tape.append("message", {"role": "user", "content": content_for_tape})
             pending_entries.append(user_entry)
             self.tape_store.save_entries(chat_key, pending_entries)
 
         try:
-            text = await self._answer_direct(user_input, tape=tape, heartbeat=heartbeat)
+            text = await self._answer_direct(
+                user_input, tape=tape, heartbeat=heartbeat,
+                media_paths=media_paths,
+            )
             if heartbeat is not None:
                 heartbeat.beat()
 

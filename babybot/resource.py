@@ -731,6 +731,7 @@ class ResourceManager:
         tape: "Tape | None" = None,
         tape_store: "TapeStore | None" = None,
         heartbeat: "Heartbeat | None" = None,
+        media_paths: list[str] | None = None,
     ) -> tuple[str, list[str]]:
         write_root = self._get_output_dir()
         token = self._active_write_root.set(str(write_root))
@@ -805,6 +806,7 @@ class ResourceManager:
                             ("tape", tape),
                             ("tape_store", tape_store),
                             ("context_history_tokens", self.config.system.context_history_tokens),
+                            ("media_paths", media_paths),
                         ] if v is not None
                     },
                 ),

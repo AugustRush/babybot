@@ -20,6 +20,7 @@ class ModelMessage:
     name: str = ""
     tool_call_id: str = ""
     tool_calls: tuple["ModelToolCall", ...] = ()
+    images: tuple[str, ...] = ()  # file paths or data URIs
 
 
 @dataclass

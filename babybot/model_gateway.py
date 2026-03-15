@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 import time
+from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -21,6 +24,16 @@ from .config import Config
 
 T = TypeVar("T", bound=BaseModel)
 logger = logging.getLogger(__name__)
+
+
+def _image_to_content_part(image_ref: str) -> dict[str, Any]:
+    """File path or data URI → OpenAI image_url content part."""
+    if image_ref.startswith("data:"):
+        return {"type": "image_url", "image_url": {"url": image_ref}}
+    path = Path(image_ref)
+    mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
+    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
 
 class OpenAICompatibleGateway(ModelProvider):
@@ -159,7 +172,19 @@ class OpenAICompatibleGateway(ModelProvider):
 
     @staticmethod
     def _to_openai_message(message: ModelMessage) -> dict[str, Any]:
-        payload: dict[str, Any] = {"role": message.role, "content": message.content}
+        payload: dict[str, Any] = {"role": message.role}
+        if message.images:
+            parts: list[dict[str, Any]] = []
+            if message.content:
+                parts.append({"type": "text", "text": message.content})
+            for img in message.images:
+                try:
+                    parts.append(_image_to_content_part(img))
+                except FileNotFoundError:
+                    logger.warning("Image not found: %s", img)
+            payload["content"] = parts or message.content
+        else:
+            payload["content"] = message.content
         if message.name:
             payload["name"] = message.name
         if message.tool_call_id:

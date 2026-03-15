@@ -147,7 +147,10 @@ class MessageBus:
         try:
             chat_key = f"{msg.channel}:{msg.chat_id}"
             response = await heartbeat.watch(
-                self._orchestrator.process_task(msg.content, chat_key=chat_key, heartbeat=heartbeat),
+                self._orchestrator.process_task(
+                    msg.content, chat_key=chat_key, heartbeat=heartbeat,
+                    media_paths=msg.media_paths,
+                ),
                 hard_timeout=hard_timeout,
             )
         except asyncio.TimeoutError as exc:
