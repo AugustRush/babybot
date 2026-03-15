@@ -150,8 +150,20 @@ class Config:
             python_executable=system_conf.get("python_executable", ""),
         )
 
-        # Resource configuration
-        self.resources = self.raw_config.get("resources", {})
+        # Resource configuration — support both flat keys and legacy "resources" wrapper
+        _res = self.raw_config.get("resources", {})
+        self.mcp_servers: dict[str, dict] = (
+            self.raw_config.get("mcp_servers") or _res.get("mcp_servers") or {}
+        )
+        self.tool_groups: dict[str, dict] = (
+            self.raw_config.get("tool_groups") or _res.get("tool_groups") or {}
+        )
+        self.custom_tools: dict[str, dict] = (
+            self.raw_config.get("custom_tools") or _res.get("custom_tools") or {}
+        )
+        self.agent_skills: dict[str, dict] = (
+            self.raw_config.get("agent_skills") or _res.get("agent_skills") or {}
+        )
 
         # Channel configuration
         channels_conf = self.raw_config.get("channels", {})
@@ -209,9 +221,7 @@ class Config:
                 "temperature": 0.7,
                 "max_tokens": 2048,
             },
-            "resources": {
-                "mcp_servers": {},
-            },
+            "mcp_servers": {},
             "system": {
                 "console_output": False,
                 "enable_meta_tool": True,
@@ -256,19 +266,19 @@ class Config:
 
     def get_tool_groups(self) -> dict[str, dict]:
         """Get tool group configurations."""
-        return self.resources.get("tool_groups", {})
+        return self.tool_groups
 
     def get_mcp_servers(self) -> dict[str, dict]:
         """Get MCP server configurations."""
-        return self.resources.get("mcp_servers", {})
+        return self.mcp_servers
 
     def get_custom_tools(self) -> dict[str, dict]:
         """Get custom tool configurations."""
-        return self.resources.get("custom_tools", {})
+        return self.custom_tools
 
     def get_agent_skills(self) -> dict[str, dict]:
         """Get agent skill configurations."""
-        return self.resources.get("agent_skills", {})
+        return self.agent_skills
 
     def resolve_workspace_path(self, value: str) -> str:
         """Resolve a path against workspace root if it's relative."""
@@ -289,7 +299,7 @@ class Config:
                 "temperature": self.model.temperature,
                 "max_tokens": self.model.max_tokens,
             },
-            "resources": self.resources,
+            "mcp_servers": self.mcp_servers,
             "paths": {
                 "config_file": str(self.config_file),
                 "home_dir": str(self.home_dir),
@@ -330,6 +340,6 @@ class Config:
 
     def __repr__(self) -> str:
         return (
-            f"Config(model={self.model.model_name}, tools={len(self.get_custom_tools())}, "
+            f"Config(model={self.model.model_name}, tools={len(self.custom_tools)}, "
             f"config_file={self.config_file})"
         )

@@ -6,22 +6,20 @@
     "temperature": 0.7,
     "max_tokens": 2048
   },
-  "resources": {
-    "mcp_servers": {
-      "playwright": {
-        "type": "stdio",
-        "command": "npx",
-        "args": ["@playwright/mcp@latest"],
-        "group_name": "browser",
-        "active": false
-      },
-      "gaode_map": {
-        "type": "http",
-        "url": "https://mcp.amap.com/mcp?key=YOUR_KEY",
-        "transport": "streamable_http",
-        "group_name": "map_services",
-        "active": false
-      }
+  "mcp_servers": {
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+      "group_name": "browser",
+      "active": false
+    },
+    "gaode_map": {
+      "type": "http",
+      "url": "https://mcp.amap.com/mcp?key=YOUR_KEY",
+      "transport": "streamable_http",
+      "group_name": "map_services",
+      "active": false
     }
   },
   "system": {
