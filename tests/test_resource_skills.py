@@ -143,3 +143,74 @@ def test_select_skill_packs_loads_all_active_skills() -> None:
 
     packs = asyncio.run(manager._select_skill_packs("draw an image"))
     assert sorted(p.name for p in packs) == ["a", "b", "c"]
+
+
+def test_scheduled_task_tools_delegate_to_manager() -> None:
+    class _TaskManager:
+        def render_tasks(self) -> str:
+            return '{"tasks":[]}'
+
+        def create_task(self, **kwargs):
+            return {"name": kwargs["name"], "schedule": kwargs["cron"]}
+
+        def save_task(self, **kwargs):
+            return {"name": kwargs.get("name") or "auto-name", "_action": "created"}
+
+        def update_task(self, name: str, **kwargs):
+            return {"name": name, "enabled": kwargs["enabled"]}
+
+        def delete_task(self, name: str) -> bool:
+            return name == "t1"
+
+    manager = object.__new__(ResourceManager)
+    manager.scheduled_task_manager = _TaskManager()
+
+    assert manager.list_scheduled_tasks_tool()() == '{"tasks":[]}'
+    created = manager.create_scheduled_task_tool()(
+        name="t1",
+        prompt="p",
+        channel="feishu",
+        chat_id="c1",
+        cron="0 9 * * *",
+    )
+    assert '"name": "t1"' in created
+    updated = manager.update_scheduled_task_tool()(name="t1", enabled=False)
+    assert '"enabled": false' in updated
+    saved = manager.save_scheduled_task_tool()(
+        prompt="p",
+        channel="feishu",
+        chat_id="c1",
+        interval_seconds=60,
+    )
+    assert '"_action": "created"' in saved
+    deleted = manager.delete_scheduled_task_tool()(name="t1")
+    assert '"deleted": true' in deleted
+
+
+def test_save_scheduled_task_uses_channel_context_defaults() -> None:
+    from babybot.channels.tools import ChannelToolContext
+
+    class _TaskManager:
+        def save_task(self, **kwargs):
+            return {
+                "name": "auto-name",
+                "channel": kwargs["channel"],
+                "chat_id": kwargs["chat_id"],
+                "_action": "created",
+            }
+
+    manager = object.__new__(ResourceManager)
+    manager.scheduled_task_manager = _TaskManager()
+    ChannelToolContext.set_current(
+        ChannelToolContext(channel_name="feishu", chat_id="oc_test", sender_id="u1")
+    )
+    try:
+        saved = manager.save_scheduled_task_tool()(
+            prompt="测试测试",
+            cron="10 17 * * *",
+        )
+    finally:
+        ChannelToolContext.set_current(None)
+
+    assert '"channel": "feishu"' in saved
+    assert '"chat_id": "oc_test"' in saved

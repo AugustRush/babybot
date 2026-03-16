@@ -26,6 +26,9 @@ class _Config:
     def get_channel_config(self, name: str) -> Any:
         return None
 
+    def get_scheduled_tasks(self) -> list[dict[str, Any]]:
+        return []
+
 
 class _Resource:
     def set_channel_context(self, ctx: Any) -> None:
@@ -75,3 +78,37 @@ def test_channel_manager_returns_timeout_response() -> None:
     assert len(fake_channel.responses) >= 1
     # Should contain a timeout response.
     assert any("超时" in r.text for r in fake_channel.responses)
+
+
+def test_scheduled_task_message_skips_ack() -> None:
+    config = _Config()
+    config.system.send_ack = True
+
+    class _FastOrchestrator(_Orchestrator):
+        async def process_task(self, user_input: str, chat_key: str = "", heartbeat: Any = None, media_paths: list[str] | None = None) -> TaskResponse:
+            if heartbeat:
+                heartbeat.beat()
+            return TaskResponse(text="done")
+
+    manager = ChannelManager(config=config, orchestrator=_FastOrchestrator())
+    fake_channel = _Channel()
+    manager.channels["feishu"] = fake_channel
+
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="scheduled:daily",
+        chat_id="c1",
+        content="run report",
+        metadata={"scheduled_task": True, "scheduled_task_name": "daily"},
+    )
+
+    async def _run() -> None:
+        await manager._bus.start()
+        await manager.handle_message(msg)
+        await asyncio.sleep(0.2)
+        await manager._bus.stop()
+
+    asyncio.run(_run())
+
+    assert len(fake_channel.responses) == 1
+    assert fake_channel.responses[0].text == "done"

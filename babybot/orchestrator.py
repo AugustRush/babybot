@@ -48,8 +48,8 @@ class OrchestratorAgent:
             max_chats=self.config.system.context_max_chats,
         )
         self._handoff_locks: dict[str, asyncio.Lock] = {}
+        self._init_lock = asyncio.Lock()
         self._initialized = False
-        self._collected_media: list[str] = []
 
     def _get_direct_prompt(self) -> str:
         return """你是高效助手。对任务直接回答：
@@ -61,7 +61,7 @@ class OrchestratorAgent:
         self, user_input: str, tape: Tape | None = None,
         heartbeat: Heartbeat | None = None,
         media_paths: list[str] | None = None,
-    ) -> str:
+    ) -> tuple[str, list[str]]:
         logger.info("_answer_direct calling run_subagent_task...")
         text, media = await self.resource_manager.run_subagent_task(
             task_description=user_input,
@@ -73,13 +73,13 @@ class OrchestratorAgent:
             media_paths=media_paths,
         )
         logger.info("_answer_direct subagent done text_len=%d media=%d", len(text or ""), len(media or []))
-        if media:
-            self._collected_media.extend(media)
+        normalized_media = list(media or [])
         if text.strip():
-            return text
-        return await self.gateway.complete(
+            return text, normalized_media
+        fallback = await self.gateway.complete(
             self._get_direct_prompt(), user_input, heartbeat=heartbeat
         )
+        return fallback, normalized_media
 
     async def process_task(
         self, user_input: str, chat_key: str = "",
@@ -87,12 +87,12 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
     ) -> TaskResponse:
         if not self._initialized:
-            logger.info("Initializing resource manager...")
-            await self.resource_manager.initialize_async()
-            self._initialized = True
-            logger.info("Resource manager initialized")
-
-        self._collected_media.clear()
+            async with self._init_lock:
+                if not self._initialized:
+                    logger.info("Initializing resource manager...")
+                    await self.resource_manager.initialize_async()
+                    self._initialized = True
+                    logger.info("Resource manager initialized")
         if heartbeat is not None:
             heartbeat.beat()
 
@@ -114,7 +114,7 @@ class OrchestratorAgent:
             self.tape_store.save_entries(chat_key, pending_entries)
 
         try:
-            text = await self._answer_direct(
+            text, collected_media = await self._answer_direct(
                 user_input, tape=tape, heartbeat=heartbeat,
                 media_paths=media_paths,
             )
@@ -128,7 +128,7 @@ class OrchestratorAgent:
                 # Fire-and-forget async handoff check
                 asyncio.create_task(self._maybe_handoff(tape, chat_key))
 
-            return TaskResponse(text=text, media_paths=list(self._collected_media))
+            return TaskResponse(text=text, media_paths=collected_media)
         except Exception as exc:
             logger.exception("Error processing task")
             return TaskResponse(text=f"处理任务时出错：{exc}")

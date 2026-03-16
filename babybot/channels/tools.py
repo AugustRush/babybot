@@ -48,10 +48,12 @@ class ChannelToolContext:
     def __init__(
         self,
         chat_id: str,
+        channel_name: str = "",
         sender_id: str | None = None,
         message_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ):
+        self.channel_name = channel_name
         self.chat_id = chat_id
         self.sender_id = sender_id
         self.message_id = message_id

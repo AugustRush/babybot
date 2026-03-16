@@ -31,6 +31,8 @@
     "tracing_endpoint": "",
     "idle_timeout": 60,
     "max_concurrency": 8,
+    "scheduled_max_concurrency": 2,
+    "message_queue_maxsize": 1000,
     "max_per_chat": 1,
     "send_ack": true,
     "python_executable": "",

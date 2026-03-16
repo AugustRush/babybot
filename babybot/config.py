@@ -54,6 +54,8 @@ class SystemConfig:
     max_parallel: int = 4
     idle_timeout: int = 60
     max_concurrency: int = 8
+    scheduled_max_concurrency: int = 2
+    message_queue_maxsize: int = 1000
     max_per_chat: int = 1
     send_ack: bool = True
     python_executable: str = ""
@@ -110,6 +112,7 @@ class Config:
         self.builtin_skills_dir = Path(__file__).resolve().parent.parent / "skills"
         self.workspace_skills_dir = self.workspace_dir / "skills"
         self.workspace_tools_dir = self.workspace_dir / "tools"
+        self.scheduled_tasks_file = self.workspace_dir / "scheduled_tasks.json"
 
         if config_file:
             self.config_file = Path(config_file).expanduser()
@@ -122,6 +125,7 @@ class Config:
             )
         self.raw_config: dict[str, Any] = {}
         self.is_bootstrapped = False
+        self.scheduled_tasks: list[dict[str, Any]] = []
 
         # Load configuration
         self._load_config()
@@ -148,6 +152,8 @@ class Config:
             max_parallel=system_conf.get("max_parallel", 4),
             idle_timeout=system_conf.get("idle_timeout", 60),
             max_concurrency=system_conf.get("max_concurrency", 8),
+            scheduled_max_concurrency=system_conf.get("scheduled_max_concurrency", 2),
+            message_queue_maxsize=system_conf.get("message_queue_maxsize", 1000),
             max_per_chat=system_conf.get("max_per_chat", 1),
             send_ack=system_conf.get("send_ack", True),
             python_executable=system_conf.get("python_executable", ""),
@@ -201,6 +207,50 @@ class Config:
                 self.raw_config = json.load(f)
         else:
             self.raw_config = {}
+        self._load_scheduled_tasks()
+
+    def _load_scheduled_tasks(self) -> None:
+        """Load scheduled tasks from the dedicated workspace file."""
+        self.scheduled_tasks_file.parent.mkdir(parents=True, exist_ok=True)
+
+        legacy_tasks = self.raw_config.get("scheduled_tasks")
+        if not self.scheduled_tasks_file.exists():
+            tasks = legacy_tasks if isinstance(legacy_tasks, list) else []
+            self._write_scheduled_tasks(tasks)
+            if tasks:
+                logger.info(
+                    "Migrated %d scheduled task(s) from config.json to %s",
+                    len(tasks),
+                    self.scheduled_tasks_file,
+                )
+
+        try:
+            with open(self.scheduled_tasks_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Failed to load scheduled tasks file: {self.scheduled_tasks_file}"
+            ) from exc
+
+        if not isinstance(data, list):
+            raise ValueError(
+                f"Scheduled tasks file must contain a JSON list: {self.scheduled_tasks_file}"
+            )
+        self.scheduled_tasks = data
+
+    def _write_scheduled_tasks(self, tasks: list[dict[str, Any]]) -> None:
+        """Persist scheduled tasks to the dedicated workspace file."""
+        with open(self.scheduled_tasks_file, "w", encoding="utf-8") as f:
+            json.dump(tasks, f, ensure_ascii=False, indent=2)
+
+    def get_scheduled_tasks(self) -> list[dict[str, Any]]:
+        """Get scheduled tasks loaded from the workspace file."""
+        return list(self.scheduled_tasks)
+
+    def save_scheduled_tasks(self, tasks: list[dict[str, Any]]) -> None:
+        """Replace the workspace scheduled task definitions."""
+        self._write_scheduled_tasks(tasks)
+        self.scheduled_tasks = list(tasks)
 
     def _bootstrap_config_file(self) -> None:
         """Create initial config file from example on first run."""
@@ -237,6 +287,8 @@ class Config:
                 "tracing_endpoint": "",
                 "idle_timeout": 60,
                 "max_concurrency": 8,
+                "scheduled_max_concurrency": 2,
+                "message_queue_maxsize": 1000,
                 "max_per_chat": 1,
                 "send_ack": True,
                 "python_executable": "",
@@ -313,6 +365,7 @@ class Config:
                 "config_file": str(self.config_file),
                 "home_dir": str(self.home_dir),
                 "workspace_dir": str(self.workspace_dir),
+                "scheduled_tasks_file": str(self.scheduled_tasks_file),
                 "builtin_skills_dir": str(self.builtin_skills_dir),
                 "workspace_skills_dir": str(self.workspace_skills_dir),
                 "workspace_tools_dir": str(self.workspace_tools_dir),
@@ -326,6 +379,8 @@ class Config:
                 "tracing_endpoint": self.system.tracing_endpoint,
                 "idle_timeout": self.system.idle_timeout,
                 "max_concurrency": self.system.max_concurrency,
+                "scheduled_max_concurrency": self.system.scheduled_max_concurrency,
+                "message_queue_maxsize": self.system.message_queue_maxsize,
                 "max_per_chat": self.system.max_per_chat,
                 "send_ack": self.system.send_ack,
                 "python_executable": self.system.python_executable,
@@ -348,6 +403,7 @@ class Config:
                     "media_dir": self.feishu.media_dir,
                 }
             },
+            "scheduled_tasks_count": len(self.scheduled_tasks),
         }
 
     def __repr__(self) -> str:

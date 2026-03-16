@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from ..config import Config
+from ..cron import CronScheduler, ScheduledTaskDef
 from ..message_bus import MessageBus
 from ..orchestrator import OrchestratorAgent, TaskResponse
 from .base import BaseChannel, InboundMessage
@@ -25,11 +26,20 @@ class ChannelManager:
         self.channels: dict[str, BaseChannel] = {}
         self._init_channels()
         self._register_channel_tools()
+        self._task_manager = getattr(
+            self.orchestrator.resource_manager,
+            "scheduled_task_manager",
+            None,
+        )
         self._bus = MessageBus(
             config=config,
             orchestrator=orchestrator,
             channels=self.channels,
         )
+        self._scheduler = self._init_scheduler()
+        if self._task_manager is not None:
+            self._task_manager.bind_scheduler(self._scheduler)
+            self.orchestrator.resource_manager.set_scheduled_task_manager(self._task_manager)
 
     # ── Bootstrap ────────────────────────────────────────────────────
 
@@ -57,6 +67,30 @@ class ChannelManager:
                     self.orchestrator.resource_manager.register_channel_tools(tools)
                     logger.info("Registered channel tools for '%s'", name)
 
+    def _init_scheduler(self) -> CronScheduler | None:
+        """Build a CronScheduler from workspace task definitions if any exist."""
+        raw_tasks = self.config.get_scheduled_tasks()
+        if not raw_tasks:
+            return None
+        defs = [
+            ScheduledTaskDef.from_dict(t)
+            for t in raw_tasks
+            if t.get("enabled", True)
+        ]
+        if not defs:
+            return None
+        return CronScheduler(
+            self.config, self._bus, task_defs=defs,
+        )
+
+    @property
+    def scheduler(self) -> CronScheduler | None:
+        return self._scheduler
+
+    @property
+    def task_manager(self):
+        return self._task_manager
+
     # ── Message handling ─────────────────────────────────────────────
 
     async def handle_message(self, msg: InboundMessage) -> None:
@@ -74,16 +108,20 @@ class ChannelManager:
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def start_all(self) -> None:
-        """Start every enabled channel and the message bus."""
+        """Start every enabled channel, the message bus, and the scheduler."""
         await self._bus.start()
-        if not self.channels:
+        if self.channels:
+            tasks = [ch.start() for ch in self.channels.values()]
+            await asyncio.gather(*tasks)
+        else:
             logger.info("No enabled channels found")
-            return
-        tasks = [ch.start() for ch in self.channels.values()]
-        await asyncio.gather(*tasks)
+        if self._scheduler:
+            await self._scheduler.start()
 
     async def stop_all(self) -> None:
-        """Gracefully stop the message bus and every running channel."""
+        """Gracefully stop the scheduler, message bus and every running channel."""
+        if self._scheduler:
+            await self._scheduler.stop()
         await self._bus.stop()
         for ch in self.channels.values():
             try:

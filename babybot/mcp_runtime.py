@@ -6,13 +6,31 @@ import asyncio
 import logging
 from typing import Any
 
-from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client
+try:
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.streamable_http import streamable_http_client
+
+    _MCP_IMPORT_ERROR: ModuleNotFoundError | None = None
+except ModuleNotFoundError as exc:
+    ClientSession = Any  # type: ignore[assignment]
+    StdioServerParameters = Any  # type: ignore[assignment]
+    stdio_client = None
+    streamable_http_client = None
+    _MCP_IMPORT_ERROR = exc
 
 from .agent_kernel import MCPToolDescriptor
 
 logger = logging.getLogger(__name__)
+
+
+def _require_mcp_package() -> None:
+    """Raise a clear error only when MCP support is actually used."""
+    if _MCP_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "MCP support requires the optional 'mcp' package. "
+            "Install project dependencies again so 'mcp' is available."
+        ) from _MCP_IMPORT_ERROR
 
 
 class BaseMCPRuntimeClient:
@@ -35,6 +53,7 @@ class StdioMCPRuntimeClient(BaseMCPRuntimeClient):
     """MCP client over stdio transport."""
 
     def __init__(self, command: str, args: list[str], cwd: str | None = None):
+        _require_mcp_package()
         self._params = StdioServerParameters(command=command, args=args, cwd=cwd)
         self._stdio_cm: Any | None = None
         self._session: ClientSession | None = None
@@ -93,6 +112,7 @@ class HttpMCPRuntimeClient(BaseMCPRuntimeClient):
     """MCP client over streamable HTTP transport."""
 
     def __init__(self, url: str):
+        _require_mcp_package()
         self._url = url
         self._http_cm: Any | None = None
         self._session: ClientSession | None = None

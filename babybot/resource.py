@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .channels.tools import ChannelTools, ChannelToolContext
     from .context import Tape, TapeStore
+    from .cron import ScheduledTaskManager
     from .heartbeat import Heartbeat
 
 
@@ -175,11 +176,17 @@ class ResourceManager:
         self.mcp_clients: dict[str, BaseMCPRuntimeClient] = {}
         self.channel_tools: dict[str, ChannelTools] = {}
         self.skills: dict[str, LoadedSkill] = {}
+        self.scheduled_task_manager: ScheduledTaskManager | None = None
         self._active_write_root: contextvars.ContextVar[str] = contextvars.ContextVar(
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
         )
 
+        # Keep task-file management available even in CLI mode; gateway mode
+        # later binds the live scheduler onto the same manager instance.
+        from .cron import ScheduledTaskManager
+
+        self.scheduled_task_manager = ScheduledTaskManager(self.config)
         self._load_config()
         self._register_builtin_tools()
         ResourceManager._initialized = True
@@ -548,11 +555,19 @@ class ResourceManager:
     def _register_builtin_tools(self) -> None:
         self.register_tool(self.create_worker_tool(), group_name="basic")
         self.register_tool(self.dispatch_workers_tool(), group_name="basic")
+        self.register_tool(self.list_scheduled_tasks_tool(), group_name="basic")
+        self.register_tool(self.save_scheduled_task_tool(), group_name="basic")
+        self.register_tool(self.create_scheduled_task_tool(), group_name="basic")
+        self.register_tool(self.update_scheduled_task_tool(), group_name="basic")
+        self.register_tool(self.delete_scheduled_task_tool(), group_name="basic")
         self.register_tool(self._workspace_execute_python_code, group_name="code")
         self.register_tool(self._workspace_execute_shell_command, group_name="code")
         self.register_tool(self._workspace_view_text_file, group_name="code")
         self.register_tool(self._workspace_write_text_file, group_name="code")
         self.register_tool(self._workspace_insert_text_file, group_name="code")
+
+    def set_scheduled_task_manager(self, manager: "ScheduledTaskManager | None") -> None:
+        self.scheduled_task_manager = manager
 
     def register_tool(
         self,
@@ -898,6 +913,154 @@ class ResourceManager:
             )
 
         return dispatch_workers
+
+    def _require_scheduled_task_manager(self) -> "ScheduledTaskManager":
+        if self.scheduled_task_manager is None:
+            raise RuntimeError(
+                "Scheduled task manager is unavailable in this runtime."
+            )
+        return self.scheduled_task_manager
+
+    @staticmethod
+    def _resolve_scheduled_task_target(
+        channel: str | None,
+        chat_id: str | None,
+    ) -> tuple[str, str]:
+        if channel and chat_id:
+            return channel, chat_id
+
+        from .channels.tools import ChannelToolContext
+
+        ctx = ChannelToolContext.get_current()
+        resolved_channel = (channel or "").strip()
+        resolved_chat_id = (chat_id or "").strip()
+        if ctx is not None:
+            if not resolved_channel:
+                resolved_channel = getattr(ctx, "channel_name", "") or str(
+                    (ctx.metadata or {}).get("channel", "")
+                )
+            if not resolved_chat_id:
+                resolved_chat_id = ctx.chat_id
+
+        if not resolved_channel or not resolved_chat_id:
+            raise RuntimeError(
+                "Scheduled task target is missing. In channel conversations this "
+                "should be inherited automatically; otherwise provide channel and chat_id."
+            )
+        return resolved_channel, resolved_chat_id
+
+    def list_scheduled_tasks_tool(self) -> Any:
+        def list_scheduled_tasks() -> str:
+            """List all scheduled tasks from the workspace task file."""
+            return self._require_scheduled_task_manager().render_tasks()
+
+        return list_scheduled_tasks
+
+    def create_scheduled_task_tool(self) -> Any:
+        def create_scheduled_task(
+            prompt: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            name: str | None = None,
+            cron: str | None = None,
+            interval_seconds: float | None = None,
+            run_at: str | None = None,
+            enabled: bool = True,
+            require_active_runtime: bool = True,
+        ) -> str:
+            """Create a scheduled task. Provide one of cron, interval_seconds, or run_at."""
+            channel_name, target_chat_id = self._resolve_scheduled_task_target(
+                channel, chat_id
+            )
+            task = self._require_scheduled_task_manager().create_task(
+                name=name,
+                prompt=prompt,
+                channel=channel_name,
+                chat_id=target_chat_id,
+                cron=cron,
+                interval_seconds=interval_seconds,
+                run_at=run_at,
+                enabled=enabled,
+                require_active_runtime=require_active_runtime,
+            )
+            return json.dumps(task, ensure_ascii=False, indent=2)
+
+        return create_scheduled_task
+
+    def save_scheduled_task_tool(self) -> Any:
+        def save_scheduled_task(
+            prompt: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            name: str | None = None,
+            cron: str | None = None,
+            interval_seconds: float | None = None,
+            run_at: str | None = None,
+            enabled: bool = True,
+            require_active_runtime: bool = True,
+        ) -> str:
+            """Create or update a scheduled task. Prefer this for natural-language task management."""
+            channel_name, target_chat_id = self._resolve_scheduled_task_target(
+                channel, chat_id
+            )
+            task = self._require_scheduled_task_manager().save_task(
+                name=name,
+                prompt=prompt,
+                channel=channel_name,
+                chat_id=target_chat_id,
+                cron=cron,
+                interval_seconds=interval_seconds,
+                run_at=run_at,
+                enabled=enabled,
+                require_active_runtime=require_active_runtime,
+            )
+            return json.dumps(task, ensure_ascii=False, indent=2)
+
+        return save_scheduled_task
+
+    def update_scheduled_task_tool(self) -> Any:
+        def update_scheduled_task(
+            name: str,
+            prompt: str | None = None,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            cron: str | None = None,
+            interval_seconds: float | None = None,
+            run_at: str | None = None,
+            enabled: bool | None = None,
+            require_active_runtime: bool = True,
+        ) -> str:
+            """Update one scheduled task by name. Switch schedule via cron, interval_seconds or run_at."""
+            if channel is None or chat_id is None:
+                try:
+                    channel, chat_id = self._resolve_scheduled_task_target(
+                        channel, chat_id
+                    )
+                except RuntimeError:
+                    # Updating by name can still succeed without overriding target fields.
+                    pass
+            task = self._require_scheduled_task_manager().update_task(
+                name=name,
+                prompt=prompt,
+                channel=channel,
+                chat_id=chat_id,
+                cron=cron,
+                interval_seconds=interval_seconds,
+                run_at=run_at,
+                enabled=enabled,
+                require_active_runtime=require_active_runtime,
+            )
+            return json.dumps(task, ensure_ascii=False, indent=2)
+
+        return update_scheduled_task
+
+    def delete_scheduled_task_tool(self) -> Any:
+        def delete_scheduled_task(name: str) -> str:
+            """Delete one scheduled task by name."""
+            deleted = self._require_scheduled_task_manager().delete_task(name)
+            return json.dumps({"name": name, "deleted": deleted}, ensure_ascii=False, indent=2)
+
+        return delete_scheduled_task
 
     def reset(self) -> None:
         close_clients_best_effort(self.mcp_clients)

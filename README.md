@@ -11,6 +11,7 @@ uv sync
 # 配置
 cp config.json.example config.json
 # 编辑 config.json，填入模型 API key 等
+cp scheduled_tasks.json.example ~/.babybot/workspace/scheduled_tasks.json
 
 # 交互式 CLI（本地调试）
 uv run babybot
@@ -74,7 +75,7 @@ uv run gateway
 
 ## 配置说明
 
-所有配置集中在 `config.json`，支持 `${VAR_NAME}` 环境变量语法。完整模板见 `config.json.example`。
+主配置位于 `config.json`，定时任务位于工作区独立文件 `scheduled_tasks.json`。完整模板见 `config.json.example` 和 `scheduled_tasks.json.example`。
 
 ### 模型配置
 
@@ -126,6 +127,8 @@ uv run gateway
     "timeout": 600,
     "idle_timeout": 60,
     "max_concurrency": 8,
+    "scheduled_max_concurrency": 2,
+    "message_queue_maxsize": 1000,
     "max_per_chat": 1,
     "send_ack": true,
     "context_history_tokens": 2000,
@@ -140,6 +143,8 @@ uv run gateway
 | `timeout` | 600 | 单任务硬超时（秒） |
 | `idle_timeout` | 60 | 空闲超时，无心跳则终止任务 |
 | `max_concurrency` | 8 | 全局最大并行消息数 |
+| `scheduled_max_concurrency` | 2 | 定时任务并行上限（与用户消息并发池隔离） |
+| `message_queue_maxsize` | 1000 | MessageBus 单队列最大积压，超过后入队会背压等待 |
 | `max_per_chat` | 1 | 单个会话最大并行数 |
 | `send_ack` | true | 是否发送"收到，正在处理..."回执 |
 | `context_history_tokens` | 2000 | 历史上下文 token 预算 |
@@ -218,6 +223,33 @@ uv run gateway
 ```
 
 技能目录需包含 `SKILL.md`（frontmatter 定义元数据 + 正文作为 system prompt），可选 `scripts/` 子目录放置技能专属工具脚本。
+
+### 定时任务
+
+工作区中的 `scheduled_tasks.json` 保存所有定时任务定义，不再和主配置混在一起。任务定义示例：
+
+```json
+[
+  {
+    "name": "每日新闻摘要",
+    "prompt": "搜索并总结今天的科技新闻，列出5条最重要的",
+    "schedule": "0 9 * * *",
+    "target": {
+      "channel": "feishu",
+      "chat_id": "oc_xxx"
+    },
+    "enabled": false
+  }
+]
+```
+
+要求：
+
+- 每个任务名必须唯一。
+- `schedule` 必须是三选一：合法 cron 字符串、`{ "interval": 7200 }`（循环间隔秒）或 `{ "run_at": "2026-03-16T17:10:00+08:00" }`（一次性触发）。
+- 旧版 `config.json` 中的 `scheduled_tasks` 会在首次加载时自动迁移到工作区文件。
+- 通过自然语言创建任务时可以不提供 `name`；系统会根据 `prompt + target + schedule` 自动生成稳定名字，并尽量复用已有同类任务而不是重复创建。
+- 默认要求当前进程有活跃调度器（通常是 `uv run gateway`）；否则会提示“仅落盘、不保证执行”，避免误报创建成功。
 
 ## 长期记忆 (TAPE)
 

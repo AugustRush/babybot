@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -81,14 +82,35 @@ class OpenAICompatibleGateway(ModelProvider):
             task_id, step, self._config.model.model_name,
             tool_count, len(messages),
         )
+        per_call_timeout = max(1.0, float(self._config.system.subtask_timeout))
+        logger.info(
+            "LLM request timeout task=%s step=%s timeout=%.1fs",
+            task_id,
+            step,
+            per_call_timeout,
+        )
         started = time.perf_counter()
         try:
             heartbeat = context.state.get("heartbeat")
             if heartbeat is not None:
                 async with heartbeat.keep_alive():
-                    completion = await client.chat.completions.create(**kwargs)
+                    completion = await asyncio.wait_for(
+                        client.chat.completions.create(**kwargs),
+                        timeout=per_call_timeout,
+                    )
             else:
-                completion = await client.chat.completions.create(**kwargs)
+                completion = await asyncio.wait_for(
+                    client.chat.completions.create(**kwargs),
+                    timeout=per_call_timeout,
+                )
+        except asyncio.TimeoutError:
+            logger.error(
+                "LLM request timeout task=%s step=%s timeout=%.1fs",
+                task_id,
+                step,
+                per_call_timeout,
+            )
+            raise
         except Exception:
             logger.exception("LLM request failed task=%s step=%s", task_id, step)
             raise

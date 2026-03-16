@@ -25,6 +25,7 @@ class MessageEnvelope:
 
     message: InboundMessage
     heartbeat: Heartbeat
+    completion: asyncio.Future["TaskResponse"] | None = None
     created_at: float = field(default_factory=time.monotonic)
 
 
@@ -46,11 +47,33 @@ class MessageBus:
         self._config = config
         self._orchestrator = orchestrator
         self._channels = channels
-        self._queue: asyncio.Queue[MessageEnvelope | None] = asyncio.Queue()
+        queue_size = int(getattr(config.system, "message_queue_maxsize", 1000) or 1000)
+        self._user_queue: asyncio.Queue[MessageEnvelope | None] = asyncio.Queue(
+            maxsize=max(1, queue_size)
+        )
+        self._scheduled_queue: asyncio.Queue[MessageEnvelope | None] = asyncio.Queue(
+            maxsize=max(1, queue_size)
+        )
         self._global_sem = asyncio.Semaphore(config.system.max_concurrency)
         self._chat_sems: dict[str, asyncio.Semaphore] = {}
-        self._consumer_task: asyncio.Task | None = None
+        max_concurrency = max(1, int(config.system.max_concurrency))
+        requested_scheduled = int(
+            getattr(
+                config.system,
+                "scheduled_max_concurrency",
+                max(1, max_concurrency // 4),
+            )
+            or 0
+        )
+        if max_concurrency <= 1:
+            self._scheduled_workers = 0
+            self._user_workers = 1
+        else:
+            self._scheduled_workers = min(max(1, requested_scheduled), max_concurrency - 1)
+            self._user_workers = max_concurrency - self._scheduled_workers
+        self._worker_tasks: list[asyncio.Task[Any]] = []
         self._running = False
+        self._accepting = False
 
     def _get_chat_sem(self, key: str) -> asyncio.Semaphore:
         sem = self._chat_sems.get(key)
@@ -61,42 +84,117 @@ class MessageBus:
 
     async def enqueue(self, msg: InboundMessage) -> None:
         """Non-blocking enqueue of an inbound message."""
+        if not self._accepting:
+            raise RuntimeError("MessageBus is not accepting new messages")
         hb = Heartbeat(idle_timeout=float(self._config.system.idle_timeout))
         envelope = MessageEnvelope(message=msg, heartbeat=hb)
-        await self._queue.put(envelope)
+        queue = self._scheduled_queue if self._is_scheduled(msg) and self._scheduled_workers > 0 else self._user_queue
+        await queue.put(envelope)
+
+    async def enqueue_and_wait(
+        self,
+        msg: InboundMessage,
+        timeout: float | None = None,
+    ) -> "TaskResponse":
+        """Enqueue and wait until processing finishes."""
+        if not self._accepting:
+            raise RuntimeError("MessageBus is not accepting new messages")
+        loop = asyncio.get_running_loop()
+        hb = Heartbeat(idle_timeout=float(self._config.system.idle_timeout))
+        completion: asyncio.Future["TaskResponse"] = loop.create_future()
+        envelope = MessageEnvelope(message=msg, heartbeat=hb, completion=completion)
+        queue = self._scheduled_queue if self._is_scheduled(msg) and self._scheduled_workers > 0 else self._user_queue
+        await queue.put(envelope)
+        if timeout is not None:
+            return await asyncio.wait_for(completion, timeout=timeout)
+        return await completion
+
+    @staticmethod
+    def _is_scheduled(msg: InboundMessage) -> bool:
+        return bool((msg.metadata or {}).get("scheduled_task"))
 
     async def start(self) -> None:
         """Start the consumer loop."""
+        if self._running:
+            return
         self._running = True
-        self._consumer_task = asyncio.create_task(self._consume_loop())
+        self._accepting = True
+        self._worker_tasks = []
+        for idx in range(self._user_workers):
+            self._worker_tasks.append(
+                asyncio.create_task(self._worker_loop(self._user_queue, f"user-{idx+1}"))
+            )
+        for idx in range(self._scheduled_workers):
+            self._worker_tasks.append(
+                asyncio.create_task(
+                    self._worker_loop(self._scheduled_queue, f"scheduled-{idx+1}")
+                )
+            )
+        logger.info(
+            "MessageBus started user_workers=%d scheduled_workers=%d",
+            self._user_workers,
+            self._scheduled_workers,
+        )
 
-    async def stop(self) -> None:
+    async def stop(self, *, drain: bool = True) -> None:
         """Graceful shutdown: signal consumer and wait."""
-        self._running = False
-        await self._queue.put(None)  # sentinel
-        if self._consumer_task is not None:
+        if not self._running:
+            return
+        self._accepting = False
+        if drain:
             try:
-                await asyncio.wait_for(self._consumer_task, timeout=10.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                self._consumer_task.cancel()
+                await asyncio.wait_for(self._user_queue.join(), timeout=30.0)
+                await asyncio.wait_for(self._scheduled_queue.join(), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning("MessageBus drain timed out; forcing shutdown")
 
-    async def _consume_loop(self) -> None:
-        """Main consumer: pull envelopes and dispatch."""
-        while self._running:
-            envelope = await self._queue.get()
-            if envelope is None:
-                break
-            asyncio.create_task(self._dispatch(envelope))
+        # Stop all workers with sentinels.
+        for _ in range(self._user_workers):
+            await self._user_queue.put(None)
+        for _ in range(self._scheduled_workers):
+            await self._scheduled_queue.put(None)
+
+        if self._worker_tasks:
+            done, pending = await asyncio.wait(self._worker_tasks, timeout=15.0)
+            for task in pending:
+                task.cancel()
+            self._worker_tasks = []
+
+        self._running = False
+        logger.info("MessageBus stopped")
+
+    async def _worker_loop(
+        self,
+        queue: asyncio.Queue[MessageEnvelope | None],
+        label: str,
+    ) -> None:
+        while True:
+            envelope = await queue.get()
+            try:
+                if envelope is None:
+                    return
+                await self._dispatch(envelope)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("MessageBus worker %s failed to dispatch envelope", label)
+            finally:
+                queue.task_done()
 
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         """Acquire semaphores and process."""
         msg = envelope.message
         chat_key = f"{msg.channel}:{msg.chat_id}"
 
-        async with self._global_sem:
-            chat_sem = self._get_chat_sem(chat_key)
-            async with chat_sem:
-                await self._process(envelope)
+        try:
+            async with self._global_sem:
+                chat_sem = self._get_chat_sem(chat_key)
+                async with chat_sem:
+                    await self._process(envelope)
+        except Exception as exc:
+            if envelope.completion is not None and not envelope.completion.done():
+                envelope.completion.set_exception(exc)
+            raise
 
     async def _process(self, envelope: MessageEnvelope) -> None:
         """Process a single message: ack → execute → respond."""
@@ -116,9 +214,10 @@ class MessageBus:
         )
 
         channel = self._channels.get(msg.channel)
+        is_scheduled = bool((msg.metadata or {}).get("scheduled_task"))
 
         # Send instant acknowledgement if configured.
-        if channel and self._config.system.send_ack:
+        if channel and self._config.system.send_ack and not is_scheduled:
             try:
                 ack_response = TaskResponse(text="收到，正在处理...")
                 await channel.send_response(
@@ -132,6 +231,7 @@ class MessageBus:
 
         # Set channel context for this message (contextvars — concurrency safe).
         ctx = ChannelToolContext(
+            channel_name=msg.channel,
             chat_id=msg.chat_id,
             sender_id=msg.sender_id,
             metadata=msg.metadata,
@@ -196,3 +296,5 @@ class MessageBus:
             len(response.text or ""),
             len(response.media_paths or []),
         )
+        if envelope.completion is not None and not envelope.completion.done():
+            envelope.completion.set_result(response)

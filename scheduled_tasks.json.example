@@ -1,0 +1,36 @@
+[
+  {
+    "name": "每日新闻摘要",
+    "prompt": "搜索并总结今天的科技新闻，列出5条最重要的",
+    "schedule": "0 9 * * *",
+    "target": {
+      "channel": "feishu",
+      "chat_id": "oc_xxx"
+    },
+    "enabled": false
+  },
+  {
+    "name": "健康提醒",
+    "prompt": "提醒大家喝水和休息",
+    "schedule": {
+      "interval": 7200
+    },
+    "target": {
+      "channel": "feishu",
+      "chat_id": "oc_yyy"
+    },
+    "enabled": false
+  },
+  {
+    "name": "一次性测试消息",
+    "prompt": "测试测试",
+    "schedule": {
+      "run_at": "2026-03-16T17:10:00+08:00"
+    },
+    "target": {
+      "channel": "feishu",
+      "chat_id": "oc_zzz"
+    },
+    "enabled": false
+  }
+]
