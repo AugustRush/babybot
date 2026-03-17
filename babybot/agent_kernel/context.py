@@ -55,10 +55,33 @@ class ContextManager:
         self._context.state = copy.deepcopy(snapshot.state)
         self._context.events = copy.deepcopy(snapshot.events)
 
+    # Keys whose values are shared singletons or contain unpicklable
+    # resources (e.g. sqlite3.Connection inside TapeStore, Heartbeat).
+    # They are passed by reference to child contexts instead of deep-copied.
+    _SHARED_STATE_KEYS = frozenset((
+        "heartbeat", "tape", "tape_store",
+    ))
+
     def fork(self, session_id: str | None = None) -> ExecutionContext:
-        """Create a child context with copied state and independent event stream."""
+        """Create a child context with copied state and independent event stream.
+
+        Shared objects listed in ``_SHARED_STATE_KEYS`` are passed by reference
+        so child tasks can signal the same heartbeat / read the same tape.
+        Everything else is deep-copied for isolation.
+        """
+        # Separate shared refs from copyable state to avoid deepcopy failures
+        # on unpicklable objects (e.g. sqlite3.Connection in TapeStore).
+        shared: dict[str, Any] = {}
+        copyable: dict[str, Any] = {}
+        for k, v in self._context.state.items():
+            if k in self._SHARED_STATE_KEYS:
+                shared[k] = v
+            else:
+                copyable[k] = v
+        new_state = copy.deepcopy(copyable)
+        new_state.update(shared)
         return ExecutionContext(
             session_id=session_id or self._context.session_id,
-            state=copy.deepcopy(self._context.state),
+            state=new_state,
             events=[],
         )

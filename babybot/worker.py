@@ -23,10 +23,12 @@ def create_worker_executor(
     sys_prompt: str,
     skill_packs: Iterable[SkillPack] | None = None,
     runtime: WorkerRuntimeConfig | None = None,
+    gateway: OpenAICompatibleGateway | None = None,
 ) -> SingleAgentExecutor:
     """Create one worker executor with provided system prompt."""
     runtime = runtime or WorkerRuntimeConfig()
-    gateway = OpenAICompatibleGateway(config)
+    if gateway is None:
+        gateway = OpenAICompatibleGateway(config)
     base_skill = SkillPack(name="worker_base", system_prompt=sys_prompt)
     extra_skills = list(skill_packs or [])
     return SingleAgentExecutor(

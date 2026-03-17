@@ -298,6 +298,7 @@ class FeishuChannel(BaseChannel):
         re.DOTALL,
     )
     _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
+    _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
     _LIST_RE = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)
     _OLIST_RE = re.compile(r"^[\s]*\d+\.\s+", re.MULTILINE)
     _TEXT_MAX_LEN = 200
@@ -742,6 +743,19 @@ class FeishuChannel(BaseChannel):
         post_body = {"zh_cn": {"content": paragraphs}}
         return json.dumps(post_body, ensure_ascii=False)
 
+    @classmethod
+    def _normalize_markdown_images(cls, content: str) -> str:
+        """Replace markdown image syntax to plain link text for Feishu compatibility."""
+
+        def _replace(match: re.Match[str]) -> str:
+            alt = (match.group(1) or "图片").strip() or "图片"
+            url = (match.group(2) or "").strip()
+            if url:
+                return f"[{alt}]({url})"
+            return alt
+
+        return cls._MD_IMAGE_RE.sub(_replace, content or "")
+
     # ── Card building ────────────────────────────────────────────────
 
     @staticmethod
@@ -862,7 +876,7 @@ class FeishuChannel(BaseChannel):
         **kwargs: Any,
     ) -> None:
         """Send reply with smart formatting and optional media attachments."""
-        text = response.text
+        text = self._normalize_markdown_images(response.text)
         media_paths = response.media_paths
         sender_id = kwargs.get("sender_id")
         feishu_cfg = self.config

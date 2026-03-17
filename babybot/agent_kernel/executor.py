@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, ModelToolCall
 from .skills import SkillPack, merge_leases, merge_prompts
@@ -120,7 +120,38 @@ class SingleAgentExecutor:
                             "Executor tool unavailable task=%s tool=%s",
                             task.task_id, tool_call.name,
                         )
+                    elif isinstance(tool_call.arguments, dict) and tool_call.arguments.get("__tool_argument_parse_error__"):
+                        tool_output = (
+                            f"Tool argument JSON parse error for {tool_call.name}: "
+                            f"{tool_call.arguments.get('__raw_arguments__', '')}"
+                        )
+                        logger.warning(
+                            "Executor invalid arguments JSON task=%s tool=%s",
+                            task.task_id,
+                            tool_call.name,
+                        )
                     else:
+                        validation_error = self._validate_tool_arguments(
+                            schema=registered.tool.schema,
+                            args=tool_call.arguments,
+                        )
+                        if validation_error:
+                            tool_output = f"Tool argument validation failed for {tool_call.name}: {validation_error}"
+                            logger.warning(
+                                "Executor argument validation failed task=%s tool=%s error=%s",
+                                task.task_id,
+                                tool_call.name,
+                                validation_error,
+                            )
+                            messages.append(
+                                ModelMessage(
+                                    role="tool",
+                                    name=tool_call.name,
+                                    content=tool_output,
+                                    tool_call_id=tool_call.call_id,
+                                )
+                            )
+                            continue
                         logger.info(
                             "Executor invoke task=%s tool=%s args_keys=%s",
                             task.task_id, tool_call.name,
@@ -184,10 +215,11 @@ class SingleAgentExecutor:
         exclude_tools = set(lease.exclude_tools)
         if name in exclude_tools:
             return False
-        if include_tools and name not in include_tools:
-            return False
-        if include_groups and group not in include_groups:
-            return False
+        if include_tools or include_groups:
+            in_tools = name in include_tools if include_tools else False
+            in_groups = group in include_groups if include_groups else False
+            if not (in_tools or in_groups):
+                return False
         return True
 
     @staticmethod
@@ -202,6 +234,53 @@ class SingleAgentExecutor:
                 {"id": tc.call_id, "name": tc.name} for tc in message.tool_calls
             ]
         return payload
+
+    @staticmethod
+    def _validate_tool_arguments(
+        schema: dict[str, Any],
+        args: Any,
+    ) -> str | None:
+        if not isinstance(args, dict):
+            return "arguments must be a JSON object"
+
+        required = schema.get("required") or []
+        if isinstance(required, list):
+            missing = [name for name in required if name not in args]
+            if missing:
+                return f"missing required fields: {', '.join(missing)}"
+
+        properties = schema.get("properties") or {}
+        additional_allowed = schema.get("additionalProperties", True)
+        if isinstance(properties, dict) and additional_allowed is False:
+            extra = [key for key in args if key not in properties]
+            if extra:
+                return f"unexpected fields: {', '.join(extra)}"
+
+        if isinstance(properties, dict):
+            for name, value in args.items():
+                prop = properties.get(name)
+                if not isinstance(prop, dict):
+                    continue
+                expected = prop.get("type")
+                if not expected:
+                    continue
+                if expected == "string" and not isinstance(value, str):
+                    return f"field '{name}' must be string"
+                if expected == "integer" and (
+                    not isinstance(value, int) or isinstance(value, bool)
+                ):
+                    return f"field '{name}' must be integer"
+                if expected == "number" and (
+                    not isinstance(value, (int, float)) or isinstance(value, bool)
+                ):
+                    return f"field '{name}' must be number"
+                if expected == "boolean" and not isinstance(value, bool):
+                    return f"field '{name}' must be boolean"
+                if expected == "array" and not isinstance(value, list):
+                    return f"field '{name}' must be array"
+                if expected == "object" and not isinstance(value, dict):
+                    return f"field '{name}' must be object"
+        return None
 
 
 class EchoModelProvider:
@@ -261,7 +340,14 @@ def _build_history_messages(
             pending = state.get("pending")
             if pending:
                 parts.append(f"待办: {pending}")
-            messages.append(ModelMessage(role="system", content="\n".join(parts)))
+            anchor_text = "\n".join(parts)
+            anchor_cost = len(anchor_text) // 3
+            messages.append(ModelMessage(role="system", content=anchor_text))
+            budget_remaining = max(0, int(token_budget) - anchor_cost)
+        else:
+            budget_remaining = max(0, int(token_budget))
+    else:
+        budget_remaining = max(0, int(token_budget))
 
     # Collect recent entries (for both section 2 exclusion and section 3)
     entries_since = getattr(tape, "entries_since_anchor", None)
@@ -273,8 +359,6 @@ def _build_history_messages(
     # Exclude the last user message (it's the current turn, added by executor)
     if msg_entries and msg_entries[-1].payload.get("role") == "user":
         msg_entries = msg_entries[:-1]
-
-    budget_remaining = max(0, int(token_budget))
 
     # 2. BM25 cross-anchor recall — search for relevant entries before the anchor
     search_fn = getattr(tape_store, "search_relevant", None) if tape_store else None

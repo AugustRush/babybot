@@ -5,6 +5,7 @@ Planner -> Executor -> Synthesizer.
 """
 
 from .context import ContextManager, ContextSnapshot
+from .dag_ports import LLMPlanner, LLMSynthesizer, ResourceBridgeExecutor
 from .engine import PlanValidationError, WorkflowEngine
 from .executor import EchoModelProvider, ExecutorPolicy, SingleAgentExecutor
 from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, ModelToolCall
@@ -31,6 +32,8 @@ __all__ = [
     "ExecutorPolicy",
     "ExecutorPort",
     "FinalResult",
+    "LLMPlanner",
+    "LLMSynthesizer",
     "MCPClientPort",
     "MCPToolAdapter",
     "ModelMessage",
@@ -42,6 +45,7 @@ __all__ = [
     "PlanValidationError",
     "PlannerPort",
     "RegisteredTool",
+    "ResourceBridgeExecutor",
     "RunPolicy",
     "SingleAgentExecutor",
     "SkillPack",

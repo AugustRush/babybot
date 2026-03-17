@@ -170,6 +170,7 @@ class CronScheduler:
         self._tasks: dict[str, ScheduledTaskDef] = {}
         self._next_fire: dict[str, float] = {}
         self._running_tasks: dict[str, asyncio.Task] = {}
+        self._one_shot_attempts: dict[str, int] = {}
         self._running = False
         self._loop_task: asyncio.Task | None = None
         self._wake_event = asyncio.Event()
@@ -385,8 +386,13 @@ class CronScheduler:
                     "scheduled_task_name": task.name,
                 },
             )
-            await self._message_bus.enqueue_and_wait(message)
+            response = await self._message_bus.enqueue_and_wait(message)
             if task.run_at is not None:
+                # Check if response indicates an error before marking complete
+                response_text = getattr(response, "text", "") or ""
+                if response_text.startswith("处理任务时出错"):
+                    raise RuntimeError(f"One-shot task returned error: {response_text}")
+                self._one_shot_attempts.pop(task.name, None)
                 self._mark_one_shot_completed(task.name)
         except AttributeError:
             # Backward compatibility for tests/mocks without enqueue_and_wait.
@@ -403,6 +409,7 @@ class CronScheduler:
                 )
             )
             if task.run_at is not None:
+                self._one_shot_attempts.pop(task.name, None)
                 self._mark_one_shot_completed(task.name)
         except asyncio.CancelledError:
             logger.info("Scheduled task cancelled: %s", task.name)
@@ -410,8 +417,19 @@ class CronScheduler:
         except Exception:
             logger.exception("Failed scheduled task dispatch: %s", task.name)
             if task.run_at is not None:
-                # Retry one-shot dispatch after a short delay on failure.
-                self._next_fire[task.name] = time.monotonic() + 60.0
+                attempts = self._one_shot_attempts.get(task.name, 0) + 1
+                self._one_shot_attempts[task.name] = attempts
+                if attempts >= 3:
+                    logger.warning(
+                        "One-shot task '%s' exceeded max retries (%d), disabling.",
+                        task.name, attempts,
+                    )
+                    self._one_shot_attempts.pop(task.name, None)
+                    task.enabled = False
+                    self._next_fire.pop(task.name, None)
+                else:
+                    # Retry after a short delay.
+                    self._next_fire[task.name] = time.monotonic() + 60.0
         finally:
             self._running_tasks.pop(task.name, None)
 

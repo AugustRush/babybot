@@ -1,4 +1,4 @@
-"""Orchestrator built on lightweight kernel — single agent mode."""
+"""Orchestrator built on lightweight kernel — DAG-driven multi-agent mode."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .agent_kernel import ExecutionContext, RunPolicy, WorkflowEngine
+from .agent_kernel.dag_ports import LLMPlanner, LLMSynthesizer, ResourceBridgeExecutor
 from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
 from .model_gateway import OpenAICompatibleGateway
@@ -36,7 +38,7 @@ class TaskResponse:
 
 
 class OrchestratorAgent:
-    """Orchestrator — all tasks go through a single agent that can self-escalate."""
+    """Orchestrator — DAG-driven multi-agent mode via WorkflowEngine."""
 
     def __init__(self, config: Config | None = None):
         self.config = config or Config()
@@ -51,35 +53,52 @@ class OrchestratorAgent:
         self._init_lock = asyncio.Lock()
         self._initialized = False
 
-    def _get_direct_prompt(self) -> str:
-        return """你是高效助手。对任务直接回答：
-- 简洁准确
-- 不虚构工具执行结果
-- 如需外部信息必须明确指出并建议调用工具"""
+    def _build_workflow_engine(self) -> WorkflowEngine:
+        planner = LLMPlanner(
+            gateway=self.gateway,
+            resource_manager=self.resource_manager,
+        )
+        executor = ResourceBridgeExecutor(
+            resource_manager=self.resource_manager,
+            gateway=self.gateway,
+        )
+        synthesizer = LLMSynthesizer(gateway=self.gateway)
+        return WorkflowEngine(
+            planner=planner,
+            executor=executor,
+            synthesizer=synthesizer,
+            policy=RunPolicy(max_parallel=4, default_retries=1),
+        )
 
-    async def _answer_direct(
-        self, user_input: str, tape: Tape | None = None,
+    async def _answer_with_dag(
+        self,
+        user_input: str,
+        tape: Tape | None = None,
         heartbeat: Heartbeat | None = None,
         media_paths: list[str] | None = None,
     ) -> tuple[str, list[str]]:
-        logger.info("_answer_direct calling run_subagent_task...")
-        text, media = await self.resource_manager.run_subagent_task(
-            task_description=user_input,
-            lease={},
-            agent_name="DirectAssistant",
-            tape=tape,
-            tape_store=self.tape_store if tape else None,
-            heartbeat=heartbeat,
-            media_paths=media_paths,
+        engine = self._build_workflow_engine()
+
+        context = ExecutionContext(
+            session_id="orchestrator",
+            state={
+                k: v for k, v in [
+                    ("tape", tape),
+                    ("tape_store", self.tape_store if tape else None),
+                    ("heartbeat", heartbeat),
+                    ("media_paths", media_paths),
+                    ("context_history_tokens", self.config.system.context_history_tokens),
+                ] if v is not None
+            },
         )
-        logger.info("_answer_direct subagent done text_len=%d media=%d", len(text or ""), len(media or []))
-        normalized_media = list(media or [])
-        if text.strip():
-            return text, normalized_media
-        fallback = await self.gateway.complete(
-            self._get_direct_prompt(), user_input, heartbeat=heartbeat
-        )
-        return fallback, normalized_media
+
+        result = await engine.run(goal=user_input, context=context)
+
+        text = result.conclusion or "任务完成，但没有可返回的结果。"
+        collected_media = context.state.get("media_paths_collected", [])
+        dedup_media = sorted(set(collected_media))
+
+        return text, dedup_media
 
     async def process_task(
         self, user_input: str, chat_key: str = "",
@@ -114,7 +133,7 @@ class OrchestratorAgent:
             self.tape_store.save_entries(chat_key, pending_entries)
 
         try:
-            text, collected_media = await self._answer_direct(
+            text, collected_media = await self._answer_with_dag(
                 user_input, tape=tape, heartbeat=heartbeat,
                 media_paths=media_paths,
             )

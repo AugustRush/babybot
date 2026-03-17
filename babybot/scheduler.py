@@ -1,8 +1,15 @@
-"""Task scheduler with serial/parallel/hybrid execution modes."""
+"""Task scheduler with serial/parallel/hybrid execution modes.
+
+.. deprecated::
+    This module is superseded by :mod:`babybot.agent_kernel.engine.WorkflowEngine`
+    which provides DAG-aware orchestration with planner/executor/synthesizer ports.
+    Kept for backward compatibility; prefer ``WorkflowEngine`` for new code.
+"""
 
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
@@ -216,11 +223,11 @@ class Scheduler:
                 indegree[task_id] += 1
                 children[dep].append(task_id)
 
-        queue = [task_id for task_id, deg in indegree.items() if deg == 0]
+        queue = deque(task_id for task_id, deg in indegree.items() if deg == 0)
         order: list[str] = []
 
         while queue:
-            current = queue.pop(0)
+            current = queue.popleft()
             order.append(current)
             for child in children[current]:
                 indegree[child] -= 1

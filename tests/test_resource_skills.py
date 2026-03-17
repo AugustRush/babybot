@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 
 from babybot.agent_kernel import ToolLease
-from babybot.resource import LoadedSkill, ResourceManager
+from babybot.resource import LoadedSkill, ResourceManager, ToolGroup
 
 
 def test_parse_frontmatter_from_skill_markdown() -> None:
@@ -143,6 +143,149 @@ def test_select_skill_packs_loads_all_active_skills() -> None:
 
     packs = asyncio.run(manager._select_skill_packs("draw an image"))
     assert sorted(p.name for p in packs) == ["a", "b", "c"]
+
+
+def test_select_skill_packs_with_explicit_ids_filters_result() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "code-review": LoadedSkill(
+            name="code-review",
+            description="Review code",
+            directory="/tmp/code-review",
+            prompt="review prompt",
+            active=True,
+        ),
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="Weather skill",
+            directory="/tmp/weather-query",
+            prompt="weather prompt",
+            active=True,
+        ),
+    }
+    packs = asyncio.run(
+        manager._select_skill_packs(
+            "查天气",
+            skill_ids=["skill.weather-query"],
+        )
+    )
+    assert [pack.name for pack in packs] == ["weather-query"]
+
+
+def test_resource_briefs_and_scope_resolution() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "basic": ToolGroup(name="basic", description="Core tools", active=True),
+        "skill_weather_query": ToolGroup(
+            name="skill_weather_query",
+            description="Weather tools",
+            active=True,
+        ),
+        "map_services": ToolGroup(
+            name="map_services",
+            description="Map MCP tools",
+            active=True,
+        ),
+    }
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.mcp_server_groups = {"gaode_map": "map_services"}
+    manager.skills = {
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="用于查询天气",
+            directory="/tmp/weather-query",
+            prompt="weather prompt",
+            active=True,
+            lease=ToolLease(include_groups=("skill_weather_query",)),
+            tool_group="skill_weather_query",
+            tools=("weather_query__fetch_weather",),
+        )
+    }
+
+    def weather_query__fetch_weather(city_name: str) -> str:
+        return city_name
+
+    def gaode_map__search(keyword: str) -> str:
+        return keyword
+
+    manager.register_tool(
+        weather_query__fetch_weather,
+        group_name="skill_weather_query",
+        func_name="weather_query__fetch_weather",
+    )
+    manager.register_tool(
+        gaode_map__search,
+        group_name="map_services",
+        func_name="gaode_map__search",
+    )
+
+    briefs = manager.get_resource_briefs()
+    ids = {item["id"] for item in briefs}
+    assert "skill.weather-query" in ids
+    assert "mcp.gaode-map" in ids
+
+    scope = manager.resolve_resource_scope("skill.weather-query")
+    assert scope is not None
+    lease_dict, skill_ids = scope
+    assert lease_dict["include_groups"] == ["skill_weather_query"]
+    assert skill_ids == ("weather-query",)
+
+    mcp_scope = manager.resolve_resource_scope("mcp.gaode-map")
+    assert mcp_scope is not None
+    mcp_lease, mcp_skills = mcp_scope
+    assert mcp_lease["include_groups"] == ["map_services"]
+    assert mcp_skills == ()
+
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    unavailable_scope = manager.resolve_resource_scope(
+        "skill.weather-query",
+        require_tools=True,
+    )
+    assert unavailable_scope is None
+
+
+def test_json_schema_for_callable_handles_collections_and_kwargs() -> None:
+    def dispatch_workers(
+        tasks: list[str],
+        max_concurrency: int = 3,
+        lease: dict[str, str] | None = None,
+        **kwargs,
+    ) -> str:
+        return ""
+
+    schema = ResourceManager._json_schema_for_callable(dispatch_workers)
+    assert schema["properties"]["tasks"]["type"] == "array"
+    assert schema["properties"]["max_concurrency"]["type"] == "integer"
+    assert schema["properties"]["lease"]["type"] == "object"
+    assert "kwargs" not in schema["properties"]
+    assert schema["additionalProperties"] is False
+
+
+def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {"resolve_workspace_path": staticmethod(lambda value: str(value))},
+    )()
+    skill_dir = tmp_path / "text_to_image"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "tool_impl.py").write_text(
+        "import definitely_missing_package\n"
+        "def generate_image(prompt: str, output_path: str = 'a.jpg') -> str:\n"
+        "    return output_path\n",
+        encoding="utf-8",
+    )
+
+    group, tools = manager._register_skill_tools("text-to-image", skill_dir)
+    assert group == "skill_text_to_image"
+    assert any(name.endswith("__generate_image") for name in tools)
+    reg = manager.registry.get("text_to_image__generate_image")
+    assert reg is not None
+    assert reg.tool.schema["properties"]["prompt"]["type"] == "string"
 
 
 def test_scheduled_task_tools_delegate_to_manager() -> None:

@@ -74,10 +74,11 @@ class ToolRegistry:
         for name, registered in self._tools.items():
             if name in exclude_tools:
                 continue
-            if include_tools and name not in include_tools:
-                continue
-            if include_groups and registered.group not in include_groups:
-                continue
+            if include_tools or include_groups:
+                in_tools = name in include_tools if include_tools else False
+                in_groups = registered.group in include_groups if include_groups else False
+                if not (in_tools or in_groups):
+                    continue
             selected.append(registered)
         return selected
 

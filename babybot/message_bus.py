@@ -78,6 +78,10 @@ class MessageBus:
     def _get_chat_sem(self, key: str) -> asyncio.Semaphore:
         sem = self._chat_sems.get(key)
         if sem is None:
+            # Evict oldest entries if at capacity
+            while len(self._chat_sems) >= 2000:
+                oldest_key = next(iter(self._chat_sems))
+                del self._chat_sems[oldest_key]
             sem = asyncio.Semaphore(self._config.system.max_per_chat)
             self._chat_sems[key] = sem
         return sem

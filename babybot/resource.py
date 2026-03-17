@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import contextvars
 import importlib
 import importlib.util
@@ -18,7 +19,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import UnionType
+from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
     from .context import Tape, TapeStore
     from .cron import ScheduledTaskManager
     from .heartbeat import Heartbeat
+    from .model_gateway import OpenAICompatibleGateway
 
 
 @dataclass
@@ -55,6 +58,30 @@ class ToolGroup:
     description: str
     notes: str = ""
     active: bool = False
+
+
+@dataclass
+class ResourceBrief:
+    """One concise resource record exposed to the main routing agent."""
+
+    resource_id: str
+    resource_type: str
+    name: str
+    purpose: str
+    group: str = ""
+    tool_count: int = 0
+    active: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.resource_id,
+            "type": self.resource_type,
+            "name": self.name,
+            "purpose": self.purpose,
+            "group": self.group,
+            "tool_count": self.tool_count,
+            "active": self.active,
+        }
 
 
 @dataclass
@@ -74,6 +101,11 @@ class LoadedSkill:
     tools: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ScriptFunctionSpec:
+    name: str
+    description: str
+    schema: dict[str, Any]
 
 
 class CallableTool:
@@ -174,9 +206,11 @@ class ResourceManager:
         self.registry = ToolRegistry()
         self.groups: dict[str, ToolGroup] = {}
         self.mcp_clients: dict[str, BaseMCPRuntimeClient] = {}
+        self.mcp_server_groups: dict[str, str] = {}
         self.channel_tools: dict[str, ChannelTools] = {}
         self.skills: dict[str, LoadedSkill] = {}
         self.scheduled_task_manager: ScheduledTaskManager | None = None
+        self._shared_gateway: OpenAICompatibleGateway | None = None
         self._active_write_root: contextvars.ContextVar[str] = contextvars.ContextVar(
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
@@ -245,6 +279,7 @@ class ResourceManager:
         client = HttpMCPRuntimeClient(url=url)
         await client.connect()
         self.mcp_clients[name] = client
+        self.mcp_server_groups[name] = group_name
         if group_name not in self.groups:
             self.groups[group_name] = ToolGroup(
                 name=group_name,
@@ -263,6 +298,7 @@ class ResourceManager:
         client = StdioMCPRuntimeClient(command=command, args=args)
         await client.connect()
         self.mcp_clients[name] = client
+        self.mcp_server_groups[name] = group_name
         if group_name not in self.groups:
             self.groups[group_name] = ToolGroup(
                 name=group_name,
@@ -425,20 +461,219 @@ class ResourceManager:
                 continue
             try:
                 module = self._load_tool_module(str(py_file))
+                for func_name, func in inspect.getmembers(module, inspect.isfunction):
+                    if func.__module__ != module.__name__ or func_name.startswith("_"):
+                        continue
+                    tool_name = f"{slug}__{func_name}"
+                    self.register_tool(
+                        func=func,
+                        group_name=group_name,
+                        func_name=tool_name,
+                    )
+                    tool_names.append(tool_name)
             except Exception as exc:
-                logger.warning("Failed to import skill script %s: %s", py_file, exc)
-                continue
-            for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                if func.__module__ != module.__name__ or func_name.startswith("_"):
-                    continue
-                tool_name = f"{slug}__{func_name}"
-                self.register_tool(
-                    func=func,
-                    group_name=group_name,
-                    func_name=tool_name,
+                logger.warning(
+                    "Failed to import skill script %s: %s; using host-python proxy registration.",
+                    py_file,
+                    exc,
                 )
-                tool_names.append(tool_name)
+                specs = self._extract_function_specs_from_script(py_file)
+                if not specs:
+                    continue
+                for spec in specs:
+                    tool_name = f"{slug}__{spec.name}"
+                    proxy = self._build_external_skill_callable(
+                        script_path=py_file,
+                        function_name=spec.name,
+                    )
+                    self.registry.register(
+                        CallableTool(
+                            func=proxy,
+                            name=tool_name,
+                            description=spec.description,
+                            schema=spec.schema,
+                        ),
+                        group=group_name,
+                    )
+                    tool_names.append(tool_name)
         return group_name, tuple(sorted(set(tool_names)))
+
+    @classmethod
+    def _extract_function_specs_from_script(
+        cls,
+        script_path: Path,
+    ) -> list[_ScriptFunctionSpec]:
+        try:
+            text = script_path.read_text(encoding="utf-8", errors="ignore")
+            tree = ast.parse(text)
+        except Exception as exc:
+            logger.warning("Failed to parse skill script %s: %s", script_path, exc)
+            return []
+
+        specs: list[_ScriptFunctionSpec] = []
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name.startswith("_"):
+                continue
+            schema = cls._schema_from_ast_function(node)
+            doc = ast.get_docstring(node) or node.name
+            description = doc.splitlines()[0].strip() if doc else node.name
+            specs.append(
+                _ScriptFunctionSpec(
+                    name=node.name,
+                    description=description or node.name,
+                    schema=schema,
+                )
+            )
+        return specs
+
+    @classmethod
+    def _schema_from_ast_function(
+        cls,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> dict[str, Any]:
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        defaults = list(node.args.defaults or [])
+        plain_args = list(node.args.args or [])
+        default_offset = len(plain_args) - len(defaults)
+        for idx, arg in enumerate(plain_args):
+            name = arg.arg
+            if name in {"self", "context"}:
+                continue
+            properties[name] = cls._schema_for_ast_annotation(arg.annotation)
+            if idx < default_offset:
+                required.append(name)
+        for kw_arg, kw_default in zip(node.args.kwonlyargs or [], node.args.kw_defaults or []):
+            name = kw_arg.arg
+            if name in {"self", "context"}:
+                continue
+            properties[name] = cls._schema_for_ast_annotation(kw_arg.annotation)
+            if kw_default is None:
+                required.append(name)
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _schema_for_ast_annotation(annotation: ast.AST | None) -> dict[str, Any]:
+        if annotation is None:
+            return {"type": "string"}
+        text = ast.unparse(annotation).strip().lower()
+        if "bool" in text:
+            return {"type": "boolean"}
+        if any(token in text for token in {"int", "long"}):
+            return {"type": "integer"}
+        if any(token in text for token in {"float", "decimal"}):
+            return {"type": "number"}
+        if any(token in text for token in {"dict", "mapping"}):
+            return {"type": "object"}
+        if any(token in text for token in {"list", "tuple", "set", "sequence"}):
+            return {"type": "array"}
+        return {"type": "string"}
+
+    def _build_external_skill_callable(
+        self,
+        script_path: Path,
+        function_name: str,
+    ) -> Any:
+        resolved = str(script_path.resolve())
+
+        async def _runner(**kwargs: Any) -> str:
+            return await self._invoke_external_skill_function(
+                script_path=resolved,
+                function_name=function_name,
+                arguments=kwargs,
+            )
+
+        return _runner
+
+    async def _invoke_external_skill_function(
+        self,
+        script_path: str,
+        function_name: str,
+        arguments: dict[str, Any],
+    ) -> str:
+        runner = (
+            "import asyncio, importlib.util, inspect, json, sys, traceback\n"
+            "MARK='__BABYBOT_RESULT__'\n"
+            "script, fn, raw = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+            "try:\n"
+            "    spec = importlib.util.spec_from_file_location('babybot_skill_proxy', script)\n"
+            "    if spec is None or spec.loader is None:\n"
+            "        raise RuntimeError(f'cannot load script: {script}')\n"
+            "    mod = importlib.util.module_from_spec(spec)\n"
+            "    spec.loader.exec_module(mod)\n"
+            "    if not hasattr(mod, fn):\n"
+            "        raise AttributeError(f'function not found: {fn}')\n"
+            "    func = getattr(mod, fn)\n"
+            "    kwargs = json.loads(raw) if raw else {}\n"
+            "    if inspect.iscoroutinefunction(func):\n"
+            "        out = asyncio.run(func(**kwargs))\n"
+            "    else:\n"
+            "        out = func(**kwargs)\n"
+            "    print(MARK + json.dumps({'ok': True, 'result': out}, ensure_ascii=False, default=str))\n"
+            "except Exception as exc:\n"
+            "    traceback.print_exc()\n"
+            "    print(MARK + json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))\n"
+        )
+        args_json = json.dumps(arguments or {}, ensure_ascii=False)
+        timeout_s = self._coerce_timeout(arguments.get("timeout"), default=300.0)
+        proc = await asyncio.create_subprocess_exec(
+            self._get_user_python(),
+            "-c",
+            runner,
+            script_path,
+            function_name,
+            args_json,
+            cwd=str(self._get_active_write_root()),
+            env=self._clean_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        communicate_coro = proc.communicate()
+        try:
+            if timeout_s and timeout_s > 0:
+                stdout, stderr = await asyncio.wait_for(communicate_coro, timeout=timeout_s)
+            else:
+                stdout, stderr = await communicate_coro
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
+            return f"Tool error: execution timeout after {timeout_s}s."
+        except Exception:
+            try:
+                communicate_coro.close()
+            except Exception:
+                pass
+            raise
+
+        out_text = (stdout or b"").decode("utf-8", errors="ignore")
+        err_text = (stderr or b"").decode("utf-8", errors="ignore")
+        marker = "__BABYBOT_RESULT__"
+        payload_line = ""
+        for line in reversed(out_text.splitlines()):
+            if line.startswith(marker):
+                payload_line = line[len(marker) :].strip()
+                break
+        if not payload_line:
+            combined = (out_text.strip() + ("\n" + err_text.strip() if err_text.strip() else "")).strip()
+            return combined or "Tool error: no result returned."
+        try:
+            payload = json.loads(payload_line)
+        except json.JSONDecodeError:
+            return payload_line
+        if not payload.get("ok", False):
+            detail = payload.get("error", "external execution failed")
+            return f"Tool error: {detail}"
+        return CallableTool._normalize_result(payload.get("result"))
 
     @staticmethod
     def _normalize_keywords(
@@ -566,8 +801,132 @@ class ResourceManager:
         self.register_tool(self._workspace_write_text_file, group_name="code")
         self.register_tool(self._workspace_insert_text_file, group_name="code")
 
+    @staticmethod
+    def _resource_slug(value: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
+        return slug or "resource"
+
+    def _skill_resource_id(self, skill: LoadedSkill) -> str:
+        return f"skill.{self._resource_slug(skill.name)}"
+
+    def _mcp_resource_id(self, server_name: str) -> str:
+        return f"mcp.{self._resource_slug(server_name)}"
+
+    def _group_resource_id(self, group_name: str) -> str:
+        return f"group.{self._resource_slug(group_name)}"
+
+    @staticmethod
+    def _lease_to_dict(lease: ToolLease) -> dict[str, Any]:
+        return {
+            "include_groups": list(lease.include_groups),
+            "include_tools": list(lease.include_tools),
+            "exclude_tools": list(lease.exclude_tools),
+        }
+
+    def get_resource_briefs(self) -> list[dict[str, Any]]:
+        """Build concise resource descriptors for top-level routing."""
+        briefs: list[ResourceBrief] = []
+        mcp_groups = set(self.mcp_server_groups.values())
+
+        for server_name, group_name in sorted(self.mcp_server_groups.items()):
+            group = self.groups.get(group_name)
+            tools = self.registry.list(ToolLease(include_groups=(group_name,)))
+            tool_count = len(tools)
+            briefs.append(
+                ResourceBrief(
+                    resource_id=self._mcp_resource_id(server_name),
+                    resource_type="mcp",
+                    name=server_name,
+                    purpose=(group.description if group else f"MCP tools from {server_name}"),
+                    group=group_name,
+                    tool_count=tool_count,
+                    active=(bool(group.active) if group else True) and tool_count > 0,
+                )
+            )
+
+        for skill in sorted(self.skills.values(), key=lambda s: s.name.lower()):
+            if not skill.active:
+                continue
+            skill_lease = skill.lease or ToolLease()
+            tools = self.registry.list(skill_lease) if skill_lease.include_groups or skill_lease.include_tools else []
+            tool_count = len(tools)
+            briefs.append(
+                ResourceBrief(
+                    resource_id=self._skill_resource_id(skill),
+                    resource_type="skill",
+                    name=skill.name,
+                    purpose=skill.description or f"Skill: {skill.name}",
+                    group=skill.tool_group,
+                    tool_count=tool_count,
+                    active=skill.active and tool_count > 0,
+                )
+            )
+
+        for group_name, group in sorted(self.groups.items()):
+            if group_name.startswith("skill_"):
+                continue
+            if group_name in mcp_groups:
+                continue
+            tools = self.registry.list(ToolLease(include_groups=(group_name,)))
+            tool_count = len(tools)
+            briefs.append(
+                ResourceBrief(
+                    resource_id=self._group_resource_id(group_name),
+                    resource_type="tool_group",
+                    name=group_name,
+                    purpose=group.description,
+                    group=group_name,
+                    tool_count=tool_count,
+                    active=group.active and tool_count > 0,
+                )
+            )
+
+        return [brief.to_dict() for brief in briefs]
+
+    def resolve_resource_scope(
+        self,
+        resource_id: str,
+        require_tools: bool = False,
+    ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+        """Map resource id to a least-privilege lease and optional skill ids."""
+        normalized = (resource_id or "").strip().lower()
+        if not normalized:
+            return None
+
+        for skill in self.skills.values():
+            if not skill.active:
+                continue
+            if normalized == self._skill_resource_id(skill):
+                lease = skill.lease or ToolLease()
+                if require_tools and not self.registry.list(lease):
+                    return None
+                return self._lease_to_dict(lease), (skill.name.strip().lower(),)
+
+        for server_name, group_name in self.mcp_server_groups.items():
+            if normalized == self._mcp_resource_id(server_name):
+                lease = ToolLease(include_groups=(group_name,))
+                if require_tools and not self.registry.list(lease):
+                    return None
+                return self._lease_to_dict(lease), ()
+
+        for group_name in self.groups:
+            if normalized == self._group_resource_id(group_name):
+                lease = ToolLease(include_groups=(group_name,))
+                if require_tools and not self.registry.list(lease):
+                    return None
+                return self._lease_to_dict(lease), ()
+
+        return None
+
     def set_scheduled_task_manager(self, manager: "ScheduledTaskManager | None") -> None:
         self.scheduled_task_manager = manager
+
+    def get_shared_gateway(self) -> "OpenAICompatibleGateway":
+        """Return a shared gateway instance, creating it lazily."""
+        if self._shared_gateway is None:
+            from .model_gateway import OpenAICompatibleGateway as _GW
+            self._shared_gateway = _GW(self.config)
+        return self._shared_gateway
 
     def register_tool(
         self,
@@ -747,13 +1106,17 @@ class ResourceManager:
         tape_store: "TapeStore | None" = None,
         heartbeat: "Heartbeat | None" = None,
         media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
     ) -> tuple[str, list[str]]:
         write_root = self._get_output_dir()
         token = self._active_write_root.set(str(write_root))
         started = time.perf_counter()
         try:
             merged_lease = self._build_task_lease(lease or {})
-            skill_packs = await self._select_skill_packs(task_description)
+            skill_packs = await self._select_skill_packs(
+                task_description,
+                skill_ids=skill_ids,
+            )
             for skill in skill_packs:
                 merged_lease = ToolLease(
                     include_groups=tuple(
@@ -805,6 +1168,7 @@ class ResourceManager:
                 tools=self.registry,
                 sys_prompt=sys_prompt,
                 skill_packs=executor_skills,
+                gateway=self.get_shared_gateway(),
             )
             result = await executor.execute(
                 TaskContract(
@@ -1068,14 +1432,34 @@ class ResourceManager:
         self.groups.clear()
         self.channel_tools.clear()
         self.mcp_clients.clear()
+        self.mcp_server_groups.clear()
         self.skills.clear()
         self._load_config()
         self._register_builtin_tools()
 
-    async def _select_skill_packs(self, task_description: str) -> list[SkillPack]:
+    async def _select_skill_packs(
+        self,
+        task_description: str,
+        skill_ids: list[str] | None = None,
+    ) -> list[SkillPack]:
         active = [s for s in self.skills.values() if s.active]
         if not active:
             return []
+        if skill_ids is not None:
+            wanted = {
+                item.strip().lower()
+                for item in skill_ids
+                if isinstance(item, str) and item.strip()
+            }
+            selected = [
+                s for s in active
+                if s.name.strip().lower() in wanted
+                or self._skill_resource_id(s) in wanted
+            ]
+            return [
+                SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
+                for s in selected
+            ]
         return [
             SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
             for s in active
@@ -1170,9 +1554,26 @@ class ResourceManager:
         configured = self.config.system.python_executable
         if configured:
             return configured
+
+        def _is_venv_path(path: str) -> bool:
+            normalized = path.replace("\\", "/").lower()
+            return "/.venv/" in normalized or "/venv/" in normalized
+
+        preferred = [
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+            "/opt/homebrew/bin/python3",
+        ]
+        for candidate in preferred:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+
         found = shutil.which("python3")
-        if found and "venv" not in found:
+        if found and not _is_venv_path(found):
             return found
+        found_py = shutil.which("python")
+        if found_py and not _is_venv_path(found_py):
+            return found_py
         return sys.executable
 
     def _clean_env(self) -> dict[str, str]:
@@ -1359,28 +1760,82 @@ class ResourceManager:
     @staticmethod
     def _json_schema_for_callable(func: Any) -> dict[str, Any]:
         sig = inspect.signature(func)
+        try:
+            hints = get_type_hints(func)
+        except Exception:
+            hints = {}
         properties: dict[str, Any] = {}
         required: list[str] = []
         for name, param in sig.parameters.items():
             if name in {"self", "context"}:
                 continue
-            anno = param.annotation
-            field_type = "string"
-            if anno in {int}:
-                field_type = "integer"
-            elif anno in {float}:
-                field_type = "number"
-            elif anno in {bool}:
-                field_type = "boolean"
-            elif getattr(anno, "__origin__", None) in {list, tuple}:
-                field_type = "array"
-            elif getattr(anno, "__origin__", None) is dict:
-                field_type = "object"
-            properties[name] = {"type": field_type}
+            if param.kind in {
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            }:
+                continue
+            anno = hints.get(name, param.annotation)
+            properties[name] = ResourceManager._schema_for_annotation(anno)
             if param.default is inspect._empty:
                 required.append(name)
         return {
             "type": "object",
             "properties": properties,
             "required": required,
+            "additionalProperties": False,
         }
+
+    @staticmethod
+    def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
+        if annotation is inspect._empty:
+            return {"type": "string"}
+
+        origin = get_origin(annotation)
+        args = [arg for arg in get_args(annotation) if arg is not type(None)]
+
+        if origin is None:
+            if annotation in {str}:
+                return {"type": "string"}
+            if annotation in {bool}:
+                return {"type": "boolean"}
+            if annotation in {int}:
+                return {"type": "integer"}
+            if annotation in {float}:
+                return {"type": "number"}
+            if annotation in {dict}:
+                return {"type": "object"}
+            if annotation in {list, tuple, set}:
+                return {"type": "array"}
+            return {"type": "string"}
+
+        if origin in {list, tuple, set}:
+            item_schema = (
+                ResourceManager._schema_for_annotation(args[0])
+                if args else {"type": "string"}
+            )
+            return {"type": "array", "items": item_schema}
+
+        if origin is dict:
+            return {"type": "object"}
+
+        if origin is Literal:
+            values = [x for x in args if isinstance(x, (str, int, float, bool))]
+            if not values:
+                return {"type": "string"}
+            first = values[0]
+            if isinstance(first, bool):
+                field_type = "boolean"
+            elif isinstance(first, int):
+                field_type = "integer"
+            elif isinstance(first, float):
+                field_type = "number"
+            else:
+                field_type = "string"
+            return {"type": field_type, "enum": values}
+
+        if origin in {Union, UnionType}:
+            if len(args) == 1:
+                return ResourceManager._schema_for_annotation(args[0])
+            return {"anyOf": [ResourceManager._schema_for_annotation(arg) for arg in args]}
+
+        return {"type": "string"}

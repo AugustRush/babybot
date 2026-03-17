@@ -133,6 +133,15 @@ class WorkflowEngine:
                 )
                 result.attempts = attempt
                 if result.status == "succeeded":
+                    # Merge upstream_results from child back to parent
+                    child_upstream = child_context.state.get("upstream_results", {})
+                    if child_upstream:
+                        parent_upstream = context.state.setdefault("upstream_results", {})
+                        parent_upstream.update(child_upstream)
+                    # Merge collected media paths
+                    child_media = child_context.state.get("media_paths_collected", [])
+                    if child_media:
+                        context.state.setdefault("media_paths_collected", []).extend(child_media)
                     context.emit("task.succeeded", task_id=task.task_id, attempt=attempt)
                     return result
                 last_error = result.error or f"Task ended with status={result.status}"

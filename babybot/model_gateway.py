@@ -125,7 +125,17 @@ class OpenAICompatibleGateway(ModelProvider):
             try:
                 arguments = json.loads(raw_arguments)
             except json.JSONDecodeError:
-                arguments = {}
+                logger.warning(
+                    "Invalid tool arguments JSON task=%s step=%s tool=%s raw=%s",
+                    task_id,
+                    step,
+                    call.function.name,
+                    raw_arguments,
+                )
+                arguments = {
+                    "__tool_argument_parse_error__": True,
+                    "__raw_arguments__": raw_arguments,
+                }
             tool_calls.append(
                 ModelToolCall(
                     call_id=call.id,
@@ -161,6 +171,17 @@ class OpenAICompatibleGateway(ModelProvider):
         resp = await self.generate(req, ExecutionContext(state=state))
         return resp.text.strip()
 
+    async def complete_messages(
+        self, messages: list[ModelMessage], heartbeat: Any = None
+    ) -> str:
+        """Send a full multi-turn message list to the model and return text."""
+        req = ModelRequest(messages=tuple(messages))
+        state: dict[str, Any] = {}
+        if heartbeat is not None:
+            state["heartbeat"] = heartbeat
+        resp = await self.generate(req, ExecutionContext(state=state))
+        return resp.text.strip()
+
     async def complete_structured(
         self,
         system_prompt: str,
@@ -177,15 +198,26 @@ class OpenAICompatibleGateway(ModelProvider):
             user_prompt=f"{user_prompt}\n\n{instruction}",
             heartbeat=heartbeat,
         )
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            text = text[start : end + 1]
+        # Strip markdown code fences if present
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        # Try parsing the full cleaned text first
         try:
-            data = json.loads(text)
+            data = json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warning("LLM structured parse failed model=%s", model_cls.__name__)
-            return None
+            # Fallback: extract outermost braces
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(cleaned[start : end + 1])
+                except json.JSONDecodeError:
+                    logger.warning("LLM structured parse failed model=%s", model_cls.__name__)
+                    return None
+            else:
+                logger.warning("LLM structured parse failed model=%s", model_cls.__name__)
+                return None
         try:
             return model_cls.model_validate(data)
         except Exception:
