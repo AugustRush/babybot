@@ -67,24 +67,20 @@ class ChannelManager:
                     self.orchestrator.resource_manager.register_channel_tools(tools)
                     logger.info("Registered channel tools for '%s'", name)
 
-    def _init_scheduler(self) -> CronScheduler | None:
-        """Build a CronScheduler from workspace task definitions if any exist."""
+    def _init_scheduler(self) -> CronScheduler:
+        """Build a CronScheduler, even when no tasks are defined yet."""
         raw_tasks = self.config.get_scheduled_tasks()
-        if not raw_tasks:
-            return None
         defs = [
             ScheduledTaskDef.from_dict(t)
-            for t in raw_tasks
+            for t in (raw_tasks or [])
             if t.get("enabled", True)
         ]
-        if not defs:
-            return None
         return CronScheduler(
-            self.config, self._bus, task_defs=defs,
+            self.config, self._bus, task_defs=defs or None,
         )
 
     @property
-    def scheduler(self) -> CronScheduler | None:
+    def scheduler(self) -> CronScheduler:
         return self._scheduler
 
     @property
@@ -115,8 +111,7 @@ class ChannelManager:
             await asyncio.gather(*tasks)
         else:
             logger.info("No enabled channels found")
-        if self._scheduler:
-            await self._scheduler.start()
+        await self._scheduler.start()
 
     async def stop_all(self) -> None:
         """Gracefully stop the scheduler, message bus and every running channel."""

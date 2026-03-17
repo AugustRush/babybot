@@ -61,6 +61,20 @@ class LLMPlanner:
         r"\bdraw\b", r"\bimage\b",
     ]
 
+    _TIME_PATTERNS = [
+        r"\d+\s*分钟", r"\d+\s*小时", r"\d+\s*秒",
+        r"\d+\s*天后", r"每天", r"每周", r"每月",
+        r"每隔", r"每\s*\d+",
+        r"\d{1,2}[:\uff1a]\d{2}",
+        r"\bin\s+\d+\s+minutes?\b", r"\bevery\s+\d+\b",
+    ]
+
+    _ACTION_PATTERNS = [
+        r"提醒", r"发送", r"发消息", r"通知", r"推送",
+        r"定时", r"延时", r"定期",
+        r"\bremind\b", r"\bschedule\b", r"\bsend\b",
+    ]
+
     def __init__(
         self,
         gateway: "OpenAICompatibleGateway",
@@ -224,6 +238,7 @@ class LLMPlanner:
             "6. 独立任务不设 deps → 并行执行。\n"
             "7. 有依赖的任务设置 deps → 串行等待上游结果。\n"
             "8. task_id 简短有意义（如 search_web, gen_image）。\n"
+            "9. 定时/延时发送 → 只需一个 task 绑定含定时工具的资源，定时系统会自动投递消息，不要额外创建发送任务。\n"
             f"{history_block}"
             f"资源目录：{catalog}"
         )
@@ -235,12 +250,33 @@ class LLMPlanner:
             return False
         return any(re.search(p, text) for p in cls._IMAGE_PATTERNS)
 
+    @classmethod
+    def _looks_like_scheduling(cls, text: str) -> bool:
+        t = (text or "").strip().lower()
+        has_time = any(re.search(p, t) for p in cls._TIME_PATTERNS)
+        has_action = any(re.search(p, t) for p in cls._ACTION_PATTERNS)
+        return has_time and has_action
+
     def _apply_heuristics(
         self,
         goal: str,
         plan: PlanOutput,
         briefs: list[dict[str, Any]],
     ) -> PlanOutput:
+        # Scheduling heuristic: force single task to avoid split schedule+send
+        if self._looks_like_scheduling(goal):
+            for item in briefs:
+                if item.get("id") == "group.basic" and item.get("active"):
+                    return PlanOutput(
+                        need_tools=True,
+                        tasks=[PlannedTask(
+                            task_id="schedule_task",
+                            resource_id="group.basic",
+                            description=goal.strip(),
+                        )],
+                        rationale="Scheduling heuristic",
+                    )
+
         if plan.need_tools and plan.tasks:
             return plan
         if not self._looks_like_image_generation(goal):

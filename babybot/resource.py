@@ -766,7 +766,7 @@ class ResourceManager:
 
     def _setup_tool_groups(self, user_groups: dict[str, dict]) -> None:
         defaults = {
-            "basic": ToolGroup("basic", "Core orchestration tools", active=True),
+            "basic": ToolGroup("basic", "核心工具：定时/延时发送消息、任务调度管理（创建/修改/删除/列出定时任务）", active=True),
             "code": ToolGroup(
                 "code",
                 "Code execution and file operations",
@@ -1217,6 +1217,12 @@ class ResourceManager:
         include_groups = lease.get("include_groups")
         if include_groups is None:
             include_groups = [name for name, group in self.groups.items() if group.active]
+        else:
+            # Always include the "basic" group so fundamental tools
+            # (scheduled tasks, worker dispatch, etc.) are available.
+            include_groups = list(include_groups)
+            if "basic" not in include_groups:
+                include_groups.append("basic")
 
         # Validate include_tools against registered tool names.
         # The LLM planner may hallucinate tool names; drop any that don't exist
@@ -1329,10 +1335,18 @@ class ResourceManager:
             cron: str | None = None,
             interval_seconds: float | None = None,
             run_at: str | None = None,
+            delay_seconds: float | None = None,
             enabled: bool = True,
             require_active_runtime: bool = True,
         ) -> str:
-            """Create a scheduled task. Provide one of cron, interval_seconds, or run_at."""
+            """Create a scheduled task.
+
+            Scheduling options (provide exactly one):
+            - delay_seconds: execute once after N seconds (e.g., 120 for 'in 2 minutes')
+            - run_at: execute once at absolute time (ISO format or HH:MM)
+            - cron: recurring cron expression
+            - interval_seconds: recurring every N seconds
+            """
             channel_name, target_chat_id = self._resolve_scheduled_task_target(
                 channel, chat_id
             )
@@ -1344,6 +1358,7 @@ class ResourceManager:
                 cron=cron,
                 interval_seconds=interval_seconds,
                 run_at=run_at,
+                delay_seconds=delay_seconds,
                 enabled=enabled,
                 require_active_runtime=require_active_runtime,
             )
@@ -1360,10 +1375,18 @@ class ResourceManager:
             cron: str | None = None,
             interval_seconds: float | None = None,
             run_at: str | None = None,
+            delay_seconds: float | None = None,
             enabled: bool = True,
             require_active_runtime: bool = True,
         ) -> str:
-            """Create or update a scheduled task. Prefer this for natural-language task management."""
+            """Create or update a scheduled task. Prefer this for natural-language task management.
+
+            Scheduling options (provide exactly one):
+            - delay_seconds: execute once after N seconds (e.g., 120 for 'in 2 minutes')
+            - run_at: execute once at absolute time (ISO format or HH:MM)
+            - cron: recurring cron expression
+            - interval_seconds: recurring every N seconds
+            """
             channel_name, target_chat_id = self._resolve_scheduled_task_target(
                 channel, chat_id
             )
@@ -1375,6 +1398,7 @@ class ResourceManager:
                 cron=cron,
                 interval_seconds=interval_seconds,
                 run_at=run_at,
+                delay_seconds=delay_seconds,
                 enabled=enabled,
                 require_active_runtime=require_active_runtime,
             )
@@ -1391,17 +1415,24 @@ class ResourceManager:
             cron: str | None = None,
             interval_seconds: float | None = None,
             run_at: str | None = None,
+            delay_seconds: float | None = None,
             enabled: bool | None = None,
             require_active_runtime: bool = True,
         ) -> str:
-            """Update one scheduled task by name. Switch schedule via cron, interval_seconds or run_at."""
+            """Update one scheduled task by name.
+
+            Scheduling options (provide exactly one to switch schedule):
+            - delay_seconds: execute once after N seconds (e.g., 120 for 'in 2 minutes')
+            - run_at: execute once at absolute time (ISO format or HH:MM)
+            - cron: recurring cron expression
+            - interval_seconds: recurring every N seconds
+            """
             if channel is None or chat_id is None:
                 try:
                     channel, chat_id = self._resolve_scheduled_task_target(
                         channel, chat_id
                     )
                 except RuntimeError:
-                    # Updating by name can still succeed without overriding target fields.
                     pass
             task = self._require_scheduled_task_manager().update_task(
                 name=name,
@@ -1411,6 +1442,7 @@ class ResourceManager:
                 cron=cron,
                 interval_seconds=interval_seconds,
                 run_at=run_at,
+                delay_seconds=delay_seconds,
                 enabled=enabled,
                 require_active_runtime=require_active_runtime,
             )

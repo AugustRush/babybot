@@ -427,6 +427,7 @@ class CronScheduler:
                     self._one_shot_attempts.pop(task.name, None)
                     task.enabled = False
                     self._next_fire.pop(task.name, None)
+                    self._mark_one_shot_completed(task.name)
                 else:
                     # Retry after a short delay.
                     self._next_fire[task.name] = time.monotonic() + 60.0
@@ -468,8 +469,12 @@ class ScheduledTaskManager:
         cron: str | None = None,
         interval_seconds: float | None = None,
         run_at: str | None = None,
+        delay_seconds: float | None = None,
     ) -> str:
         """Generate a stable task name from task intent and routing."""
+        if delay_seconds is not None:
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            run_at = target.isoformat(timespec="seconds")
         if run_at is not None:
             schedule = f"run_at:{ScheduledTaskDef._parse_run_at(run_at).isoformat(timespec='minutes')}"
         else:
@@ -549,10 +554,16 @@ class ScheduledTaskManager:
         cron: str | None = None,
         interval_seconds: float | None = None,
         run_at: str | None = None,
+        delay_seconds: float | None = None,
         enabled: bool = True,
         require_active_runtime: bool = False,
     ) -> dict[str, Any]:
         self._ensure_runtime_active(require_active_runtime)
+        if delay_seconds is not None:
+            if run_at is not None:
+                raise ValueError("Cannot specify both delay_seconds and run_at")
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            run_at = target.isoformat(timespec="seconds")
         defs = self._load_defs()
         resolved_name = (name or "").strip() or self.suggest_task_name(
             prompt=prompt,
@@ -616,10 +627,16 @@ class ScheduledTaskManager:
         cron: str | None = None,
         interval_seconds: float | None = None,
         run_at: str | None = None,
+        delay_seconds: float | None = None,
         enabled: bool | None = None,
         require_active_runtime: bool = False,
     ) -> dict[str, Any]:
         self._ensure_runtime_active(require_active_runtime)
+        if delay_seconds is not None:
+            if run_at is not None:
+                raise ValueError("Cannot specify both delay_seconds and run_at")
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            run_at = target.isoformat(timespec="seconds")
         defs = self._load_defs()
         for index, task in enumerate(defs):
             if task.name != name:
@@ -642,7 +659,7 @@ class ScheduledTaskManager:
             defs[index] = updated
             self._save_defs(defs)
             if self._scheduler is not None:
-                self._scheduler.update_task(
+                synced = self._scheduler.update_task(
                     name,
                     prompt=updated.prompt,
                     cron=updated.cron,
@@ -652,6 +669,8 @@ class ScheduledTaskManager:
                     chat_id=updated.chat_id,
                     enabled=updated.enabled,
                 )
+                if not synced and updated.enabled:
+                    self._scheduler.add_task(updated)
             return updated.to_dict()
         raise ValueError(f"Scheduled task not found: {name}")
 
@@ -683,11 +702,17 @@ class ScheduledTaskManager:
         cron: str | None = None,
         interval_seconds: float | None = None,
         run_at: str | None = None,
+        delay_seconds: float | None = None,
         enabled: bool = True,
         require_active_runtime: bool = False,
     ) -> dict[str, Any]:
         """Create or update a task using explicit or inferred identity."""
         self._ensure_runtime_active(require_active_runtime)
+        if delay_seconds is not None:
+            if run_at is not None:
+                raise ValueError("Cannot specify both delay_seconds and run_at")
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            run_at = target.isoformat(timespec="seconds")
         if name and any(task.name == name for task in self._load_defs()):
             payload = self.update_task(
                 name,
