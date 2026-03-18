@@ -386,6 +386,7 @@ class ResourceBridgeExecutor:
         if task.metadata.get("direct_answer"):
             goal = task.description
             heartbeat = context.state.get("heartbeat")
+            stream_callback = context.state.get("stream_callback")
             tape = context.state.get("tape")
             tape_store = context.state.get("tape_store")
             history_budget = context.state.get("context_history_tokens", 2000)
@@ -407,7 +408,11 @@ class ResourceBridgeExecutor:
 
             messages.append(ModelMessage(role="user", content=goal))
 
-            answer = await self._gateway.complete_messages(messages, heartbeat=heartbeat)
+            answer = await self._gateway.complete_messages(
+                messages,
+                heartbeat=heartbeat,
+                on_stream_text=stream_callback,
+            )
             return TaskResult(
                 task_id=task.task_id,
                 status="succeeded",
@@ -508,6 +513,7 @@ class LLMSynthesizer:
 
         # Multiple tasks: LLM merge
         heartbeat = context.state.get("heartbeat")
+        stream_callback = context.state.get("stream_callback")
         merge_prompt = (
             "你是主Agent，负责整合多个子Agent结果并回复用户。\n"
             "要求：\n"
@@ -539,6 +545,7 @@ class LLMSynthesizer:
             system_prompt=merge_prompt,
             user_prompt=user_payload,
             heartbeat=heartbeat,
+            on_stream_text=stream_callback,
         )
 
         return FinalResult(

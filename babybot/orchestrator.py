@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .agent_kernel import ExecutionContext, RunPolicy, WorkflowEngine
 from .agent_kernel.dag_ports import LLMPlanner, LLMSynthesizer, ResourceBridgeExecutor
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from .heartbeat import Heartbeat
 
 logger = logging.getLogger(__name__)
+StreamTextCallback = Callable[[str], Awaitable[None] | None]
 
 _SUMMARIZE_PROMPT = (
     "请将以下对话历史浓缩为 JSON 格式（用中文填写），严格按以下结构输出，不要输出其他内容：\n"
@@ -76,6 +77,7 @@ class OrchestratorAgent:
         tape: Tape | None = None,
         heartbeat: Heartbeat | None = None,
         media_paths: list[str] | None = None,
+        stream_callback: StreamTextCallback | None = None,
     ) -> tuple[str, list[str]]:
         engine = self._build_workflow_engine()
 
@@ -88,6 +90,7 @@ class OrchestratorAgent:
                     ("heartbeat", heartbeat),
                     ("media_paths", media_paths),
                     ("context_history_tokens", self.config.system.context_history_tokens),
+                    ("stream_callback", stream_callback),
                 ] if v is not None
             },
         )
@@ -104,6 +107,7 @@ class OrchestratorAgent:
         self, user_input: str, chat_key: str = "",
         heartbeat: Heartbeat | None = None,
         media_paths: list[str] | None = None,
+        stream_callback: StreamTextCallback | None = None,
     ) -> TaskResponse:
         if not self._initialized:
             async with self._init_lock:
@@ -136,6 +140,7 @@ class OrchestratorAgent:
             text, collected_media = await self._answer_with_dag(
                 user_input, tape=tape, heartbeat=heartbeat,
                 media_paths=media_paths,
+                stream_callback=stream_callback,
             )
             if heartbeat is not None:
                 heartbeat.beat()

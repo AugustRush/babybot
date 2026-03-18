@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import mimetypes
 import time
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Awaitable, Callable, TypeVar
 
 from pydantic import BaseModel
 
@@ -24,6 +25,7 @@ from .agent_kernel import (
 from .config import Config
 
 T = TypeVar("T", bound=BaseModel)
+StreamTextCallback = Callable[[str], Awaitable[None] | None]
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +56,83 @@ class OpenAICompatibleGateway(ModelProvider):
             kwargs["base_url"] = self._config.model.api_base
         self._client = AsyncOpenAI(**kwargs)
         return self._client
+
+    async def _call_stream_callback(
+        self,
+        callback: StreamTextCallback | None,
+        text: str,
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            maybe_awaitable = callback(text)
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
+        except Exception:
+            logger.warning("Streaming callback failed", exc_info=True)
+
+    @staticmethod
+    def _extract_stream_delta_text(delta: Any) -> str:
+        content = getattr(delta, "content", None)
+        if content is None and isinstance(delta, dict):
+            content = delta.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if not isinstance(item, dict):
+                    item_type = getattr(item, "type", None)
+                    txt = getattr(item, "text", "")
+                    if item_type == "text" and isinstance(txt, str):
+                        parts.append(txt)
+                    continue
+                if item.get("type") == "text":
+                    txt = item.get("text")
+                    if isinstance(txt, str):
+                        parts.append(txt)
+            return "".join(parts)
+        return ""
+
+    async def _complete_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        heartbeat: Any = None,
+        on_stream_text: StreamTextCallback | None = None,
+    ) -> str:
+        client = self._ensure_client()
+        per_call_timeout = max(1.0, float(self._config.system.subtask_timeout))
+        kwargs: dict[str, Any] = {
+            "model": self._config.model.model_name,
+            "messages": messages,
+            "temperature": self._config.model.temperature,
+            "max_tokens": self._config.model.max_tokens,
+            "stream": True,
+        }
+        pieces: list[str] = []
+
+        async def _consume() -> None:
+            stream = await client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                for choice in getattr(chunk, "choices", []) or []:
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+                    piece = self._extract_stream_delta_text(delta)
+                    if not piece:
+                        continue
+                    pieces.append(piece)
+                    await self._call_stream_callback(on_stream_text, "".join(pieces))
+
+        if heartbeat is not None:
+            async with heartbeat.keep_alive():
+                await asyncio.wait_for(_consume(), timeout=per_call_timeout)
+        else:
+            await asyncio.wait_for(_consume(), timeout=per_call_timeout)
+        return "".join(pieces).strip()
 
     async def generate(
         self,
@@ -167,8 +246,25 @@ class OpenAICompatibleGateway(ModelProvider):
         )
 
     async def complete(
-        self, system_prompt: str, user_prompt: str, heartbeat: Any = None
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        heartbeat: Any = None,
+        on_stream_text: StreamTextCallback | None = None,
     ) -> str:
+        if on_stream_text is not None:
+            return await self._complete_streaming(
+                [
+                    self._to_openai_message(
+                        ModelMessage(role="system", content=system_prompt)
+                    ),
+                    self._to_openai_message(
+                        ModelMessage(role="user", content=user_prompt)
+                    ),
+                ],
+                heartbeat=heartbeat,
+                on_stream_text=on_stream_text,
+            )
         req = ModelRequest(
             messages=(
                 ModelMessage(role="system", content=system_prompt),
@@ -182,9 +278,19 @@ class OpenAICompatibleGateway(ModelProvider):
         return resp.text.strip()
 
     async def complete_messages(
-        self, messages: list[ModelMessage], heartbeat: Any = None
+        self,
+        messages: list[ModelMessage],
+        heartbeat: Any = None,
+        on_stream_text: StreamTextCallback | None = None,
     ) -> str:
         """Send a full multi-turn message list to the model and return text."""
+        if on_stream_text is not None:
+            payload = [self._to_openai_message(msg) for msg in messages]
+            return await self._complete_streaming(
+                payload,
+                heartbeat=heartbeat,
+                on_stream_text=on_stream_text,
+            )
         req = ModelRequest(messages=tuple(messages))
         state: dict[str, Any] = {}
         if heartbeat is not None:

@@ -29,7 +29,9 @@ class _FakeGateway:
         system_prompt: str,
         user_prompt: str,
         heartbeat: Any = None,
+        on_stream_text: Any = None,
     ) -> str:
+        del on_stream_text
         self.complete_calls.append((system_prompt, user_prompt))
         return self._merge_text
 
@@ -37,7 +39,9 @@ class _FakeGateway:
         self,
         messages: Any,
         heartbeat: Any = None,
+        on_stream_text: Any = None,
     ) -> str:
+        del messages, heartbeat, on_stream_text
         return self._merge_text
 
 

@@ -77,6 +77,7 @@ class FeishuConfig:
     reply_mode: Literal["chat", "p2p"] = "chat"
     react_emoji: str = "THUMBSUP"
     media_dir: str = ""
+    stream_reply: bool = False
 
     def validate(self) -> None:
         """Validate Feishu configuration when enabled."""
@@ -190,6 +191,7 @@ class Config:
             reply_mode=feishu_conf.get("reply_mode", "chat"),
             react_emoji=feishu_conf.get("react_emoji", "THUMBSUP"),
             media_dir=feishu_conf.get("media_dir", ""),
+            stream_reply=feishu_conf.get("stream_reply", False),
         )
 
     def _load_config(self) -> None:
@@ -307,6 +309,7 @@ class Config:
                     "reply_mode": "chat",
                     "react_emoji": "THUMBSUP",
                     "media_dir": "",
+                    "stream_reply": False,
                 }
             },
         }
@@ -401,6 +404,7 @@ class Config:
                     "reply_mode": self.feishu.reply_mode,
                     "react_emoji": self.feishu.react_emoji,
                     "media_dir": self.feishu.media_dir,
+                    "stream_reply": self.feishu.stream_reply,
                 }
             },
             "scheduled_tasks_count": len(self.scheduled_tasks),

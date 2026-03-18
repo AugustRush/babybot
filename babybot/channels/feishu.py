@@ -697,6 +697,60 @@ class FeishuChannel(BaseChannel):
             print(f"Feishu: error sending {msg_type} message: {e}")
             return False
 
+    def _send_message_with_id_sync(
+        self, receive_id_type: str, receive_id: str, msg_type: str, content: str
+    ) -> str | None:
+        """Send a message and return Feishu ``message_id`` when successful."""
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        try:
+            request = (
+                CreateMessageRequest.builder()
+                .receive_id_type(receive_id_type)
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(receive_id)
+                    .msg_type(msg_type)
+                    .content(content)
+                    .build(),
+                )
+                .build()
+            )
+            response = self._client.im.v1.message.create(request)
+            if not response.success():
+                print(
+                    f"Feishu: send failed: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return None
+            return getattr(getattr(response, "data", None), "message_id", None)
+        except Exception as e:
+            print(f"Feishu: error sending {msg_type} message: {e}")
+            return None
+
+    def _patch_message_sync(self, message_id: str, content: str) -> bool:
+        """Patch an existing Feishu message content."""
+        from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+        try:
+            request = (
+                PatchMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(PatchMessageRequestBody.builder().content(content).build())
+                .build()
+            )
+            response = self._client.im.v1.message.patch(request)
+            if not response.success():
+                print(
+                    f"Feishu: patch failed: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return False
+            return True
+        except Exception as e:
+            print(f"Feishu: error patching message {message_id}: {e}")
+            return False
+
     # ── Smart format detection ───────────────────────────────────────
 
     @classmethod
@@ -832,6 +886,73 @@ class FeishuChannel(BaseChannel):
             groups.append(current)
         return groups or [[]]
 
+    def _build_single_stream_card(self, content: str) -> str | None:
+        """Build one interactive-card payload suitable for message patch."""
+        elements = self._build_card_elements(content)
+        chunks = self._split_elements_by_table_limit(elements)
+        if len(chunks) != 1:
+            return None
+        card = {"config": {"wide_screen_mode": True}, "elements": chunks[0]}
+        return json.dumps(card, ensure_ascii=False)
+
+    def _resolve_receive_target(
+        self,
+        chat_id: str,
+        sender_id: str | None,
+    ) -> tuple[str, str]:
+        feishu_cfg = self.config
+        receive_id = (
+            sender_id if sender_id and feishu_cfg.reply_mode == "p2p" else chat_id
+        )
+        if receive_id.startswith("oc_"):
+            return "chat_id", receive_id
+        if receive_id.startswith("ou_") or receive_id.startswith("on_"):
+            return "open_id", receive_id
+        return "chat_id", receive_id
+
+    async def create_stream_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        sender_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str | None:
+        del metadata
+        content = self._normalize_markdown_images(text or "").strip()
+        if not content:
+            return None
+        card = self._build_single_stream_card(content)
+        if not card:
+            return None
+        receive_id_type, receive_id = self._resolve_receive_target(chat_id, sender_id)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self._send_message_with_id_sync,
+            receive_id_type,
+            receive_id,
+            "interactive",
+            card,
+        )
+
+    async def patch_stream_message(self, message_id: str, text: str) -> bool:
+        content = self._normalize_markdown_images(text or "").strip()
+        if not content:
+            return False
+        card = self._build_single_stream_card(content)
+        if not card:
+            return False
+        loop = asyncio.get_running_loop()
+        return bool(
+            await loop.run_in_executor(
+                None,
+                self._patch_message_sync,
+                message_id,
+                card,
+            )
+        )
+
     def _split_headings(self, content: str) -> list[dict]:
         """Split content by headings, converting headings to div elements."""
         protected = content
@@ -879,16 +1000,7 @@ class FeishuChannel(BaseChannel):
         text = self._normalize_markdown_images(response.text)
         media_paths = response.media_paths
         sender_id = kwargs.get("sender_id")
-        feishu_cfg = self.config
-        receive_id = (
-            sender_id if sender_id and feishu_cfg.reply_mode == "p2p" else chat_id
-        )
-        if receive_id.startswith("oc_"):
-            receive_id_type = "chat_id"
-        elif receive_id.startswith("ou_") or receive_id.startswith("on_"):
-            receive_id_type = "open_id"
-        else:
-            receive_id_type = "chat_id"
+        receive_id_type, receive_id = self._resolve_receive_target(chat_id, sender_id)
 
         loop = asyncio.get_running_loop()
 

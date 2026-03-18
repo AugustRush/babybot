@@ -107,7 +107,8 @@ uv run gateway
       "group_policy": "mention",
       "reply_mode": "chat",
       "react_emoji": "THUMBSUP",
-      "media_dir": ""
+      "media_dir": "",
+      "stream_reply": false
     }
   }
 }
@@ -118,6 +119,7 @@ uv run gateway
 | `group_policy` | `mention` — 群聊中仅 @bot 时响应；`open` — 所有消息都响应 |
 | `reply_mode` | `chat` — 回复到当前会话；`p2p` — 按发送者 open_id 私聊回复 |
 | `media_dir` | 图片等媒体文件下载目录，为空则使用临时目录 |
+| `stream_reply` | `true` 启用模型生成期实时流式推送（边生成边 patch 卡片） |
 
 ### 系统参数
 

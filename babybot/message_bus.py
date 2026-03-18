@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
@@ -248,12 +249,62 @@ class MessageBus:
             float(self._config.system.timeout),
             float(self._config.system.idle_timeout) * 3,
         )
+        stream_message_id: str | None = None
+        stream_last_patched = ""
+        stream_lock = asyncio.Lock()
+        stream_cfg = getattr(channel, "config", None)
+        stream_enabled = bool(
+            channel
+            and msg.channel == "feishu"
+            and not is_scheduled
+            and getattr(stream_cfg, "stream_reply", False)
+            and callable(getattr(channel, "create_stream_message", None))
+            and callable(getattr(channel, "patch_stream_message", None))
+        )
+
+        async def _stream_callback(accumulated_text: str) -> None:
+            nonlocal stream_message_id, stream_last_patched
+            text = (accumulated_text or "").strip()
+            if not text:
+                return
+            async with stream_lock:
+                if not stream_enabled or channel is None:
+                    return
+                if stream_message_id is None:
+                    stream_message_id = await channel.create_stream_message(  # type: ignore[attr-defined]
+                        msg.chat_id,
+                        text,
+                        sender_id=msg.sender_id,
+                        metadata=msg.metadata,
+                    )
+                    if stream_message_id:
+                        stream_last_patched = text
+                    return
+                if text == stream_last_patched:
+                    return
+                ok = await channel.patch_stream_message(stream_message_id, text)  # type: ignore[attr-defined]
+                if ok:
+                    stream_last_patched = text
+
+        process_kwargs: dict[str, Any] = {
+            "chat_key": f"{msg.channel}:{msg.chat_id}",
+            "heartbeat": heartbeat,
+            "media_paths": msg.media_paths,
+        }
+        if stream_enabled:
+            try:
+                supports_stream_callback = "stream_callback" in inspect.signature(
+                    self._orchestrator.process_task
+                ).parameters
+            except (TypeError, ValueError):
+                supports_stream_callback = False
+            if supports_stream_callback:
+                process_kwargs["stream_callback"] = _stream_callback
         try:
-            chat_key = f"{msg.channel}:{msg.chat_id}"
             response = await heartbeat.watch(
                 self._orchestrator.process_task(
-                    msg.content, chat_key=chat_key, heartbeat=heartbeat,
-                    media_paths=msg.media_paths,
+                    msg.content,
+                    **process_kwargs,
                 ),
                 hard_timeout=hard_timeout,
             )
@@ -282,12 +333,30 @@ class MessageBus:
         # Send actual response.
         if channel:
             try:
-                await channel.send_response(
-                    msg.chat_id,
-                    response,
-                    sender_id=msg.sender_id,
-                    metadata=msg.metadata,
-                )
+                streamed = bool(stream_message_id)
+                if streamed and response.text.strip():
+                    final_text = response.text.strip()
+                    if stream_last_patched != final_text:
+                        patched = await channel.patch_stream_message(  # type: ignore[attr-defined]
+                            stream_message_id,
+                            final_text,
+                        )
+                        if patched:
+                            stream_last_patched = final_text
+                if streamed and response.media_paths:
+                    await channel.send_response(
+                        msg.chat_id,
+                        TaskResponse(text="", media_paths=list(response.media_paths)),
+                        sender_id=msg.sender_id,
+                        metadata=msg.metadata,
+                    )
+                elif not streamed:
+                    await channel.send_response(
+                        msg.chat_id,
+                        response,
+                        sender_id=msg.sender_id,
+                        metadata=msg.metadata,
+                    )
             except Exception:
                 logger.exception("Error sending response on channel '%s'", msg.channel)
 
