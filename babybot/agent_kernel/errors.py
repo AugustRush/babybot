@@ -23,6 +23,7 @@ _RETRYABLE_PATTERNS = (
     "connection reset",
     "connection refused",
     "temporary",
+    "transient",
     "unavailable",
     "503",
     "429",
@@ -60,9 +61,9 @@ def classify_error(error: str | Exception) -> ErrorDecision:
                 suggested_action="Transient issue detected; retry is safe.",
             )
     return ErrorDecision(
-        error_type="retryable",
-        retryable=True,
-        suggested_action="Unknown failure; retry once or inspect logs.",
+        error_type="unknown",
+        retryable=False,
+        suggested_action="Unknown failure; inspect logs before retrying.",
     )
 
 

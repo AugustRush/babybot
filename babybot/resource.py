@@ -1174,6 +1174,7 @@ class ResourceManager:
                 task_description=task_description,
                 tools_text=tools_text,
                 selected_skill_packs=skill_packs,
+                merged_lease=merged_lease,
             )
             # Strip tool_leases from skill packs before passing to executor:
             # run_subagent_task already merged skill groups into merged_lease
@@ -1237,13 +1238,32 @@ class ResourceManager:
     def _build_task_lease(self, lease: dict[str, Any]) -> ToolLease:
         include_groups = lease.get("include_groups")
         if include_groups is None:
-            include_groups = [name for name, group in self.groups.items() if group.active]
+            # Fallback: all active groups EXCEPT channel tool groups.
+            # Sub-agents must not get channel send-message tools by default;
+            # those must be explicitly requested in the task lease.
+            include_groups = [
+                name for name, group in self.groups.items()
+                if group.active and not name.startswith("channel_")
+            ]
         else:
             # Always include the "basic" group so fundamental tools
             # (scheduled tasks, worker dispatch, etc.) are available.
+            # "basic" must never contain channel_* tools — channel groups use
+            # the "channel_{name}" naming convention and are registered
+            # separately via register_channel_tools().
+            explicit_channel_groups = {
+                g for g in include_groups if g.startswith("channel_")
+            }
             include_groups = list(include_groups)
             if "basic" not in include_groups:
                 include_groups.append("basic")
+            # Defensive: strip any channel_* groups that were not part of the
+            # original explicit request (guards against future misconfiguration
+            # where a non-channel group name starts with "channel_" by mistake).
+            include_groups = [
+                g for g in include_groups
+                if not g.startswith("channel_") or g in explicit_channel_groups
+            ]
 
         # Validate include_tools against registered tool names.
         # The LLM planner may hallucinate tool names; drop any that don't exist
@@ -1525,9 +1545,13 @@ class ResourceManager:
         task_description: str,
         tools_text: str,
         selected_skill_packs: list[SkillPack],
+        merged_lease: "ToolLease | None" = None,
     ) -> str:
         selected_names = ", ".join(skill.name for skill in selected_skill_packs) or "无"
-        skill_catalog = self._format_skill_catalog(max_items=24)
+        if merged_lease is not None:
+            skill_catalog = self._format_skill_catalog_for_lease(merged_lease, max_items=24)
+        else:
+            skill_catalog = self._format_skill_catalog(max_items=24)
         lines = [
             "你是 %s，请完成任务并输出最终答案。" % agent_name,
             "任务：%s" % task_description,
@@ -1540,6 +1564,41 @@ class ResourceManager:
             "3. 用户询问你能做什么或能力范围时，必须优先介绍可用技能目录与工具能力。",
             "4. 如需某技能但本次未激活，可在回答中明确指出可切换到该技能处理。",
         ]
+        return "\n".join(lines)
+
+    def _format_skill_catalog_for_lease(self, lease: "ToolLease", max_items: int = 20) -> str:
+        """Format skill catalog showing only skills accessible under the given lease."""
+        lease_groups = set(lease.include_groups)
+        lease_tools = set(lease.include_tools)
+
+        # No group/tool restrictions on the lease → show all (same as _format_skill_catalog)
+        if not lease_groups and not lease_tools:
+            return self._format_skill_catalog(max_items=max_items)
+
+        accessible: list["LoadedSkill"] = []
+        for skill in sorted(self.skills.values(), key=lambda s: s.name.lower()):
+            if not skill.active:
+                continue
+            skill_lease = skill.lease or ToolLease()
+            skill_groups = set(skill_lease.include_groups)
+            skill_tools = set(skill_lease.include_tools)
+            if not skill_groups and not skill_tools:
+                # Prompt-only skill with no tool requirements → always accessible
+                accessible.append(skill)
+            elif skill_groups & lease_groups:
+                accessible.append(skill)
+            elif skill_tools and (skill_tools & lease_tools):
+                accessible.append(skill)
+
+        if not accessible:
+            return "- 无"
+        lines: list[str] = []
+        for idx, skill in enumerate(accessible, start=1):
+            if idx > max_items:
+                lines.append(f"- ... 还有 {len(accessible) - max_items} 个技能")
+                break
+            desc = skill.description.strip() or "无描述"
+            lines.append(f"- {skill.name}: {desc}")
         return "\n".join(lines)
 
     def _format_skill_catalog(self, max_items: int = 20) -> str:

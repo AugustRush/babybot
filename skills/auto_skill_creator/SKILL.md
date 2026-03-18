@@ -1,6 +1,6 @@
 ---
 name: auto-skill-creator
-description: Use this skill when the user asks to create or update an AgentScope/Codex skill. It provides a deterministic workflow to scaffold a skill directory with a valid SKILL.md frontmatter and minimal runnable structure.
+description: Use this skill when the user asks to create or update an Claude/AgentScope/Codex skill. It provides a deterministic workflow to scaffold a skill directory with a valid SKILL.md frontmatter and minimal runnable structure.
 ---
 
 # Auto Skill Creator

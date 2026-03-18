@@ -57,14 +57,25 @@ class WorkflowEngine:
         results: dict[str, TaskResult] = {}
         semaphore = asyncio.Semaphore(max(1, int(self.policy.max_parallel)))
 
-        while pending:
+        in_flight: dict[str, asyncio.Task] = {}
+        done_event = asyncio.Event()
+
+        async def _run_one(tid: str) -> tuple[str, TaskResult]:
+            async with semaphore:
+                return tid, await self._run_task(task_map[tid], context)
+
+        def _on_done(_fut: asyncio.Task) -> None:
+            done_event.set()
+
+        while pending or in_flight:
+            # Mark tasks whose deps failed as blocked
             blocked = [
                 task_id
                 for task_id in pending
                 if any(results.get(dep, None) and results[dep].status in FAILED_STATES for dep in task_map[task_id].deps)
             ]
             for task_id in blocked:
-                pending.remove(task_id)
+                pending.discard(task_id)
                 results[task_id] = TaskResult(
                     task_id=task_id,
                     status="blocked",
@@ -72,13 +83,16 @@ class WorkflowEngine:
                 )
                 context.emit("task.blocked", task_id=task_id)
 
-            ready = [
+            # Find newly ready tasks (deps satisfied, not already in flight)
+            newly_ready = [
                 task_id
                 for task_id in pending
-                if all(results.get(dep, None) and results[dep].status == "succeeded" for dep in task_map[task_id].deps)
+                if task_id not in in_flight
+                and all(results.get(dep, None) and results[dep].status == "succeeded" for dep in task_map[task_id].deps)
             ]
 
-            if not ready:
+            # Deadlock: nothing ready, nothing in flight, but still pending
+            if not newly_ready and not in_flight and pending:
                 for task_id in list(pending):
                     results[task_id] = TaskResult(
                         task_id=task_id,
@@ -86,17 +100,27 @@ class WorkflowEngine:
                         error="Task not executable due to dependency cycle or unresolved deps.",
                     )
                     context.emit("task.skipped", task_id=task_id)
-                    pending.remove(task_id)
+                    pending.discard(task_id)
                 break
 
-            async def run_one(task_id: str) -> tuple[str, TaskResult]:
-                async with semaphore:
-                    return task_id, await self._run_task(task_map[task_id], context)
+            # Launch newly ready tasks immediately
+            for task_id in newly_ready:
+                task = asyncio.create_task(_run_one(task_id))
+                task.add_done_callback(_on_done)
+                in_flight[task_id] = task
 
-            done = await asyncio.gather(*(run_one(task_id) for task_id in ready))
-            for task_id, task_result in done:
-                results[task_id] = task_result
-                pending.remove(task_id)
+            # Wait for at least one task to complete
+            if in_flight and not newly_ready:
+                done_event.clear()
+                await done_event.wait()
+
+            # Harvest completed tasks
+            for task_id in list(in_flight):
+                if in_flight[task_id].done():
+                    tid, task_result = in_flight[task_id].result()
+                    results[tid] = task_result
+                    pending.discard(tid)
+                    del in_flight[task_id]
 
         return results
 

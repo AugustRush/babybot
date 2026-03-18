@@ -83,8 +83,62 @@ class LLMPlanner:
         self._gateway = gateway
         self._rm = resource_manager
 
+    def _needs_tools_heuristic(self, goal: str, briefs: list[dict[str, Any]]) -> bool:
+        """Local fast check: does the goal likely need tools?
+
+        Returns True if tools *might* be needed (fall through to LLM planner).
+        Returns False only when we are confident no tools are required.
+        """
+        if self._looks_like_image_generation(goal):
+            return True
+        if self._looks_like_scheduling(goal):
+            return True
+
+        # Check if any active resource with tools has keyword overlap
+        goal_lower = goal.lower()
+        has_any_active_tool = False
+        for brief in briefs:
+            if not brief.get("active", False) or brief.get("tool_count", 0) <= 0:
+                continue
+            has_any_active_tool = True
+            for field in ("name", "purpose"):
+                value = brief.get(field, "")
+                if not value:
+                    continue
+                val_lower = value.lower()
+                # Direct substring match
+                if val_lower in goal_lower:
+                    return True
+                # Space-separated word match (for English/mixed text)
+                for word in val_lower.split():
+                    if len(word) >= 2 and word in goal_lower:
+                        return True
+                # Character bigram match (for CJK text without spaces)
+                for i in range(len(val_lower) - 1):
+                    bigram = val_lower[i:i + 2]
+                    if bigram in goal_lower:
+                        return True
+
+        # No active tools at all → definitely no tools needed
+        if not has_any_active_tool:
+            return False
+
+        # Have active tools but no keyword match → confidently no tools
+        return False
+
     async def plan(self, goal: str, context: ExecutionContext) -> ExecutionPlan:
         briefs = self._rm.get_resource_briefs()
+
+        # Local fast path: skip LLM planner if clearly no tools needed
+        if not self._needs_tools_heuristic(goal, briefs):
+            logger.info("Planner fast-path: no tools needed for goal=%r", goal)
+            return ExecutionPlan(tasks=(
+                TaskContract(
+                    task_id="direct_answer",
+                    description=goal,
+                    metadata={"direct_answer": True},
+                ),
+            ))
 
         # Build history summary from tape if available
         tape: Tape | None = context.state.get("tape")
@@ -312,6 +366,21 @@ class ResourceBridgeExecutor:
         self._rm = resource_manager
         self._gateway = gateway
 
+    def _build_capability_summary(self) -> str:
+        """Build a concise capability list from active resources."""
+        briefs = self._rm.get_resource_briefs()
+        lines: list[str] = []
+        for b in briefs:
+            if b.get("active") and b.get("tool_count", 0) > 0:
+                lines.append(f"- {b.get('name', '?')}: {b.get('purpose', '')}")
+        if not lines:
+            return ""
+        return (
+            "\n\n你具备以下能力（用户询问时可介绍）：\n"
+            + "\n".join(lines)
+            + "\n当前对话不需要使用这些工具，直接回答即可。"
+        )
+
     async def execute(self, task: TaskContract, context: ExecutionContext) -> TaskResult:
         # Fast path: direct answer (no tools)
         if task.metadata.get("direct_answer"):
@@ -321,10 +390,13 @@ class ResourceBridgeExecutor:
             tape_store = context.state.get("tape_store")
             history_budget = context.state.get("context_history_tokens", 2000)
 
+            base_prompt = "你是高效助手。简洁准确地回答用户问题。不虚构工具执行结果。如需外部信息必须明确指出。"
+            capability_summary = self._build_capability_summary()
+
             messages: list[ModelMessage] = []
             messages.append(ModelMessage(
                 role="system",
-                content="你是高效助手。简洁准确地回答用户问题。不虚构工具执行结果。如需外部信息必须明确指出。",
+                content=base_prompt + capability_summary,
             ))
 
             # Reuse executor.py's 3-section context builder

@@ -134,108 +134,125 @@ class SingleAgentExecutor:
                         tool_calls=response.tool_calls,
                     )
                 )
+                # Phase 1: serial validation — lightweight checks
+                error_results: list[tuple[ModelToolCall, str]] = []
+                valid_calls: list[tuple[ModelToolCall, Any]] = []
+
                 for tool_call in response.tool_calls:
                     verdict = loop_guard.check_call(tool_call.name, tool_call.arguments)
                     if verdict.blocked:
-                        tool_output = (
-                            f"Loop guard: {verdict.reason}"
-                            "\n[Hint: Change strategy instead of repeating the same call pattern.]"
-                        )
                         logger.warning(
                             "Executor loop guard blocked task=%s tool=%s reason=%s",
                             task.task_id, tool_call.name, verdict.reason,
                         )
-                        messages.append(
-                            ModelMessage(
-                                role="tool",
-                                name=tool_call.name,
-                                content=tool_output,
-                                tool_call_id=tool_call.call_id,
-                            )
-                        )
+                        error_results.append((tool_call, (
+                            f"Loop guard: {verdict.reason}"
+                            "\n[Hint: Change strategy instead of repeating the same call pattern.]"
+                        )))
                         continue
 
                     registered = self.tools.get(tool_call.name)
                     if not registered or not self._tool_allowed(
                         registered.group, tool_call.name, base_lease,
                     ):
-                        tool_output = (
-                            f"Tool unavailable: {tool_call.name}"
-                            "\n[Hint: This tool is not available. Use a different tool or approach.]"
-                        )
                         logger.warning(
                             "Executor tool unavailable task=%s tool=%s",
                             task.task_id, tool_call.name,
                         )
-                    elif (
+                        error_results.append((tool_call, (
+                            f"Tool unavailable: {tool_call.name}"
+                            "\n[Hint: This tool is not available. Use a different tool or approach.]"
+                        )))
+                        continue
+
+                    if (
                         isinstance(tool_call.arguments, dict)
                         and tool_call.arguments.get("__tool_argument_parse_error__")
                     ):
-                        tool_output = (
-                            f"Tool argument JSON parse error for {tool_call.name}: "
-                            f"{tool_call.arguments.get('__raw_arguments__', '')}"
-                            "\n[Hint: Fix the JSON syntax in your tool arguments.]"
-                        )
                         logger.warning(
                             "Executor invalid arguments JSON task=%s tool=%s",
                             task.task_id, tool_call.name,
                         )
-                    else:
-                        tool_call.arguments = self._cast_tool_arguments(
-                            schema=registered.tool.schema,
-                            args=tool_call.arguments,
+                        error_results.append((tool_call, (
+                            f"Tool argument JSON parse error for {tool_call.name}: "
+                            f"{tool_call.arguments.get('__raw_arguments__', '')}"
+                            "\n[Hint: Fix the JSON syntax in your tool arguments.]"
+                        )))
+                        continue
+
+                    tool_call.arguments = self._cast_tool_arguments(
+                        schema=registered.tool.schema,
+                        args=tool_call.arguments,
+                    )
+                    validation_error = self._validate_tool_arguments(
+                        schema=registered.tool.schema,
+                        args=tool_call.arguments,
+                    )
+                    if validation_error:
+                        logger.warning(
+                            "Executor argument validation failed task=%s tool=%s error=%s",
+                            task.task_id, tool_call.name, validation_error,
                         )
-                        validation_error = self._validate_tool_arguments(
-                            schema=registered.tool.schema,
-                            args=tool_call.arguments,
-                        )
-                        if validation_error:
-                            tool_output = (
-                                f"Tool argument validation failed for {tool_call.name}: {validation_error}"
-                                "\n[Hint: Check parameter types and values against the tool schema.]"
-                            )
-                            logger.warning(
-                                "Executor argument validation failed task=%s tool=%s error=%s",
-                                task.task_id, tool_call.name, validation_error,
-                            )
-                            messages.append(
-                                ModelMessage(
-                                    role="tool",
-                                    name=tool_call.name,
-                                    content=tool_output,
-                                    tool_call_id=tool_call.call_id,
-                                )
-                            )
-                            continue
+                        error_results.append((tool_call, (
+                            f"Tool argument validation failed for {tool_call.name}: {validation_error}"
+                            "\n[Hint: Check parameter types and values against the tool schema.]"
+                        )))
+                        continue
+
+                    valid_calls.append((tool_call, registered))
+
+                # Build a map of tool_call index → result message for ordering
+                tool_result_map: dict[str, ModelMessage] = {}
+
+                # Append error results immediately
+                for tc, err_output in error_results:
+                    tool_result_map[tc.call_id] = ModelMessage(
+                        role="tool",
+                        name=tc.name,
+                        content=err_output,
+                        tool_call_id=tc.call_id,
+                    )
+
+                # Phase 2: parallel execution of validated tool calls
+                if valid_calls:
+                    import asyncio as _aio
+
+                    async def _invoke_one(tc: ModelToolCall, reg: Any) -> tuple[ModelToolCall, str]:
                         logger.info(
                             "Executor invoke task=%s tool=%s args_keys=%s",
-                            task.task_id, tool_call.name,
-                            list(tool_call.arguments.keys()),
+                            task.task_id, tc.name,
+                            list(tc.arguments.keys()),
                         )
                         started = time.perf_counter()
-                        result = await registered.tool.invoke(
-                            tool_call.arguments, tool_context,
-                        )
+                        result = await reg.tool.invoke(tc.arguments, tool_context)
                         elapsed = time.perf_counter() - started
-                        tool_output = result.content if result.ok else (
+                        output = result.content if result.ok else (
                             f"Tool error: {result.error}"
                             "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
                         )
                         logger.info(
                             "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
-                            task.task_id, tool_call.name, result.ok,
-                            elapsed, len(tool_output),
+                            task.task_id, tc.name, result.ok,
+                            elapsed, len(output),
                         )
-                    if heartbeat is not None:
-                        heartbeat.beat()
-                    messages.append(
-                        ModelMessage(
+                        return tc, output
+
+                    done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
+                    for tc, output in done:
+                        tool_result_map[tc.call_id] = ModelMessage(
                             role="tool",
-                            name=tool_call.name,
-                            content=tool_output,
-                            tool_call_id=tool_call.call_id,
+                            name=tc.name,
+                            content=output,
+                            tool_call_id=tc.call_id,
                         )
-                    )
+
+                # Append tool results in original tool_calls order
+                for tool_call in response.tool_calls:
+                    if tool_call.call_id in tool_result_map:
+                        messages.append(tool_result_map[tool_call.call_id])
+
+                if heartbeat is not None:
+                    heartbeat.beat()
                 continue
 
             text = response.text
