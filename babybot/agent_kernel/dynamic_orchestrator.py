@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from .context import ContextManager
@@ -335,8 +336,21 @@ class DynamicOrchestrator:
                 if dep_tasks:
                     await asyncio.gather(*dep_tasks, return_exceptions=True)
             try:
+                upstream_results = {
+                    dep_id: dep_result.output
+                    for dep_id in deps
+                    if (dep_result := results.get(dep_id)) is not None
+                    and dep_result.status == "succeeded"
+                }
+                execution_contract = replace(
+                    contract,
+                    metadata={
+                        **contract.metadata,
+                        "upstream_results": upstream_results,
+                    },
+                )
                 async with semaphore:
-                    result = await self._bridge.execute(contract, child_context)
+                    result = await self._bridge.execute(execution_contract, child_context)
                 results[task_id] = result
                 # Merge media paths from child context
                 child_media = child_context.state.get("media_paths_collected", [])

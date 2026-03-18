@@ -196,7 +196,7 @@ class ResourceBridgeExecutor:
     @staticmethod
     def _enrich_with_upstream(task: TaskContract, context: ExecutionContext) -> str:
         """Append upstream task results to the task description."""
-        upstream = context.state.get("upstream_results", {})
+        upstream = task.metadata.get("upstream_results") or context.state.get("upstream_results", {})
         if not task.deps or not upstream:
             return task.description
 
