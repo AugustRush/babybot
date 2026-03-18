@@ -56,11 +56,12 @@ class ContextManager:
         self._context.events = copy.deepcopy(snapshot.events)
 
     # Keys whose values are shared singletons or contain unpicklable
-    # resources (e.g. sqlite3.Connection inside TapeStore, Heartbeat).
+    # resources (e.g. sqlite3.Connection inside TapeStore).
     # They are passed by reference to child contexts instead of deep-copied.
     _SHARED_STATE_KEYS = frozenset((
-        "heartbeat", "tape", "tape_store",
+        "tape", "tape_store",
     ))
+    _OMITTED_STATE_KEYS = frozenset(("heartbeat",))
 
     def fork(self, session_id: str | None = None) -> ExecutionContext:
         """Create a child context with copied state and independent event stream.
@@ -76,6 +77,8 @@ class ContextManager:
         for k, v in self._context.state.items():
             if k in self._SHARED_STATE_KEYS:
                 shared[k] = v
+            elif k in self._OMITTED_STATE_KEYS:
+                continue
             else:
                 copyable[k] = v
         new_state = copy.deepcopy(copyable)

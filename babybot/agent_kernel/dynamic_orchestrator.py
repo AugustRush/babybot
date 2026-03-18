@@ -15,6 +15,7 @@ from .model import ModelMessage, ModelRequest, ModelResponse, ModelToolCall
 from .types import ExecutionContext, FinalResult, TaskContract, TaskResult, ToolLease
 
 if TYPE_CHECKING:
+    from ..heartbeat import TaskHeartbeatRegistry
     from ..model_gateway import OpenAICompatibleGateway
     from ..resource import ResourceManager
 
@@ -174,12 +175,14 @@ class InProcessChildTaskRuntime:
         resource_manager: "ResourceManager",
         bridge: ResourceBridgeExecutor,
         child_task_bus: InMemoryChildTaskBus,
+        task_heartbeat_registry: "TaskHeartbeatRegistry",
         max_parallel: int,
         max_tasks: int,
     ) -> None:
         self._rm = resource_manager
         self._bridge = bridge
         self._child_task_bus = child_task_bus
+        self._task_heartbeat_registry = task_heartbeat_registry
         self._max_tasks = max_tasks
         self._semaphore = asyncio.Semaphore(max_parallel)
         self._in_flight: dict[str, asyncio.Task] = {}
@@ -232,6 +235,11 @@ class InProcessChildTaskRuntime:
         )
         child_context = ContextManager(context).fork(
             session_id=f"{context.session_id}:{task_id}",
+        )
+        child_context.state["heartbeat"] = self._task_heartbeat_registry.handle(
+            flow_id,
+            task_id,
+            parent=context.state.get("heartbeat"),
         )
 
         await self._child_task_bus.publish(
@@ -352,11 +360,15 @@ class DynamicOrchestrator:
         resource_manager: "ResourceManager",
         gateway: "OpenAICompatibleGateway",
         child_task_bus: InMemoryChildTaskBus | None = None,
+        task_heartbeat_registry: "TaskHeartbeatRegistry | None" = None,
     ) -> None:
+        from ..heartbeat import TaskHeartbeatRegistry
+
         self._rm = resource_manager
         self._gateway = gateway
         self._bridge = ResourceBridgeExecutor(resource_manager, gateway)
         self._child_task_bus = child_task_bus or InMemoryChildTaskBus()
+        self._task_heartbeat_registry = task_heartbeat_registry or TaskHeartbeatRegistry()
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
@@ -366,6 +378,7 @@ class DynamicOrchestrator:
             resource_manager=self._rm,
             bridge=self._bridge,
             child_task_bus=self._child_task_bus,
+            task_heartbeat_registry=self._task_heartbeat_registry,
             max_parallel=4,
             max_tasks=self.MAX_TASKS,
         )
