@@ -8,8 +8,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from .agent_kernel import ExecutionContext, RunPolicy, WorkflowEngine
-from .agent_kernel.dag_ports import LLMPlanner, LLMSynthesizer, ResourceBridgeExecutor
+from .agent_kernel import ExecutionContext
+from .agent_kernel.dynamic_orchestrator import DynamicOrchestrator
 from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
 from .model_gateway import OpenAICompatibleGateway
@@ -39,7 +39,7 @@ class TaskResponse:
 
 
 class OrchestratorAgent:
-    """Orchestrator — DAG-driven multi-agent mode via WorkflowEngine."""
+    """Orchestrator — dynamic multi-agent mode via DynamicOrchestrator."""
 
     def __init__(self, config: Config | None = None):
         self.config = config or Config()
@@ -54,23 +54,6 @@ class OrchestratorAgent:
         self._init_lock = asyncio.Lock()
         self._initialized = False
 
-    def _build_workflow_engine(self) -> WorkflowEngine:
-        planner = LLMPlanner(
-            gateway=self.gateway,
-            resource_manager=self.resource_manager,
-        )
-        executor = ResourceBridgeExecutor(
-            resource_manager=self.resource_manager,
-            gateway=self.gateway,
-        )
-        synthesizer = LLMSynthesizer(gateway=self.gateway)
-        return WorkflowEngine(
-            planner=planner,
-            executor=executor,
-            synthesizer=synthesizer,
-            policy=RunPolicy(max_parallel=4, default_retries=1),
-        )
-
     async def _answer_with_dag(
         self,
         user_input: str,
@@ -79,7 +62,10 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
         stream_callback: StreamTextCallback | None = None,
     ) -> tuple[str, list[str]]:
-        engine = self._build_workflow_engine()
+        orchestrator = DynamicOrchestrator(
+            resource_manager=self.resource_manager,
+            gateway=self.gateway,
+        )
 
         context = ExecutionContext(
             session_id="orchestrator",
@@ -90,12 +76,16 @@ class OrchestratorAgent:
                     ("heartbeat", heartbeat),
                     ("media_paths", media_paths),
                     ("context_history_tokens", self.config.system.context_history_tokens),
-                    ("stream_callback", stream_callback),
                 ] if v is not None
             },
         )
 
-        result = await engine.run(goal=user_input, context=context)
+        if heartbeat is not None:
+            result = await heartbeat.watch(
+                orchestrator.run(goal=user_input, context=context),
+            )
+        else:
+            result = await orchestrator.run(goal=user_input, context=context)
 
         text = result.conclusion or "任务完成，但没有可返回的结果。"
         collected_media = context.state.get("media_paths_collected", [])

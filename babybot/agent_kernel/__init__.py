@@ -1,16 +1,15 @@
 """Minimal multi-agent orchestration kernel.
 
-This package intentionally keeps one built-in orchestration mode:
-Planner -> Executor -> Synthesizer.
+This package provides a dynamic orchestration loop via DynamicOrchestrator.
 """
 
 from .context import ContextManager, ContextSnapshot
-from .dag_ports import LLMPlanner, LLMSynthesizer, ResourceBridgeExecutor
-from .engine import PlanValidationError, WorkflowEngine
+from .dag_ports import ResourceBridgeExecutor
+from .dynamic_orchestrator import DynamicOrchestrator
 from .executor import EchoModelProvider, ExecutorPolicy, SingleAgentExecutor
 from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, ModelToolCall
 from .mcp import MCPClientPort, MCPToolAdapter, MCPToolDescriptor, register_mcp_tools
-from .protocols import ExecutorPort, PlannerPort, SynthesizerPort
+from .protocols import ExecutorPort
 from .skills import SkillPack
 from .tools import RegisteredTool, Tool, ToolContext, ToolRegistry, ToolResult
 from .types import (
@@ -26,14 +25,13 @@ from .types import (
 __all__ = [
     "ContextManager",
     "ContextSnapshot",
+    "DynamicOrchestrator",
     "ExecutionContext",
     "ExecutionPlan",
     "EchoModelProvider",
     "ExecutorPolicy",
     "ExecutorPort",
     "FinalResult",
-    "LLMPlanner",
-    "LLMSynthesizer",
     "MCPClientPort",
     "MCPToolAdapter",
     "ModelMessage",
@@ -42,14 +40,11 @@ __all__ = [
     "ModelResponse",
     "ModelToolCall",
     "MCPToolDescriptor",
-    "PlanValidationError",
-    "PlannerPort",
     "RegisteredTool",
     "ResourceBridgeExecutor",
     "RunPolicy",
     "SingleAgentExecutor",
     "SkillPack",
-    "SynthesizerPort",
     "Tool",
     "ToolContext",
     "ToolRegistry",
@@ -57,6 +52,5 @@ __all__ = [
     "TaskContract",
     "TaskResult",
     "ToolLease",
-    "WorkflowEngine",
     "register_mcp_tools",
 ]

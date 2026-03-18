@@ -1,9 +1,9 @@
 """Task scheduler with serial/parallel/hybrid execution modes.
 
 .. deprecated::
-    This module is superseded by :mod:`babybot.agent_kernel.engine.WorkflowEngine`
-    which provides DAG-aware orchestration with planner/executor/synthesizer ports.
-    Kept for backward compatibility; prefer ``WorkflowEngine`` for new code.
+    This module is superseded by :mod:`babybot.agent_kernel.dynamic_orchestrator`
+    which provides dynamic orchestration with tool-calling loop.
+    Kept for backward compatibility; prefer ``DynamicOrchestrator`` for new code.
 """
 
 from __future__ import annotations
