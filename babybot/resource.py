@@ -52,6 +52,27 @@ if TYPE_CHECKING:
     from .model_gateway import OpenAICompatibleGateway
 
 
+_DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    (r"rm\s+(-[^\s]*\s+)*-[^\s]*[rR]", "recursive delete"),
+    (r"rm\s+-rf\s+/", "recursive delete from root"),
+    (r"mkfs", "filesystem format"),
+    (r"dd\s+if=", "disk overwrite"),
+    (r">\s*/dev/sd", "device overwrite"),
+    (r":()\{\s*:\|:&\s*\};:", "fork bomb"),
+    (r"chmod\s+-R\s+777\s+/", "recursive permission change on root"),
+    (r"curl[^|]*\|\s*(sudo\s+)?bash", "pipe to shell"),
+    (r"wget[^|]*\|\s*(sudo\s+)?bash", "pipe to shell"),
+]
+
+
+def _check_shell_safety(command: str) -> str | None:
+    """Return an error string if *command* matches a dangerous pattern, else None."""
+    for pattern, label in _DANGEROUS_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            return f"Blocked: command matches dangerous pattern ({label})"
+    return None
+
+
 @dataclass
 class ToolGroup:
     name: str
@@ -1665,6 +1686,9 @@ class ResourceManager:
         timeout: float | int | str | None = 300,
         **kwargs: Any,
     ) -> str:
+        safety_error = _check_shell_safety(command)
+        if safety_error:
+            return safety_error
         ws = shlex.quote(str(self._get_active_write_root()))
         guarded = f"cd {ws} && {command}"
         proc = await asyncio.create_subprocess_shell(

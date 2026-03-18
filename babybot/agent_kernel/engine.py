@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .context import ContextManager
+from .errors import classify_error, retry_delay_seconds
 from .protocols import ExecutorPort, PlannerPort, SynthesizerPort
 from .types import (
     ExecutionContext,
@@ -112,6 +113,8 @@ class WorkflowEngine:
 
         context.emit("task.running", task_id=task.task_id)
         last_error = ""
+        last_error_type = "retryable"
+        suggested_action = ""
         for attempt in range(1, attempts + 1):
             child_context = ContextManager(context).fork(
                 session_id=f"{context.session_id}:{task.task_id}"
@@ -145,6 +148,25 @@ class WorkflowEngine:
                     context.emit("task.succeeded", task_id=task.task_id, attempt=attempt)
                     return result
                 last_error = result.error or f"Task ended with status={result.status}"
+                decision = classify_error(last_error)
+                last_error_type = decision.error_type
+                suggested_action = decision.suggested_action
+                result.metadata.setdefault("error_type", decision.error_type)
+                result.metadata.setdefault("suggested_action", decision.suggested_action)
+                if not decision.retryable:
+                    context.emit(
+                        "task.failed",
+                        task_id=task.task_id,
+                        error=last_error,
+                        error_type=decision.error_type,
+                    )
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error=last_error,
+                        attempts=attempt,
+                        metadata=result.metadata,
+                    )
             except asyncio.TimeoutError:
                 self._merge_child_events(
                     parent=context,
@@ -153,6 +175,9 @@ class WorkflowEngine:
                     attempt=attempt,
                 )
                 last_error = f"Task timed out after {timeout_s}s."
+                decision = classify_error(last_error)
+                last_error_type = decision.error_type
+                suggested_action = decision.suggested_action
             except Exception as exc:  # pragma: no cover - defensive boundary
                 self._merge_child_events(
                     parent=context,
@@ -161,21 +186,34 @@ class WorkflowEngine:
                     attempt=attempt,
                 )
                 last_error = str(exc)
+                decision = classify_error(last_error)
+                last_error_type = decision.error_type
+                suggested_action = decision.suggested_action
+                if not decision.retryable:
+                    break
 
             if attempt < attempts:
+                decision = classify_error(last_error)
+                if not decision.retryable:
+                    break
                 context.emit(
                     "task.retrying",
                     task_id=task.task_id,
                     attempt=attempt,
                     error=last_error,
                 )
+                await asyncio.sleep(retry_delay_seconds(attempt - 1))
 
         context.emit("task.failed", task_id=task.task_id, error=last_error)
         return TaskResult(
             task_id=task.task_id,
             status="failed",
             error=last_error,
-            attempts=attempts,
+            attempts=min(attempts, attempt),
+            metadata={
+                "error_type": last_error_type,
+                "suggested_action": suggested_action,
+            },
         )
 
     @staticmethod

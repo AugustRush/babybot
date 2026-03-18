@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from .loop_guard import LoopGuard, LoopGuardConfig
 from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, ModelToolCall
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
@@ -21,6 +23,8 @@ class ExecutorPolicy:
     """Policy for one single-agent execution loop."""
 
     max_steps: int = 8
+    max_continuations: int = 2
+    loop_guard: LoopGuardConfig = field(default_factory=LoopGuardConfig)
 
 
 @dataclass
@@ -47,7 +51,6 @@ class SingleAgentExecutor:
         if system_prompt:
             messages.append(ModelMessage(role="system", content=system_prompt))
 
-        # Inject history from tape (anchor summary + recent entries + BM25 recall)
         tape = context.state.get("tape")
         if tape is not None:
             history_budget = context.state.get("context_history_tokens", 2000)
@@ -68,7 +71,6 @@ class SingleAgentExecutor:
         available_tools = self.tools.tool_schemas(base_lease)
         tool_names = [t["function"]["name"] for t in available_tools]
         if not tool_names:
-            # Debug: dump registry contents when no tools found
             all_tools = {n: rt.group for n, rt in self.tools._tools.items()}
             logger.warning(
                 "Executor NO TOOLS task=%s lease=%s registry_tools=%s",
@@ -82,14 +84,22 @@ class SingleAgentExecutor:
             list(base_lease.exclude_tools),
         )
 
+        usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        max_model_tokens = int(context.state.get("max_model_tokens", 0) or 0)
+        loop_guard = LoopGuard(self.policy.loop_guard)
+
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
         for step in range(1, max(1, self.policy.max_steps) + 1):
             if heartbeat is not None:
                 heartbeat.beat()
             context.emit("executor.step", task_id=task.task_id, step=step)
-            logger.info("Executor step=%d/%d task=%s", step, self.policy.max_steps, task.task_id)
+            logger.info(
+                "Executor step=%d/%d task=%s",
+                step, self.policy.max_steps, task.task_id,
+            )
 
+            messages = loop_guard.compress_messages(messages)
             response = await self.model.generate(
                 ModelRequest(
                     messages=tuple(messages),
@@ -98,6 +108,18 @@ class SingleAgentExecutor:
                 ),
                 context,
             )
+            self._accumulate_usage(usage_totals, response)
+            budget_error = self._check_token_budget(usage_totals, max_model_tokens)
+            if budget_error:
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=budget_error,
+                    metadata=self._build_usage_metadata(
+                        usage_totals,
+                        extra={"max_model_tokens": max_model_tokens},
+                    ),
+                )
 
             if response.tool_calls:
                 logger.info(
@@ -113,35 +135,68 @@ class SingleAgentExecutor:
                     )
                 )
                 for tool_call in response.tool_calls:
+                    verdict = loop_guard.check_call(tool_call.name, tool_call.arguments)
+                    if verdict.blocked:
+                        tool_output = (
+                            f"Loop guard: {verdict.reason}"
+                            "\n[Hint: Change strategy instead of repeating the same call pattern.]"
+                        )
+                        logger.warning(
+                            "Executor loop guard blocked task=%s tool=%s reason=%s",
+                            task.task_id, tool_call.name, verdict.reason,
+                        )
+                        messages.append(
+                            ModelMessage(
+                                role="tool",
+                                name=tool_call.name,
+                                content=tool_output,
+                                tool_call_id=tool_call.call_id,
+                            )
+                        )
+                        continue
+
                     registered = self.tools.get(tool_call.name)
-                    if not registered or not self._tool_allowed(registered.group, tool_call.name, base_lease):
-                        tool_output = f"Tool unavailable: {tool_call.name}"
+                    if not registered or not self._tool_allowed(
+                        registered.group, tool_call.name, base_lease,
+                    ):
+                        tool_output = (
+                            f"Tool unavailable: {tool_call.name}"
+                            "\n[Hint: This tool is not available. Use a different tool or approach.]"
+                        )
                         logger.warning(
                             "Executor tool unavailable task=%s tool=%s",
                             task.task_id, tool_call.name,
                         )
-                    elif isinstance(tool_call.arguments, dict) and tool_call.arguments.get("__tool_argument_parse_error__"):
+                    elif (
+                        isinstance(tool_call.arguments, dict)
+                        and tool_call.arguments.get("__tool_argument_parse_error__")
+                    ):
                         tool_output = (
                             f"Tool argument JSON parse error for {tool_call.name}: "
                             f"{tool_call.arguments.get('__raw_arguments__', '')}"
+                            "\n[Hint: Fix the JSON syntax in your tool arguments.]"
                         )
                         logger.warning(
                             "Executor invalid arguments JSON task=%s tool=%s",
-                            task.task_id,
-                            tool_call.name,
+                            task.task_id, tool_call.name,
                         )
                     else:
+                        tool_call.arguments = self._cast_tool_arguments(
+                            schema=registered.tool.schema,
+                            args=tool_call.arguments,
+                        )
                         validation_error = self._validate_tool_arguments(
                             schema=registered.tool.schema,
                             args=tool_call.arguments,
                         )
                         if validation_error:
-                            tool_output = f"Tool argument validation failed for {tool_call.name}: {validation_error}"
+                            tool_output = (
+                                f"Tool argument validation failed for {tool_call.name}: {validation_error}"
+                                "\n[Hint: Check parameter types and values against the tool schema.]"
+                            )
                             logger.warning(
                                 "Executor argument validation failed task=%s tool=%s error=%s",
-                                task.task_id,
-                                tool_call.name,
-                                validation_error,
+                                task.task_id, tool_call.name, validation_error,
                             )
                             messages.append(
                                 ModelMessage(
@@ -158,9 +213,14 @@ class SingleAgentExecutor:
                             list(tool_call.arguments.keys()),
                         )
                         started = time.perf_counter()
-                        result = await registered.tool.invoke(tool_call.arguments, tool_context)
+                        result = await registered.tool.invoke(
+                            tool_call.arguments, tool_context,
+                        )
                         elapsed = time.perf_counter() - started
-                        tool_output = result.content if result.ok else f"Tool error: {result.error}"
+                        tool_output = result.content if result.ok else (
+                            f"Tool error: {result.error}"
+                            "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
+                        )
                         logger.info(
                             "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
                             task.task_id, tool_call.name, result.ok,
@@ -178,13 +238,43 @@ class SingleAgentExecutor:
                     )
                 continue
 
-            text = response.text.strip()
+            text = response.text
+            if response.finish_reason == "length":
+                text = await self._continue_from_truncation(
+                    initial_text=text,
+                    messages=messages,
+                    context=context,
+                    task_id=task.task_id,
+                    step=step,
+                    usage_totals=usage_totals,
+                    max_model_tokens=max_model_tokens,
+                )
+                if text is None:
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error=(
+                            f"Model token budget exceeded "
+                            f"({usage_totals['total_tokens']}/{max_model_tokens})."
+                        ),
+                        metadata=self._build_usage_metadata(
+                            usage_totals,
+                            extra={"max_model_tokens": max_model_tokens},
+                        ),
+                    )
+
+            text = text.strip()
             if text:
                 logger.info(
                     "Executor final answer task=%s step=%d output_len=%d",
                     task.task_id, step, len(text),
                 )
-                return TaskResult(task_id=task.task_id, status="succeeded", output=text)
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="succeeded",
+                    output=text,
+                    metadata=self._build_usage_metadata(usage_totals),
+                )
 
         logger.warning(
             "Executor exhausted steps task=%s max_steps=%d",
@@ -194,8 +284,47 @@ class SingleAgentExecutor:
             task_id=task.task_id,
             status="failed",
             error=f"No terminal answer within {self.policy.max_steps} steps.",
-            metadata={"history": [self._dump_message(message) for message in messages]},
+            metadata=self._build_usage_metadata(
+                usage_totals,
+                extra={"history": [self._dump_message(message) for message in messages]},
+            ),
         )
+
+    async def _continue_from_truncation(
+        self,
+        *,
+        initial_text: str,
+        messages: list[ModelMessage],
+        context: ExecutionContext,
+        task_id: str,
+        step: int,
+        usage_totals: dict[str, int],
+        max_model_tokens: int,
+    ) -> str | None:
+        text = initial_text or ""
+        finish_reason = "length"
+        for continuation_idx in range(1, max(1, self.policy.max_continuations) + 1):
+            if finish_reason != "length":
+                break
+            messages.append(ModelMessage(role="assistant", content=text))
+            messages.append(ModelMessage(role="user", content="Continue from where you left off."))
+            response = await self.model.generate(
+                ModelRequest(
+                    messages=tuple(messages),
+                    metadata={
+                        "task_id": task_id,
+                        "step": step,
+                        "continuation": continuation_idx,
+                    },
+                ),
+                context,
+            )
+            self._accumulate_usage(usage_totals, response)
+            if self._check_token_budget(usage_totals, max_model_tokens):
+                return None
+            text += response.text or ""
+            finish_reason = response.finish_reason or "stop"
+        return text
 
     def _resolve_skills(self, task: TaskContract, context: ExecutionContext) -> list[SkillPack]:
         resolver = self.skill_resolver
@@ -234,6 +363,88 @@ class SingleAgentExecutor:
                 {"id": tc.call_id, "name": tc.name} for tc in message.tool_calls
             ]
         return payload
+
+    @staticmethod
+    def _usage_from_response(response: ModelResponse) -> tuple[int, int, int]:
+        usage = response.metadata.get("usage", {}) if response.metadata else {}
+        if not isinstance(usage, dict):
+            return 0, 0, 0
+        prompt = int(usage.get("prompt_tokens", 0) or 0)
+        completion = int(usage.get("completion_tokens", 0) or 0)
+        total = int(usage.get("total_tokens", prompt + completion) or 0)
+        return prompt, completion, total
+
+    @classmethod
+    def _accumulate_usage(
+        cls,
+        totals: dict[str, int],
+        response: ModelResponse,
+    ) -> None:
+        prompt, completion, total = cls._usage_from_response(response)
+        totals["prompt_tokens"] += prompt
+        totals["completion_tokens"] += completion
+        totals["total_tokens"] += total
+
+    @staticmethod
+    def _check_token_budget(totals: dict[str, int], max_model_tokens: int) -> str:
+        if max_model_tokens <= 0:
+            return ""
+        if totals["total_tokens"] <= max_model_tokens:
+            return ""
+        return (
+            f"Model token budget exceeded "
+            f"({totals['total_tokens']}/{max_model_tokens})."
+        )
+
+    @staticmethod
+    def _build_usage_metadata(
+        totals: dict[str, int],
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "prompt_tokens": totals["prompt_tokens"],
+            "completion_tokens": totals["completion_tokens"],
+            "total_tokens": totals["total_tokens"],
+        }
+        if extra:
+            metadata.update(extra)
+        return metadata
+
+    @staticmethod
+    def _cast_tool_arguments(schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        """Best-effort type coercion based on the tool schema."""
+        properties = schema.get("properties") or {}
+        if not isinstance(properties, dict):
+            return args
+        casted = dict(args)
+        for name, value in casted.items():
+            prop = properties.get(name)
+            if not isinstance(prop, dict):
+                continue
+            expected = prop.get("type")
+            if not expected or value is None:
+                continue
+            if expected == "integer" and isinstance(value, str):
+                try:
+                    casted[name] = int(value)
+                except ValueError:
+                    pass
+            elif expected == "number" and isinstance(value, str):
+                try:
+                    casted[name] = float(value)
+                except ValueError:
+                    pass
+            elif expected == "boolean" and isinstance(value, str):
+                if value.lower() in ("true", "1", "yes"):
+                    casted[name] = True
+                elif value.lower() in ("false", "0", "no"):
+                    casted[name] = False
+            elif expected == "array" and isinstance(value, str):
+                try:
+                    casted[name] = _json.loads(value)
+                except (_json.JSONDecodeError, ValueError):
+                    pass
+        return casted
 
     @staticmethod
     def _validate_tool_arguments(

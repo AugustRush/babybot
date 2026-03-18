@@ -150,10 +150,20 @@ class OpenAICompatibleGateway(ModelProvider):
             task_id, step, elapsed, choice.finish_reason,
             len(content), tc_names or "none",
         )
+        usage = completion.usage
+        metadata: dict[str, Any] = {
+            "usage": {
+                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+            },
+            "model": getattr(completion, "model", self._config.model.model_name),
+        }
         return ModelResponse(
             text=content,
             tool_calls=tuple(tool_calls),
             finish_reason=choice.finish_reason or "stop",
+            metadata=metadata,
         )
 
     async def complete(

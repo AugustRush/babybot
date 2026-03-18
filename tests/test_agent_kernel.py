@@ -162,3 +162,25 @@ def test_task_retry_zero_overrides_policy_default_retries() -> None:
     assert result.task_results["t1"].status == "failed"
     assert result.task_results["t1"].attempts == 1
     assert executor.calls["t1"] == 1
+
+
+def test_workflow_engine_does_not_retry_non_retryable_failures() -> None:
+    class FatalExecutor(DummyExecutor):
+        async def execute(self, task: TaskContract, context: ExecutionContext) -> TaskResult:
+            self.calls[task.task_id] = self.calls.get(task.task_id, 0) + 1
+            return TaskResult(task_id=task.task_id, status="failed", error="forbidden: invalid api key")
+
+    plan = ExecutionPlan(
+        tasks=(TaskContract(task_id="t1", description="fatal", retries=3),)
+    )
+    executor = FatalExecutor()
+    engine = WorkflowEngine(
+        planner=DummyPlanner(plan),
+        executor=executor,
+        synthesizer=DummySynthesizer(),
+    )
+
+    result = asyncio.run(engine.run("goal"))
+    assert result.task_results["t1"].status == "failed"
+    assert result.task_results["t1"].attempts == 1
+    assert executor.calls["t1"] == 1
