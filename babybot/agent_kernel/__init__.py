@@ -5,7 +5,13 @@ This package provides a dynamic orchestration loop via DynamicOrchestrator.
 
 from .context import ContextManager, ContextSnapshot
 from .dag_ports import ResourceBridgeExecutor
-from .dynamic_orchestrator import DynamicOrchestrator
+from .dynamic_orchestrator import (
+    ChildTaskEvent,
+    DynamicOrchestrator,
+    FileChildTaskStateStore,
+    InMemoryChildTaskBus,
+    InProcessChildTaskRuntime,
+)
 from .executor import EchoModelProvider, ExecutorPolicy, SingleAgentExecutor
 from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, ModelToolCall
 from .mcp import MCPClientPort, MCPToolAdapter, MCPToolDescriptor, register_mcp_tools
@@ -25,13 +31,17 @@ from .types import (
 __all__ = [
     "ContextManager",
     "ContextSnapshot",
+    "ChildTaskEvent",
     "DynamicOrchestrator",
     "ExecutionContext",
     "ExecutionPlan",
     "EchoModelProvider",
     "ExecutorPolicy",
     "ExecutorPort",
+    "FileChildTaskStateStore",
     "FinalResult",
+    "InMemoryChildTaskBus",
+    "InProcessChildTaskRuntime",
     "MCPClientPort",
     "MCPToolAdapter",
     "ModelMessage",
