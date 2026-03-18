@@ -43,6 +43,13 @@ Current runtime shape:
 - Outer `Heartbeat` protects the whole user request from hanging.
 - `TaskHeartbeatRegistry` tracks child-task liveness independently.
 
+## Runtime Boundaries
+
+- Ingress `MessageBus`: owns inbound user/scheduled message queuing, concurrency limits, request watchdogs, and optional runtime-event capture for observability.
+- Child-task bus: `InMemoryChildTaskBus` carries orchestration-local child lifecycle events such as `queued`, `started`, `retrying`, `succeeded`, `dead_lettered`, and `stalled`.
+- Heartbeat registry: `TaskHeartbeatRegistry` is separate from both buses and answers "is this child task still healthy?" using per-task liveness records.
+- Current bridge point: `OrchestratorAgent` wires the ingress bus to the dynamic orchestrator by passing an optional runtime-event callback while preserving the existing public request entrypoints.
+
 ## Extensibility Rules
 
 1. Keep orchestration decisions in `DynamicOrchestrator`, not in worker executors.

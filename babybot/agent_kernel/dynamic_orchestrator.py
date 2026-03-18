@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
+import inspect
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from .context import ContextManager
 from .dag_ports import ResourceBridgeExecutor, build_history_summary
@@ -160,12 +162,28 @@ class InMemoryChildTaskBus:
 
     def __init__(self) -> None:
         self._events: dict[str, list[ChildTaskEvent]] = {}
+        self._subscribers: dict[str, list[asyncio.Queue[ChildTaskEvent]]] = {}
 
     async def publish(self, event: ChildTaskEvent) -> None:
         self._events.setdefault(event.flow_id, []).append(event)
+        for queue in list(self._subscribers.get(event.flow_id, ())):
+            queue.put_nowait(event)
 
     def events_for(self, flow_id: str) -> list[ChildTaskEvent]:
         return list(self._events.get(flow_id, ()))
+
+    async def subscribe(self, flow_id: str) -> AsyncIterator[ChildTaskEvent]:
+        queue: asyncio.Queue[ChildTaskEvent] = asyncio.Queue()
+        self._subscribers.setdefault(flow_id, []).append(queue)
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            subscribers = self._subscribers.get(flow_id, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+            if not subscribers:
+                self._subscribers.pop(flow_id, None)
 
 
 class FileChildTaskStateStore:
@@ -212,6 +230,7 @@ class InProcessChildTaskRuntime:
         state_store: FileChildTaskStateStore | None = None,
         max_retries: int = 0,
         retry_delay_seconds: Callable[[int], float] = default_retry_delay_seconds,
+        stale_after_s: float | None = None,
     ) -> None:
         self._flow_id = flow_id
         self._rm = resource_manager
@@ -222,6 +241,7 @@ class InProcessChildTaskRuntime:
         self._state_store = state_store
         self._max_retries = max(0, int(max_retries))
         self._retry_delay_seconds = retry_delay_seconds
+        self._stale_after_s = stale_after_s
         self._semaphore = asyncio.Semaphore(max_parallel)
         self._in_flight: dict[str, asyncio.Task] = {}
         self._results: dict[str, TaskResult] = {}
@@ -309,7 +329,46 @@ class InProcessChildTaskRuntime:
     def _update_task_state(self, task_id: str, **payload: Any) -> None:
         current = self._task_state.setdefault(task_id, {})
         current.update(payload)
+        status = payload.get("status")
+        if isinstance(status, str) and status:
+            self._task_heartbeat_registry.beat(
+                self._flow_id,
+                task_id,
+                status=status,
+            )
         self._persist_snapshot()
+
+    def _stale_task_ids(self, task_ids: list[str]) -> set[str]:
+        if self._stale_after_s is None:
+            return set()
+        stale = self._task_heartbeat_registry.stale_tasks(
+            self._flow_id,
+            stale_after_s=self._stale_after_s,
+        )
+        return {
+            task_id
+            for task_id in task_ids
+            if task_id in self._in_flight and task_id in stale and task_id not in self._results
+        }
+
+    async def _promote_stalled_tasks(self, task_ids: list[str]) -> None:
+        for task_id in self._stale_task_ids(task_ids):
+            running = self._in_flight.pop(task_id, None)
+            if running is not None:
+                running.cancel()
+            self._update_task_state(
+                task_id,
+                status="recoverable",
+                error="child task heartbeat stalled",
+            )
+            await self._child_task_bus.publish(
+                ChildTaskEvent(
+                    flow_id=self._flow_id,
+                    task_id=task_id,
+                    event="stalled",
+                    payload={"error": "child task heartbeat stalled"},
+                )
+            )
 
     @staticmethod
     def _normalize_result(task_id: str, result: TaskResult, *, attempts: int) -> TaskResult:
@@ -557,15 +616,32 @@ class InProcessChildTaskRuntime:
         return task_id
 
     async def wait_for_tasks(self, task_ids: list[str]) -> str:
-        awaitables = []
-        for task_id in task_ids:
-            if task_id in self._results:
-                continue
-            if task_id in self._in_flight:
-                awaitables.append(self._in_flight[task_id])
+        if self._stale_after_s is None:
+            awaitables = []
+            for task_id in task_ids:
+                if task_id in self._results:
+                    continue
+                if task_id in self._in_flight:
+                    awaitables.append(self._in_flight[task_id])
 
-        if awaitables:
-            await asyncio.gather(*awaitables, return_exceptions=True)
+            if awaitables:
+                await asyncio.gather(*awaitables, return_exceptions=True)
+        else:
+            while True:
+                await self._promote_stalled_tasks(task_ids)
+                awaitables = [
+                    self._in_flight[task_id]
+                    for task_id in task_ids
+                    if task_id not in self._results and task_id in self._in_flight
+                ]
+                if not awaitables:
+                    break
+                done, pending = await asyncio.wait(
+                    awaitables,
+                    timeout=max(0.01, min(self._stale_after_s, 0.1)),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                del done, pending
 
         out: dict[str, str] = {}
         for task_id in task_ids:
@@ -575,11 +651,15 @@ class InProcessChildTaskRuntime:
                     out[task_id] = f"succeeded: {result.output}"
                 else:
                     out[task_id] = f"failed: {result.error}"
+            elif self._task_state.get(task_id, {}).get("status") == "recoverable":
+                out[task_id] = "recoverable: child task heartbeat stalled"
             else:
                 out[task_id] = f"not_found: {task_id}"
         return json.dumps(out, ensure_ascii=False)
 
     def get_task_result(self, task_id: str) -> str:
+        if task_id in self._in_flight and task_id in self._stale_task_ids([task_id]):
+            return "recoverable: child task heartbeat stalled"
         if task_id in self._results:
             result = self._results[task_id]
             if result.status == "succeeded":
@@ -619,6 +699,7 @@ class DynamicOrchestrator:
         child_task_bus: InMemoryChildTaskBus | None = None,
         task_heartbeat_registry: "TaskHeartbeatRegistry | None" = None,
         state_store: FileChildTaskStateStore | None = None,
+        task_stale_after_s: float | None = None,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
@@ -638,13 +719,15 @@ class DynamicOrchestrator:
             )
         else:
             self._state_store = None
+        self._task_stale_after_s = task_stale_after_s
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
         heartbeat = context.state.get("heartbeat")
         reply_text: str | None = None
+        flow_id = context.session_id or "orchestrator"
         runtime = InProcessChildTaskRuntime(
-            flow_id=context.session_id or "orchestrator",
+            flow_id=flow_id,
             resource_manager=self._rm,
             bridge=self._bridge,
             child_task_bus=self._child_task_bus,
@@ -652,47 +735,59 @@ class DynamicOrchestrator:
             max_parallel=4,
             max_tasks=self.MAX_TASKS,
             state_store=self._state_store,
+            stale_after_s=self._task_stale_after_s,
         )
+        runtime_event_callback = context.state.get("runtime_event_callback")
+        forwarder_task: asyncio.Task[None] | None = None
+        if runtime_event_callback is not None:
+            forwarder_task = asyncio.create_task(
+                self._forward_runtime_events(flow_id, runtime_event_callback)
+            )
 
         messages = self._build_initial_messages(goal, context)
+        try:
+            for step in range(self.MAX_STEPS):
+                if heartbeat is not None:
+                    heartbeat.beat()
 
-        for step in range(self.MAX_STEPS):
-            if heartbeat is not None:
-                heartbeat.beat()
+                response = await self._call_model(messages, context)
 
-            response = await self._call_model(messages, context)
+                # Model responded with plain text (no tool calls)
+                if not response.tool_calls:
+                    return FinalResult(conclusion=response.text)
 
-            # Model responded with plain text (no tool calls)
-            if not response.tool_calls:
-                return FinalResult(conclusion=response.text)
-
-            # Append assistant message with all tool_calls
-            messages.append(ModelMessage(
-                role="assistant",
-                content=response.text,
-                tool_calls=response.tool_calls,
-            ))
-
-            # Process each tool call
-            for tc in response.tool_calls:
-                result_text = await self._dispatch_tool(
-                    tc, runtime, context, task_counter,
-                )
-                if tc.name == "dispatch_task" and not result_text.startswith("error:"):
-                    task_counter += 1
+                # Append assistant message with all tool_calls
                 messages.append(ModelMessage(
-                    role="tool",
-                    content=result_text,
-                    tool_call_id=tc.call_id,
+                    role="assistant",
+                    content=response.text,
+                    tool_calls=response.tool_calls,
                 ))
-                if tc.name == "reply_to_user":
-                    reply_text = tc.arguments.get("text", result_text)
 
-            if reply_text is not None:
-                runtime.cancel_all()
-                return FinalResult(conclusion=reply_text, task_results=runtime.results)
+                # Process each tool call
+                for tc in response.tool_calls:
+                    result_text = await self._dispatch_tool(
+                        tc, runtime, context, task_counter,
+                    )
+                    if tc.name == "dispatch_task" and not result_text.startswith("error:"):
+                        task_counter += 1
+                    messages.append(ModelMessage(
+                        role="tool",
+                        content=result_text,
+                        tool_call_id=tc.call_id,
+                    ))
+                    if tc.name == "reply_to_user":
+                        reply_text = tc.arguments.get("text", result_text)
 
-        return self._build_fallback_result(goal, runtime.results, runtime.in_flight)
+                if reply_text is not None:
+                    runtime.cancel_all()
+                    return FinalResult(conclusion=reply_text, task_results=runtime.results)
+
+            return self._build_fallback_result(goal, runtime.results, runtime.in_flight)
+        finally:
+            if forwarder_task is not None:
+                forwarder_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await forwarder_task
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
@@ -764,6 +859,16 @@ class DynamicOrchestrator:
         if name == "reply_to_user":
             return args.get("text", "")
         return f"error: unknown tool: {name}"
+
+    async def _forward_runtime_events(
+        self,
+        flow_id: str,
+        callback: Callable[[ChildTaskEvent], Any],
+    ) -> None:
+        async for event in self._child_task_bus.subscribe(flow_id):
+            result = callback(event)
+            if inspect.isawaitable(result):
+                await result
 
     @staticmethod
     def _build_fallback_result(

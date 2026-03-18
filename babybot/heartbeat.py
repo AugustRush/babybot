@@ -114,6 +114,26 @@ class TaskHeartbeatRegistry:
             for task_id, record in records.items()
         }
 
+    def stale_tasks(
+        self,
+        flow_id: str,
+        *,
+        stale_after_s: float,
+    ) -> dict[str, dict[str, float | str | None]]:
+        now = time.monotonic()
+        records = self._records.get(flow_id, {})
+        stale: dict[str, dict[str, float | str | None]] = {}
+        for task_id, record in records.items():
+            age_s = now - record.last_beat
+            if age_s >= stale_after_s:
+                stale[task_id] = {
+                    "last_beat": record.last_beat,
+                    "progress": record.progress,
+                    "status": record.status,
+                    "age_s": age_s,
+                }
+        return stale
+
 
 class Heartbeat:
     """Track liveness via periodic beats; cancel work after idle timeout.
