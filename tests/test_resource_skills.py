@@ -406,3 +406,44 @@ def test_save_scheduled_task_uses_channel_context_defaults() -> None:
 
     assert '"channel": "feishu"' in saved
     assert '"chat_id": "oc_test"' in saved
+
+
+def test_save_scheduled_task_anchors_delay_to_request_received_time() -> None:
+    from babybot.channels.tools import ChannelToolContext
+
+    captured: dict[str, object] = {}
+
+    class _TaskManager:
+        def save_task(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "name": "rain_art",
+                "channel": kwargs["channel"],
+                "chat_id": kwargs["chat_id"],
+                "run_at": kwargs.get("run_at"),
+                "_action": "created",
+            }
+
+    manager = object.__new__(ResourceManager)
+    manager.scheduled_task_manager = _TaskManager()
+    ChannelToolContext.set_current(
+        ChannelToolContext(
+            channel_name="feishu",
+            chat_id="oc_test",
+            sender_id="u1",
+            metadata={"request_received_at": "2026-03-18T17:54:27+08:00"},
+        )
+    )
+    try:
+        manager.save_scheduled_task_tool()(
+            prompt="生成杭州雨天图片",
+            name="rain_art",
+            delay_seconds=120,
+        )
+    finally:
+        ChannelToolContext.set_current(None)
+
+    assert captured["channel"] == "feishu"
+    assert captured["chat_id"] == "oc_test"
+    assert captured["delay_seconds"] is None
+    assert captured["run_at"] == "2026-03-18T17:56:27+08:00"

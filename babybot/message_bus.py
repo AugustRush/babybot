@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import datetime
 import inspect
 import logging
 import time
@@ -240,7 +241,12 @@ class MessageBus:
             channel_name=msg.channel,
             chat_id=msg.chat_id,
             sender_id=msg.sender_id,
-            metadata=msg.metadata,
+            metadata={
+                **(msg.metadata or {}),
+                "request_received_at": datetime.datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                ),
+            },
         )
         ChannelToolContext.set_current(ctx)
 

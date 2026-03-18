@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import contextvars
+import datetime
 import importlib
 import importlib.util
 import inspect
@@ -1542,6 +1543,32 @@ class ResourceManager:
             )
         return resolved_channel, resolved_chat_id
 
+    @staticmethod
+    def _anchor_delay_to_request_time(
+        *,
+        delay_seconds: float | None,
+        run_at: str | None,
+    ) -> tuple[float | None, str | None]:
+        if delay_seconds is None or run_at is not None:
+            return delay_seconds, run_at
+
+        from .channels.tools import ChannelToolContext
+
+        ctx = ChannelToolContext.get_current()
+        if ctx is None:
+            return delay_seconds, run_at
+        raw_received_at = (ctx.metadata or {}).get("request_received_at")
+        if not isinstance(raw_received_at, str) or not raw_received_at.strip():
+            return delay_seconds, run_at
+        received_at = raw_received_at.strip()
+        if received_at.endswith("Z"):
+            received_at = received_at[:-1] + "+00:00"
+        base = datetime.datetime.fromisoformat(received_at)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=datetime.datetime.now().astimezone().tzinfo)
+        anchored = base.astimezone() + datetime.timedelta(seconds=float(delay_seconds))
+        return None, anchored.isoformat(timespec="seconds")
+
     def list_scheduled_tasks_tool(self) -> Any:
         def list_scheduled_tasks() -> str:
             """List all scheduled tasks from the workspace task file."""
@@ -1572,6 +1599,10 @@ class ResourceManager:
             """
             channel_name, target_chat_id = self._resolve_scheduled_task_target(
                 channel, chat_id
+            )
+            delay_seconds, run_at = self._anchor_delay_to_request_time(
+                delay_seconds=delay_seconds,
+                run_at=run_at,
             )
             task = self._require_scheduled_task_manager().create_task(
                 name=name,
@@ -1612,6 +1643,10 @@ class ResourceManager:
             """
             channel_name, target_chat_id = self._resolve_scheduled_task_target(
                 channel, chat_id
+            )
+            delay_seconds, run_at = self._anchor_delay_to_request_time(
+                delay_seconds=delay_seconds,
+                run_at=run_at,
             )
             task = self._require_scheduled_task_manager().save_task(
                 name=name,
@@ -1657,6 +1692,10 @@ class ResourceManager:
                     )
                 except RuntimeError:
                     pass
+            delay_seconds, run_at = self._anchor_delay_to_request_time(
+                delay_seconds=delay_seconds,
+                run_at=run_at,
+            )
             task = self._require_scheduled_task_manager().update_task(
                 name=name,
                 prompt=prompt,
