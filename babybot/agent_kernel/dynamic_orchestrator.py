@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .context import ContextManager
@@ -166,27 +167,61 @@ class InMemoryChildTaskBus:
         return list(self._events.get(flow_id, ()))
 
 
+class FileChildTaskStateStore:
+    """JSON snapshot store for child-task runtime state."""
+
+    def __init__(self, base_dir: str | Path) -> None:
+        self._base_dir = Path(base_dir).expanduser().resolve()
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _slug(flow_id: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in flow_id)
+        return cleaned or "orchestrator"
+
+    def _path_for(self, flow_id: str) -> Path:
+        return self._base_dir / f"{self._slug(flow_id)}.json"
+
+    def save_snapshot(self, flow_id: str, payload: dict[str, Any]) -> None:
+        self._path_for(flow_id).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def load_snapshot(self, flow_id: str) -> dict[str, Any] | None:
+        path = self._path_for(flow_id)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+
 class InProcessChildTaskRuntime:
     """Current child-task runtime backed by local asyncio tasks."""
 
     def __init__(
         self,
         *,
+        flow_id: str,
         resource_manager: "ResourceManager",
         bridge: ResourceBridgeExecutor,
         child_task_bus: InMemoryChildTaskBus,
         task_heartbeat_registry: "TaskHeartbeatRegistry",
         max_parallel: int,
         max_tasks: int,
+        state_store: FileChildTaskStateStore | None = None,
     ) -> None:
+        self._flow_id = flow_id
         self._rm = resource_manager
         self._bridge = bridge
         self._child_task_bus = child_task_bus
         self._task_heartbeat_registry = task_heartbeat_registry
         self._max_tasks = max_tasks
+        self._state_store = state_store
         self._semaphore = asyncio.Semaphore(max_parallel)
         self._in_flight: dict[str, asyncio.Task] = {}
         self._results: dict[str, TaskResult] = {}
+        self._task_state: dict[str, dict[str, Any]] = {}
+        self._restore_snapshot()
 
     @property
     def in_flight(self) -> dict[str, asyncio.Task]:
@@ -195,6 +230,57 @@ class InProcessChildTaskRuntime:
     @property
     def results(self) -> dict[str, TaskResult]:
         return self._results
+
+    def _restore_snapshot(self) -> None:
+        if self._state_store is None:
+            return
+        payload = self._state_store.load_snapshot(self._flow_id) or {}
+        tasks = payload.get("tasks", {})
+        if not isinstance(tasks, dict):
+            return
+        for task_id, task_payload in tasks.items():
+            if not isinstance(task_payload, dict):
+                continue
+            self._task_state[task_id] = dict(task_payload)
+            status = task_payload.get("status", "")
+            if status in {"succeeded", "failed"}:
+                self._results[task_id] = TaskResult(
+                    task_id=task_id,
+                    status=status,
+                    output=str(task_payload.get("output", "") or ""),
+                    error=str(task_payload.get("error", "") or ""),
+                    attempts=int(task_payload.get("attempts", 1) or 1),
+                    metadata=dict(task_payload.get("metadata") or {}),
+                )
+
+    def _snapshot_payload(self) -> dict[str, Any]:
+        tasks: dict[str, dict[str, Any]] = {}
+        for task_id, payload in self._task_state.items():
+            tasks[task_id] = dict(payload)
+        for task_id, result in self._results.items():
+            existing = tasks.get(task_id, {})
+            existing.update({
+                "status": result.status,
+                "output": result.output,
+                "error": result.error,
+                "attempts": result.attempts,
+                "metadata": result.metadata,
+            })
+            tasks[task_id] = existing
+        return {
+            "flow_id": self._flow_id,
+            "tasks": tasks,
+        }
+
+    def _persist_snapshot(self) -> None:
+        if self._state_store is None:
+            return
+        self._state_store.save_snapshot(self._flow_id, self._snapshot_payload())
+
+    def _update_task_state(self, task_id: str, **payload: Any) -> None:
+        current = self._task_state.setdefault(task_id, {})
+        current.update(payload)
+        self._persist_snapshot()
 
     async def dispatch(
         self,
@@ -219,7 +305,7 @@ class InProcessChildTaskRuntime:
                 return f"error: unknown dep task_id: {dep}"
 
         task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
-        flow_id = context.session_id or "orchestrator"
+        flow_id = self._flow_id
         lease_dict, skill_ids = scope
         lease = ToolLease(
             include_groups=tuple(lease_dict.get("include_groups", ())),
@@ -250,6 +336,13 @@ class InProcessChildTaskRuntime:
                 payload={"resource_id": resource_id, "deps": list(deps)},
             )
         )
+        self._update_task_state(
+            task_id,
+            status="queued",
+            resource_id=resource_id,
+            description=description,
+            deps=list(deps),
+        )
 
         async def _run_with_deps() -> None:
             if deps:
@@ -260,6 +353,7 @@ class InProcessChildTaskRuntime:
                 await self._child_task_bus.publish(
                     ChildTaskEvent(flow_id=flow_id, task_id=task_id, event="started")
                 )
+                self._update_task_state(task_id, status="started")
                 upstream_results = {
                     dep_id: dep_result.output
                     for dep_id in deps
@@ -276,6 +370,14 @@ class InProcessChildTaskRuntime:
                 async with self._semaphore:
                     result = await self._bridge.execute(execution_contract, child_context)
                 self._results[task_id] = result
+                self._update_task_state(
+                    task_id,
+                    status=result.status,
+                    output=result.output,
+                    error=result.error,
+                    attempts=result.attempts,
+                    metadata=result.metadata,
+                )
                 await self._child_task_bus.publish(
                     ChildTaskEvent(
                         flow_id=flow_id,
@@ -293,6 +395,14 @@ class InProcessChildTaskRuntime:
             except Exception as exc:
                 self._results[task_id] = TaskResult(
                     task_id=task_id, status="failed", error=str(exc),
+                )
+                self._update_task_state(
+                    task_id,
+                    status="failed",
+                    output="",
+                    error=str(exc),
+                    attempts=1,
+                    metadata={},
                 )
                 await self._child_task_bus.publish(
                     ChildTaskEvent(
@@ -339,6 +449,10 @@ class InProcessChildTaskRuntime:
             return f"failed: {result.error}"
         if task_id in self._in_flight:
             return "pending"
+        if task_id in self._task_state:
+            status = str(self._task_state[task_id].get("status", "") or "")
+            if status in {"queued", "started"}:
+                return "pending"
         return f"not_found: {task_id}"
 
     def cancel_all(self) -> None:
@@ -361,6 +475,7 @@ class DynamicOrchestrator:
         gateway: "OpenAICompatibleGateway",
         child_task_bus: InMemoryChildTaskBus | None = None,
         task_heartbeat_registry: "TaskHeartbeatRegistry | None" = None,
+        state_store: FileChildTaskStateStore | None = None,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
@@ -369,18 +484,31 @@ class DynamicOrchestrator:
         self._bridge = ResourceBridgeExecutor(resource_manager, gateway)
         self._child_task_bus = child_task_bus or InMemoryChildTaskBus()
         self._task_heartbeat_registry = task_heartbeat_registry or TaskHeartbeatRegistry()
+        if state_store is not None:
+            self._state_store = state_store
+        elif hasattr(resource_manager, "config"):
+            home_dir = getattr(resource_manager.config, "home_dir", None)
+            self._state_store = (
+                FileChildTaskStateStore(Path(home_dir) / "runtime" / "child_task_state")
+                if home_dir is not None
+                else None
+            )
+        else:
+            self._state_store = None
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
         heartbeat = context.state.get("heartbeat")
         reply_text: str | None = None
         runtime = InProcessChildTaskRuntime(
+            flow_id=context.session_id or "orchestrator",
             resource_manager=self._rm,
             bridge=self._bridge,
             child_task_bus=self._child_task_bus,
             task_heartbeat_registry=self._task_heartbeat_registry,
             max_parallel=4,
             max_tasks=self.MAX_TASKS,
+            state_store=self._state_store,
         )
 
         messages = self._build_initial_messages(goal, context)
