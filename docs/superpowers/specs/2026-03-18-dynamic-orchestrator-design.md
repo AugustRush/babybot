@@ -122,12 +122,18 @@ class DynamicOrchestrator:
                     reply_text = result_text  # mark for termination
 
             if reply_text is not None:
+                # Cancel all still-running background tasks before returning.
+                for task in in_flight.values():
+                    task.cancel()
                 return FinalResult(conclusion=reply_text, task_results=results)
 
         # Forced fallback after MAX_STEPS
-        return self._build_fallback_result(goal, results)
+        return self._build_fallback_result(goal, results, in_flight)
 
-    def _build_fallback_result(self, goal: str, results: dict[str, TaskResult]) -> FinalResult:
+    def _build_fallback_result(self, goal: str, results: dict, in_flight: dict) -> FinalResult:
+        # Cancel all remaining background tasks before returning.
+        for task in in_flight.values():
+            task.cancel()
         """Collect completed results and return a best-effort reply."""
         parts = [f"（编排步数已达上限，以下为已完成的任务结果）"]
         for task_id, r in results.items():
@@ -169,13 +175,20 @@ async def _run_with_deps(deps, task_contract, child_context):
         # Deps already in `results` are already done — no need to await.
         if dep_tasks:
             await asyncio.gather(*dep_tasks)
-    # Call as instance method via self._bridge (created in __init__).
-    result = await self._bridge.execute(task_contract, child_context)
-    # Store result and remove from in_flight BEFORE the coroutine exits.
-    # asyncio.gather() resumes only after this coroutine returns, so wait_for_tasks
-    # can safely read `results` after gather completes.
-    results[task_id] = result
-    del in_flight[task_id]
+    try:
+        result = await self._bridge.execute(task_contract, child_context)
+        results[task_id] = result
+        # Merge child context media_paths_collected into orchestrator context.
+        # This mirrors WorkflowEngine._run_task() media merge behavior.
+        child_media = child_context.state.get("media_paths_collected", [])
+        if child_media:
+            context.state.setdefault("media_paths_collected", []).extend(child_media)
+    except Exception as exc:
+        results[task_id] = TaskResult(task_id=task_id, status="failed", error=str(exc))
+    finally:
+        # Always remove from in_flight, even on exception.
+        # asyncio.gather() in wait_for_tasks resumes only after this finally block.
+        in_flight.pop(task_id, None)
 
 task = asyncio.create_task(_run_with_deps(deps, task_contract, child_context))
 in_flight[task_id] = task
@@ -186,7 +199,8 @@ return task_id  # returned immediately to model
 - `resource_id` not in catalog or is inactive → returns `"error: resource not available: <resource_id>"`
   (Note: `ResourceManager.resolve_resource_scope` returns `None` for both cases;
   implementation does not need to distinguish them — a single error string suffices)
-- `deps` contains unknown task_id → returns `"error: unknown dep task_id: <dep>"`
+- `deps` contains task_id that is in neither `in_flight` nor `results` → returns `"error: unknown dep task_id: <dep>"`
+  (A dep already in `results` is valid — it completed before this dispatch call)
 - `MAX_TASKS` exceeded → returns `"error: task limit reached (max 20)"`
 
 ### `wait_for_tasks` — Blocking by design
