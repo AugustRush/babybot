@@ -8,10 +8,11 @@ import logging
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .context import ContextManager
 from .dag_ports import ResourceBridgeExecutor, build_history_summary
+from .errors import classify_error, retry_delay_seconds as default_retry_delay_seconds
 from .model import ModelMessage, ModelRequest, ModelResponse, ModelToolCall
 from .types import ExecutionContext, FinalResult, TaskContract, TaskResult, ToolLease
 
@@ -209,6 +210,8 @@ class InProcessChildTaskRuntime:
         max_parallel: int,
         max_tasks: int,
         state_store: FileChildTaskStateStore | None = None,
+        max_retries: int = 0,
+        retry_delay_seconds: Callable[[int], float] = default_retry_delay_seconds,
     ) -> None:
         self._flow_id = flow_id
         self._rm = resource_manager
@@ -217,10 +220,13 @@ class InProcessChildTaskRuntime:
         self._task_heartbeat_registry = task_heartbeat_registry
         self._max_tasks = max_tasks
         self._state_store = state_store
+        self._max_retries = max(0, int(max_retries))
+        self._retry_delay_seconds = retry_delay_seconds
         self._semaphore = asyncio.Semaphore(max_parallel)
         self._in_flight: dict[str, asyncio.Task] = {}
         self._results: dict[str, TaskResult] = {}
         self._task_state: dict[str, dict[str, Any]] = {}
+        self._dead_letters: dict[str, dict[str, Any]] = {}
         self._restore_snapshot()
 
     @property
@@ -235,15 +241,22 @@ class InProcessChildTaskRuntime:
         if self._state_store is None:
             return
         payload = self._state_store.load_snapshot(self._flow_id) or {}
+        dead_letters = payload.get("dead_letters", {})
+        if isinstance(dead_letters, dict):
+            for task_id, task_payload in dead_letters.items():
+                if isinstance(task_payload, dict):
+                    self._dead_letters[task_id] = dict(task_payload)
         tasks = payload.get("tasks", {})
         if not isinstance(tasks, dict):
             return
+        mutated = False
         for task_id, task_payload in tasks.items():
             if not isinstance(task_payload, dict):
                 continue
-            self._task_state[task_id] = dict(task_payload)
+            restored_payload = dict(task_payload)
             status = task_payload.get("status", "")
             if status in {"succeeded", "failed"}:
+                self._task_state[task_id] = restored_payload
                 self._results[task_id] = TaskResult(
                     task_id=task_id,
                     status=status,
@@ -252,6 +265,19 @@ class InProcessChildTaskRuntime:
                     attempts=int(task_payload.get("attempts", 1) or 1),
                     metadata=dict(task_payload.get("metadata") or {}),
                 )
+                continue
+            if status:
+                restored_payload["status"] = "recoverable"
+                restored_payload["error"] = (
+                    str(restored_payload.get("error", "") or "")
+                    or "previous run interrupted before completion"
+                )
+                self._task_state[task_id] = restored_payload
+                mutated = True
+            else:
+                self._task_state[task_id] = restored_payload
+        if mutated:
+            self._persist_snapshot()
 
     def _snapshot_payload(self) -> dict[str, Any]:
         tasks: dict[str, dict[str, Any]] = {}
@@ -270,6 +296,9 @@ class InProcessChildTaskRuntime:
         return {
             "flow_id": self._flow_id,
             "tasks": tasks,
+            "dead_letters": {
+                task_id: dict(payload) for task_id, payload in self._dead_letters.items()
+            },
         }
 
     def _persist_snapshot(self) -> None:
@@ -281,6 +310,63 @@ class InProcessChildTaskRuntime:
         current = self._task_state.setdefault(task_id, {})
         current.update(payload)
         self._persist_snapshot()
+
+    @staticmethod
+    def _normalize_result(task_id: str, result: TaskResult, *, attempts: int) -> TaskResult:
+        return TaskResult(
+            task_id=task_id,
+            status=result.status,
+            output=result.output,
+            error=result.error,
+            attempts=attempts,
+            metadata=dict(result.metadata),
+        )
+
+    def _record_dead_letter(
+        self,
+        task_id: str,
+        result: TaskResult,
+        *,
+        error_type: str,
+        retryable: bool,
+        max_attempts: int,
+    ) -> TaskResult:
+        metadata = dict(result.metadata)
+        metadata.update({
+            "dead_lettered": True,
+            "error_type": error_type,
+            "retryable": retryable,
+            "max_attempts": max_attempts,
+        })
+        final_result = TaskResult(
+            task_id=task_id,
+            status="failed",
+            output=result.output,
+            error=result.error,
+            attempts=result.attempts,
+            metadata=metadata,
+        )
+        self._results[task_id] = final_result
+        self._dead_letters[task_id] = {
+            "task_id": task_id,
+            "attempts": final_result.attempts,
+            "max_attempts": max_attempts,
+            "last_error": final_result.error,
+            "error_type": error_type,
+            "retryable": retryable,
+        }
+        self._update_task_state(
+            task_id,
+            status="failed",
+            output=final_result.output,
+            error=final_result.error,
+            attempts=final_result.attempts,
+            metadata=final_result.metadata,
+            max_attempts=max_attempts,
+            last_error=final_result.error,
+            error_type=error_type,
+        )
+        return final_result
 
     async def dispatch(
         self,
@@ -350,68 +436,120 @@ class InProcessChildTaskRuntime:
                 if dep_tasks:
                     await asyncio.gather(*dep_tasks, return_exceptions=True)
             try:
-                await self._child_task_bus.publish(
-                    ChildTaskEvent(flow_id=flow_id, task_id=task_id, event="started")
-                )
-                self._update_task_state(task_id, status="started")
-                upstream_results = {
-                    dep_id: dep_result.output
-                    for dep_id in deps
-                    if (dep_result := self._results.get(dep_id)) is not None
-                    and dep_result.status == "succeeded"
-                }
-                execution_contract = replace(
-                    contract,
-                    metadata={
-                        **contract.metadata,
-                        "upstream_results": upstream_results,
-                    },
-                )
-                async with self._semaphore:
-                    result = await self._bridge.execute(execution_contract, child_context)
-                self._results[task_id] = result
-                self._update_task_state(
-                    task_id,
-                    status=result.status,
-                    output=result.output,
-                    error=result.error,
-                    attempts=result.attempts,
-                    metadata=result.metadata,
-                )
-                await self._child_task_bus.publish(
-                    ChildTaskEvent(
-                        flow_id=flow_id,
-                        task_id=task_id,
-                        event="succeeded" if result.status == "succeeded" else "failed",
-                        payload={
-                            "status": result.status,
-                            "error": result.error,
+                max_attempts = 1 + self._max_retries
+                attempt = 0
+                while True:
+                    attempt += 1
+                    await self._child_task_bus.publish(
+                        ChildTaskEvent(flow_id=flow_id, task_id=task_id, event="started")
+                    )
+                    self._update_task_state(
+                        task_id,
+                        status="started",
+                        attempts=attempt,
+                        max_attempts=max_attempts,
+                    )
+                    upstream_results = {
+                        dep_id: dep_result.output
+                        for dep_id in deps
+                        if (dep_result := self._results.get(dep_id)) is not None
+                        and dep_result.status == "succeeded"
+                    }
+                    execution_contract = replace(
+                        contract,
+                        metadata={
+                            **contract.metadata,
+                            "upstream_results": upstream_results,
                         },
                     )
-                )
-                child_media = child_context.state.get("media_paths_collected", [])
-                if child_media:
-                    context.state.setdefault("media_paths_collected", []).extend(child_media)
-            except Exception as exc:
-                self._results[task_id] = TaskResult(
-                    task_id=task_id, status="failed", error=str(exc),
-                )
-                self._update_task_state(
-                    task_id,
-                    status="failed",
-                    output="",
-                    error=str(exc),
-                    attempts=1,
-                    metadata={},
-                )
-                await self._child_task_bus.publish(
-                    ChildTaskEvent(
-                        flow_id=flow_id,
-                        task_id=task_id,
-                        event="failed",
-                        payload={"error": str(exc)},
+                    try:
+                        async with self._semaphore:
+                            raw_result = await self._bridge.execute(execution_contract, child_context)
+                        result = self._normalize_result(task_id, raw_result, attempts=attempt)
+                    except Exception as exc:
+                        result = TaskResult(
+                            task_id=task_id,
+                            status="failed",
+                            error=str(exc),
+                            attempts=attempt,
+                        )
+
+                    if result.status == "succeeded":
+                        self._results[task_id] = result
+                        self._update_task_state(
+                            task_id,
+                            status=result.status,
+                            output=result.output,
+                            error=result.error,
+                            attempts=result.attempts,
+                            metadata=result.metadata,
+                        )
+                        await self._child_task_bus.publish(
+                            ChildTaskEvent(
+                                flow_id=flow_id,
+                                task_id=task_id,
+                                event="succeeded",
+                                payload={"status": result.status, "error": result.error},
+                            )
+                        )
+                        child_media = child_context.state.get("media_paths_collected", [])
+                        if child_media:
+                            context.state.setdefault("media_paths_collected", []).extend(child_media)
+                        break
+
+                    decision = classify_error(result.error)
+                    if decision.retryable and attempt < max_attempts:
+                        self._update_task_state(
+                            task_id,
+                            status="retrying",
+                            output=result.output,
+                            error=result.error,
+                            attempts=attempt,
+                            metadata=result.metadata,
+                            max_attempts=max_attempts,
+                            last_error=result.error,
+                            error_type=decision.error_type,
+                        )
+                        await self._child_task_bus.publish(
+                            ChildTaskEvent(
+                                flow_id=flow_id,
+                                task_id=task_id,
+                                event="retrying",
+                                payload={
+                                    "attempt": attempt,
+                                    "max_attempts": max_attempts,
+                                    "error": result.error,
+                                    "error_type": decision.error_type,
+                                },
+                            )
+                        )
+                        delay_s = float(self._retry_delay_seconds(attempt - 1))
+                        if delay_s > 0:
+                            await asyncio.sleep(delay_s)
+                        continue
+
+                    final_result = self._record_dead_letter(
+                        task_id,
+                        result,
+                        error_type=decision.error_type,
+                        retryable=decision.retryable,
+                        max_attempts=max_attempts,
                     )
-                )
+                    await self._child_task_bus.publish(
+                        ChildTaskEvent(
+                            flow_id=flow_id,
+                            task_id=task_id,
+                            event="dead_lettered",
+                            payload={
+                                "status": final_result.status,
+                                "error": final_result.error,
+                                "attempts": final_result.attempts,
+                                "max_attempts": max_attempts,
+                                "error_type": decision.error_type,
+                            },
+                        )
+                    )
+                    break
             finally:
                 self._in_flight.pop(task_id, None)
 
@@ -451,8 +589,13 @@ class InProcessChildTaskRuntime:
             return "pending"
         if task_id in self._task_state:
             status = str(self._task_state[task_id].get("status", "") or "")
-            if status in {"queued", "started"}:
+            if status in {"queued", "started", "retrying"}:
                 return "pending"
+            if status == "recoverable":
+                error = str(
+                    self._task_state[task_id].get("error", "") or "previous run interrupted before completion"
+                )
+                return f"recoverable: {error}"
         return f"not_found: {task_id}"
 
     def cancel_all(self) -> None:
