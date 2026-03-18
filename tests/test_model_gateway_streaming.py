@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from babybot.agent_kernel import ModelMessage
+from babybot.agent_kernel import ExecutionContext, ModelMessage, ModelRequest
 from babybot.model_gateway import OpenAICompatibleGateway
 
 
@@ -111,3 +111,74 @@ def test_complete_messages_streaming_supports_list_delta_content() -> None:
 
     assert text == "AB"
     assert updates == ["A", "AB"]
+
+
+def test_generate_streams_reply_to_user_tool_arguments() -> None:
+    chunks = [
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_1",
+                                function=SimpleNamespace(name="reply_to_user", arguments='{"text":"你'),
+                            ),
+                        ],
+                    ),
+                    finish_reason=None,
+                ),
+            ],
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_1",
+                                function=SimpleNamespace(name="", arguments='好"}'),
+                            ),
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                ),
+            ],
+        ),
+    ]
+    completions = _FakeCompletions(chunks)
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+    gateway._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    updates: list[str] = []
+
+    async def _run():
+        return await gateway.generate(
+            ModelRequest(
+                messages=(ModelMessage(role="user", content="hello"),),
+                tools=(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "reply_to_user",
+                            "description": "reply",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"text": {"type": "string"}},
+                                "required": ["text"],
+                            },
+                        },
+                    },
+                ),
+            ),
+            ExecutionContext(state={"stream_callback": updates.append}),
+        )
+
+    response = asyncio.run(_run())
+
+    assert updates == ["你", "你好"]
+    assert response.tool_calls[0].name == "reply_to_user"
+    assert response.tool_calls[0].arguments == {"text": "你好"}
+    assert completions.calls[0]["stream"] is True

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from babybot.agent_kernel import ExecutionContext, ModelRequest, ModelResponse, ModelToolCall
-from babybot.agent_kernel.dynamic_orchestrator import DynamicOrchestrator
+from babybot.agent_kernel.dynamic_orchestrator import DynamicOrchestrator, _build_resource_catalog
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ class DummyResourceManager:
                 "purpose": "天气查询",
                 "group": "skill_weather",
                 "tool_count": 1,
+                "tools_preview": ["get_weather"],
                 "active": True,
             },
         ]
@@ -377,3 +378,60 @@ def test_unknown_task_id_in_wait() -> None:
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
     result = asyncio.run(orch.run("等待不存在的任务", ExecutionContext()))
     assert result.conclusion == "任务不存在"
+
+
+def test_build_initial_messages_includes_media_paths() -> None:
+    gateway = DummyGateway([])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+
+    messages = orch._build_initial_messages(
+        "请先分析这张图再调用工具",
+        ExecutionContext(state={"media_paths": ["/tmp/a.png", "/tmp/b.jpg"]}),
+    )
+
+    assert messages[-1].role == "user"
+    assert messages[-1].content == "请先分析这张图再调用工具"
+    assert messages[-1].images == ("/tmp/a.png", "/tmp/b.jpg")
+
+
+def test_call_model_passes_stream_callback_and_resource_tools_to_router() -> None:
+    class RecordingGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([ModelResponse(text="直接回复")])
+            self.stream_callback: Any = None
+            self.messages: tuple[Any, ...] = ()
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext,
+        ) -> ModelResponse:
+            self.stream_callback = context.state.get("stream_callback")
+            self.messages = request.messages
+            return await super().generate(request, context)
+
+    gateway = RecordingGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+
+    stream_callback = AsyncMock()
+    asyncio.run(orch.run(
+        "请发送一张天气图",
+        ExecutionContext(state={"stream_callback": stream_callback}),
+    ))
+
+    assert gateway.stream_callback is stream_callback
+    assert "get_weather" in gateway.messages[0].content
+
+
+def test_build_resource_catalog_includes_tool_previews() -> None:
+    catalog = _build_resource_catalog([
+        {
+            "id": "group.channel-feishu",
+            "name": "channel_feishu",
+            "purpose": "飞书渠道工具",
+            "tool_count": 3,
+            "tools_preview": ["send_text", "send_image", "send_file"],
+            "active": True,
+        },
+    ])
+    assert "send_image" in catalog

@@ -91,6 +91,7 @@ class ResourceBrief:
     purpose: str
     group: str = ""
     tool_count: int = 0
+    tools_preview: tuple[str, ...] = ()
     active: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +102,7 @@ class ResourceBrief:
             "purpose": self.purpose,
             "group": self.group,
             "tool_count": self.tool_count,
+            "tools_preview": list(self.tools_preview),
             "active": self.active,
         }
 
@@ -162,6 +164,7 @@ class CallableTool:
         try:
             kwargs = dict(self._preset_kwargs)
             kwargs.update(args or {})
+            artifact_base = self._current_write_root()
             if inspect.iscoroutinefunction(self._func):
                 value = await self._func(**kwargs)
             else:
@@ -174,12 +177,13 @@ class CallableTool:
                 loop = asyncio.get_running_loop()
                 ctx = contextvars.copy_context()
                 mgr = ResourceManager.get_instance()
-                write_root = str(mgr._get_active_write_root())
+                write_root = mgr._get_active_write_root()
+                artifact_base = write_root
 
                 def _run_in_workspace() -> Any:
                     saved_cwd = os.getcwd()
                     try:
-                        os.chdir(write_root)
+                        os.chdir(str(write_root))
                         return self._func(**kwargs)
                     finally:
                         os.chdir(saved_cwd)
@@ -187,7 +191,11 @@ class CallableTool:
                 value = await loop.run_in_executor(
                     None, ctx.run, _run_in_workspace
                 )
-            return ToolResult(ok=True, content=self._normalize_result(value))
+            return ToolResult(
+                ok=True,
+                content=self._normalize_result(value),
+                artifacts=self._collect_artifacts(value, base_dir=artifact_base),
+            )
         except Exception as exc:
             return ToolResult(ok=False, error=str(exc))
 
@@ -200,6 +208,64 @@ class CallableTool:
         if isinstance(value, (dict, list, tuple)):
             return json.dumps(value, ensure_ascii=False, indent=2)
         return str(value)
+
+    @staticmethod
+    def _current_write_root() -> Path:
+        try:
+            return ResourceManager.get_instance()._get_active_write_root()
+        except RuntimeError:
+            return Path.cwd().resolve()
+
+    @classmethod
+    def _collect_artifacts(
+        cls,
+        value: Any,
+        *,
+        base_dir: Path | None = None,
+    ) -> list[str]:
+        root = (base_dir or cls._current_write_root()).resolve()
+        found: list[str] = []
+        seen: set[str] = set()
+
+        def _add_path(raw: str) -> None:
+            candidate = raw.strip().strip("\"'")
+            if not candidate:
+                return
+            path = Path(os.path.expanduser(candidate))
+            if not path.is_absolute():
+                path = root / path
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return
+            if not resolved.is_file():
+                return
+            resolved_str = str(resolved)
+            if resolved_str not in seen:
+                seen.add(resolved_str)
+                found.append(resolved_str)
+
+        def _walk(item: Any) -> None:
+            if item is None:
+                return
+            if isinstance(item, os.PathLike):
+                _add_path(os.fspath(item))
+                return
+            if isinstance(item, str):
+                _add_path(item)
+                for match in ResourceManager._MEDIA_PATH_RE.finditer(item):
+                    _add_path(match.group(1))
+                return
+            if isinstance(item, dict):
+                for value in item.values():
+                    _walk(value)
+                return
+            if isinstance(item, (list, tuple, set)):
+                for value in item:
+                    _walk(value)
+
+        _walk(value)
+        return found
 
 
 class ResourceManager:
@@ -861,6 +927,7 @@ class ResourceManager:
                     purpose=(group.description if group else f"MCP tools from {server_name}"),
                     group=group_name,
                     tool_count=tool_count,
+                    tools_preview=self._preview_tool_names(ToolLease(include_groups=(group_name,))),
                     active=(bool(group.active) if group else True) and tool_count > 0,
                 )
             )
@@ -879,6 +946,7 @@ class ResourceManager:
                     purpose=skill.description or f"Skill: {skill.name}",
                     group=skill.tool_group,
                     tool_count=tool_count,
+                    tools_preview=self._preview_tool_names(skill_lease),
                     active=skill.active and tool_count > 0,
                 )
             )
@@ -898,11 +966,20 @@ class ResourceManager:
                     purpose=group.description,
                     group=group_name,
                     tool_count=tool_count,
+                    tools_preview=self._preview_tool_names(ToolLease(include_groups=(group_name,))),
                     active=group.active and tool_count > 0,
                 )
             )
 
         return [brief.to_dict() for brief in briefs]
+
+    def _preview_tool_names(
+        self,
+        lease: ToolLease,
+        limit: int = 6,
+    ) -> tuple[str, ...]:
+        names = sorted(registered.tool.name for registered in self.registry.list(lease))
+        return tuple(names[:limit])
 
     def resolve_resource_scope(
         self,
@@ -1192,6 +1269,18 @@ class ResourceManager:
                 skill_packs=executor_skills,
                 gateway=self.get_shared_gateway(),
             )
+            exec_context = ExecutionContext(
+                session_id=agent_name,
+                state={
+                    k: v for k, v in [
+                        ("heartbeat", heartbeat),
+                        ("tape", tape),
+                        ("tape_store", tape_store),
+                        ("context_history_tokens", self.config.system.context_history_tokens),
+                        ("media_paths", media_paths),
+                    ] if v is not None
+                },
+            )
             result = await executor.execute(
                 TaskContract(
                     task_id=agent_name,
@@ -1199,18 +1288,7 @@ class ResourceManager:
                     lease=merged_lease,
                     retries=0,
                 ),
-                ExecutionContext(
-                    session_id=agent_name,
-                    state={
-                        k: v for k, v in [
-                            ("heartbeat", heartbeat),
-                            ("tape", tape),
-                            ("tape_store", tape_store),
-                            ("context_history_tokens", self.config.system.context_history_tokens),
-                            ("media_paths", media_paths),
-                        ] if v is not None
-                    },
-                ),
+                exec_context,
             )
             text = result.output if result.status == "succeeded" else result.error
             if result.status != "succeeded":
@@ -1228,7 +1306,10 @@ class ResourceManager:
                 time.perf_counter() - started,
                 len(text or ""),
             )
-            return text.strip() or "任务完成但没有文本输出。", self._extract_media_from_text(text)
+            collected_media = list(exec_context.state.get("media_paths_collected", []))
+            fallback_media = self._extract_media_from_text(text)
+            merged_media = list(dict.fromkeys(collected_media + fallback_media))
+            return text.strip() or "任务完成但没有文本输出。", merged_media
         except Exception:
             logger.exception("Run subagent crashed agent=%s", agent_name)
             raise

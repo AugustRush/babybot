@@ -108,6 +108,7 @@ class ResourceBridgeExecutor:
         if task.metadata.get("direct_answer"):
             goal = task.description
             heartbeat = context.state.get("heartbeat")
+            media_paths = context.state.get("media_paths") or ()
             stream_callback = context.state.get("stream_callback")
             tape = context.state.get("tape")
             tape_store = context.state.get("tape_store")
@@ -128,7 +129,11 @@ class ResourceBridgeExecutor:
                     tape, history_budget, query=goal, tape_store=tape_store,
                 ))
 
-            messages.append(ModelMessage(role="user", content=goal))
+            messages.append(ModelMessage(
+                role="user",
+                content=goal,
+                images=tuple(media_paths),
+            ))
 
             answer = await self._gateway.complete_messages(
                 messages,

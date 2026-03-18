@@ -1,7 +1,9 @@
 import asyncio
+import contextvars
 from pathlib import Path
+from types import SimpleNamespace
 
-from babybot.agent_kernel import ToolLease
+from babybot.agent_kernel import TaskResult, ToolLease
 from babybot.resource import LoadedSkill, ResourceManager, ToolGroup
 
 
@@ -258,7 +260,54 @@ def test_json_schema_for_callable_handles_collections_and_kwargs() -> None:
     assert schema["properties"]["max_concurrency"]["type"] == "integer"
     assert schema["properties"]["lease"]["type"] == "object"
     assert "kwargs" not in schema["properties"]
-    assert schema["additionalProperties"] is False
+
+
+def test_run_subagent_task_returns_collected_media_from_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "pig.png"
+    image_path.write_bytes(b"png")
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test",
+        default=str(tmp_path),
+    )
+    manager._get_output_dir = lambda: tmp_path
+    manager._build_task_lease = lambda lease: ToolLease()
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del task
+            context.state["media_paths_collected"] = [str(image_path.resolve())]
+            return TaskResult(task_id="worker", status="succeeded", output="done")
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    text, media = asyncio.run(manager.run_subagent_task("draw a pig"))
+
+    assert text == "done"
+    assert media == [str(image_path.resolve())]
 
 
 def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:

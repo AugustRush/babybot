@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import patch
 
 from babybot.agent_kernel import ExecutionContext, ModelRequest, ModelResponse, ModelToolCall
 from babybot.orchestrator import OrchestratorAgent
@@ -177,3 +178,27 @@ def test_plain_text_response() -> None:
     text, media = asyncio.run(agent._answer_with_dag("你好"))
     assert text == "直接文本回复"
     assert media == []
+
+
+def test_answer_with_dag_passes_stream_callback_into_context() -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok"})()
+
+    stream_callback = lambda text: text
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("你好", stream_callback=stream_callback))
+
+    assert text == "ok"
+    assert media == []
+    assert seen["stream_callback"] is stream_callback

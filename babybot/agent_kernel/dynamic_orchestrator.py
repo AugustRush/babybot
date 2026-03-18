@@ -11,13 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .context import ContextManager
 from .dag_ports import ResourceBridgeExecutor, build_history_summary
 from .model import ModelMessage, ModelRequest, ModelResponse, ModelToolCall
-from .types import (
-    ExecutionContext,
-    FinalResult,
-    TaskContract,
-    TaskResult,
-    ToolLease,
-)
+from .types import ExecutionContext, FinalResult, TaskContract, TaskResult, ToolLease
 
 if TYPE_CHECKING:
     from ..model_gateway import OpenAICompatibleGateway
@@ -139,7 +133,9 @@ def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
             name = b.get("name", "?")
             purpose = b.get("purpose", "")
             tc = b.get("tool_count", 0)
-            lines.append(f"- {rid}: {name} — {purpose} (工具数: {tc})")
+            preview = ", ".join(b.get("tools_preview") or [])
+            preview_text = f"; 示例工具: {preview}" if preview else ""
+            lines.append(f"- {rid}: {name} — {purpose} (工具数: {tc}{preview_text})")
     if not lines:
         return "\n可用资源：无"
     return "\n可用资源：\n" + "\n".join(lines)
@@ -221,6 +217,7 @@ class DynamicOrchestrator:
         briefs = self._rm.get_resource_briefs()
         tape = context.state.get("tape")
         history = build_history_summary(tape)
+        media_paths = context.state.get("media_paths") or ()
 
         system_parts = [_SYSTEM_PROMPT_ROLE, _build_resource_catalog(briefs)]
         if history:
@@ -228,7 +225,11 @@ class DynamicOrchestrator:
 
         return [
             ModelMessage(role="system", content="\n".join(system_parts)),
-            ModelMessage(role="user", content=goal),
+            ModelMessage(
+                role="user",
+                content=goal,
+                images=tuple(media_paths),
+            ),
         ]
 
     async def _call_model(
@@ -237,11 +238,20 @@ class DynamicOrchestrator:
         context: ExecutionContext,
     ) -> ModelResponse:
         heartbeat = context.state.get("heartbeat")
+        stream_callback = context.state.get("stream_callback")
         request = ModelRequest(
             messages=tuple(messages),
             tools=_ORCHESTRATION_TOOLS,
         )
-        ctx = ExecutionContext(state={"heartbeat": heartbeat} if heartbeat else {})
+        state = {
+            k: v
+            for k, v in [
+                ("heartbeat", heartbeat),
+                ("stream_callback", stream_callback),
+            ]
+            if v is not None
+        }
+        ctx = ExecutionContext(state=state)
         if heartbeat is not None:
             async with heartbeat.keep_alive():
                 return await self._gateway.generate(request, ctx)

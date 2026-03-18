@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from babybot.agent_kernel import (
     ExecutionContext,
@@ -217,11 +218,69 @@ def test_single_agent_executor_collects_usage_metadata() -> None:
             ExecutionContext(session_id="s1"),
         )
     )
-
     assert result.status == "succeeded"
     assert result.metadata["prompt_tokens"] == 10
     assert result.metadata["completion_tokens"] == 5
     assert result.metadata["total_tokens"] == 15
+
+
+def test_single_agent_executor_collects_tool_artifacts_into_context(tmp_path: Path) -> None:
+    image_path = tmp_path / "pig.png"
+    image_path.write_bytes(b"png")
+
+    class ArtifactTool(Tool):
+        @property
+        def name(self) -> str:
+            return "make_image"
+
+        @property
+        def description(self) -> str:
+            return "Create image."
+
+        @property
+        def schema(self) -> dict:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+            del args, context
+            return ToolResult(
+                ok=True,
+                content="created",
+                artifacts=[str(image_path)],
+            )
+
+    class ArtifactModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(call_id="c1", name="make_image", arguments={}),
+                    )
+                )
+            assert request.messages[-1].role == "tool"
+            return ModelResponse(text="done")
+
+    registry = ToolRegistry()
+    registry.register(ArtifactTool(), group="image")
+    executor = SingleAgentExecutor(model=ArtifactModel(), tools=registry)
+    context = ExecutionContext(session_id="s1")
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="draw"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert context.state["media_paths_collected"] == [str(image_path.resolve())]
 
 
 def test_single_agent_executor_enforces_token_budget() -> None:

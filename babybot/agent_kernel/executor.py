@@ -217,7 +217,20 @@ class SingleAgentExecutor:
                 if valid_calls:
                     import asyncio as _aio
 
-                    async def _invoke_one(tc: ModelToolCall, reg: Any) -> tuple[ModelToolCall, str]:
+                    def _collect_media(paths: list[str]) -> None:
+                        if not paths:
+                            return
+                        bucket = context.state.setdefault("media_paths_collected", [])
+                        existing = set(bucket)
+                        for path in paths:
+                            if path and path not in existing:
+                                bucket.append(path)
+                                existing.add(path)
+
+                    async def _invoke_one(
+                        tc: ModelToolCall,
+                        reg: Any,
+                    ) -> tuple[ModelToolCall, str, list[str]]:
                         logger.info(
                             "Executor invoke task=%s tool=%s args_keys=%s",
                             task.task_id, tc.name,
@@ -235,10 +248,11 @@ class SingleAgentExecutor:
                             task.task_id, tc.name, result.ok,
                             elapsed, len(output),
                         )
-                        return tc, output
+                        return tc, output, list(result.artifacts or [])
 
                     done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
-                    for tc, output in done:
+                    for tc, output, artifacts in done:
+                        _collect_media(artifacts)
                         tool_result_map[tc.call_id] = ModelMessage(
                             role="tool",
                             name=tc.name,

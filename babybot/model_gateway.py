@@ -134,6 +134,195 @@ class OpenAICompatibleGateway(ModelProvider):
             await asyncio.wait_for(_consume(), timeout=per_call_timeout)
         return "".join(pieces).strip()
 
+    @staticmethod
+    def _delta_tool_calls(delta: Any) -> list[Any]:
+        tool_calls = getattr(delta, "tool_calls", None)
+        if tool_calls is None and isinstance(delta, dict):
+            tool_calls = delta.get("tool_calls")
+        if not tool_calls:
+            return []
+        return list(tool_calls)
+
+    @staticmethod
+    def _read_delta_field(value: Any, field: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(field)
+        return getattr(value, field, None)
+
+    def _extract_reply_text_from_stream_tool_calls(
+        self,
+        tool_calls: dict[int, dict[str, str]],
+    ) -> str:
+        for item in tool_calls.values():
+            if item.get("name") != "reply_to_user":
+                continue
+            raw_arguments = item.get("arguments", "")
+            return self._extract_text_field_from_partial_json(raw_arguments)
+        return ""
+
+    @staticmethod
+    def _extract_text_field_from_partial_json(raw: str) -> str:
+        marker = '"text"'
+        start = raw.find(marker)
+        if start < 0:
+            return ""
+        colon = raw.find(":", start + len(marker))
+        if colon < 0:
+            return ""
+        idx = colon + 1
+        while idx < len(raw) and raw[idx] in " \t\r\n":
+            idx += 1
+        if idx >= len(raw) or raw[idx] != '"':
+            return ""
+        idx += 1
+        chars: list[str] = []
+        escaped = False
+        while idx < len(raw):
+            ch = raw[idx]
+            if escaped:
+                chars.append("\\" + ch)
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                break
+            else:
+                chars.append(ch)
+            idx += 1
+        return OpenAICompatibleGateway._decode_partial_json_string("".join(chars))
+
+    @staticmethod
+    def _decode_partial_json_string(raw: str) -> str:
+        candidate = raw
+        while candidate:
+            try:
+                return json.loads(f'"{candidate}"')
+            except json.JSONDecodeError:
+                candidate = candidate[:-1]
+        return ""
+
+    def _parse_tool_calls(
+        self,
+        raw_calls: list[tuple[str, str, str]],
+        *,
+        task_id: Any,
+        step: Any,
+    ) -> list[ModelToolCall]:
+        tool_calls: list[ModelToolCall] = []
+        for call_id, call_name, raw_arguments in raw_calls:
+            try:
+                arguments = json.loads(raw_arguments or "{}")
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Invalid tool arguments JSON task=%s step=%s tool=%s raw=%s",
+                    task_id,
+                    step,
+                    call_name,
+                    raw_arguments,
+                )
+                arguments = {
+                    "__tool_argument_parse_error__": True,
+                    "__raw_arguments__": raw_arguments,
+                }
+            tool_calls.append(
+                ModelToolCall(
+                    call_id=call_id,
+                    name=call_name,
+                    arguments=arguments,
+                )
+            )
+        return tool_calls
+
+    async def _generate_streaming(
+        self,
+        client: Any,
+        kwargs: dict[str, Any],
+        *,
+        heartbeat: Any = None,
+        on_stream_text: StreamTextCallback | None = None,
+        task_id: Any,
+        step: Any,
+        per_call_timeout: float,
+    ) -> ModelResponse:
+        content_pieces: list[str] = []
+        streamed_text = ""
+        finish_reason = "stop"
+        tool_calls: dict[int, dict[str, str]] = {}
+
+        async def _consume() -> None:
+            nonlocal streamed_text, finish_reason
+            stream = await client.chat.completions.create(**kwargs, stream=True)
+            async for chunk in stream:
+                for choice in getattr(chunk, "choices", []) or []:
+                    finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+
+                    piece = self._extract_stream_delta_text(delta)
+                    if piece:
+                        content_pieces.append(piece)
+
+                    for item in self._delta_tool_calls(delta):
+                        index = self._read_delta_field(item, "index")
+                        if index is None:
+                            index = len(tool_calls)
+                        acc = tool_calls.setdefault(
+                            int(index),
+                            {"id": "", "name": "", "arguments": ""},
+                        )
+                        item_id = self._read_delta_field(item, "id")
+                        if isinstance(item_id, str) and item_id:
+                            acc["id"] = item_id
+                        function = self._read_delta_field(item, "function")
+                        if function is None:
+                            continue
+                        name = self._read_delta_field(function, "name")
+                        if isinstance(name, str) and name:
+                            acc["name"] += name
+                        arguments = self._read_delta_field(function, "arguments")
+                        if isinstance(arguments, str) and arguments:
+                            acc["arguments"] += arguments
+
+                    next_text = "".join(content_pieces)
+                    if not next_text:
+                        next_text = self._extract_reply_text_from_stream_tool_calls(tool_calls)
+                    if next_text and next_text != streamed_text:
+                        streamed_text = next_text
+                        await self._call_stream_callback(on_stream_text, streamed_text)
+
+        if heartbeat is not None:
+            async with heartbeat.keep_alive():
+                await asyncio.wait_for(_consume(), timeout=per_call_timeout)
+        else:
+            await asyncio.wait_for(_consume(), timeout=per_call_timeout)
+
+        parsed_tool_calls = self._parse_tool_calls(
+            [
+                (
+                    item.get("id", f"tool_call_{index}"),
+                    item.get("name", ""),
+                    item.get("arguments", ""),
+                )
+                for index, item in sorted(tool_calls.items())
+            ],
+            task_id=task_id,
+            step=step,
+        )
+        return ModelResponse(
+            text="".join(content_pieces).strip(),
+            tool_calls=tuple(parsed_tool_calls),
+            finish_reason=finish_reason or "stop",
+            metadata={
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "model": self._config.model.model_name,
+            },
+        )
+
     async def generate(
         self,
         request: ModelRequest,
@@ -169,8 +358,19 @@ class OpenAICompatibleGateway(ModelProvider):
             per_call_timeout,
         )
         started = time.perf_counter()
+        heartbeat = context.state.get("heartbeat")
+        stream_callback = context.state.get("stream_callback")
         try:
-            heartbeat = context.state.get("heartbeat")
+            if stream_callback is not None:
+                return await self._generate_streaming(
+                    client,
+                    kwargs,
+                    heartbeat=heartbeat,
+                    on_stream_text=stream_callback,
+                    task_id=task_id,
+                    step=step,
+                    per_call_timeout=per_call_timeout,
+                )
             if heartbeat is not None:
                 async with heartbeat.keep_alive():
                     completion = await asyncio.wait_for(
@@ -198,30 +398,18 @@ class OpenAICompatibleGateway(ModelProvider):
         choice = completion.choices[0]
         msg = choice.message
         content = msg.content or ""
-        tool_calls: list[ModelToolCall] = []
-        for call in msg.tool_calls or []:
-            raw_arguments = call.function.arguments or "{}"
-            try:
-                arguments = json.loads(raw_arguments)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Invalid tool arguments JSON task=%s step=%s tool=%s raw=%s",
-                    task_id,
-                    step,
+        tool_calls = self._parse_tool_calls(
+            [
+                (
+                    call.id,
                     call.function.name,
-                    raw_arguments,
+                    call.function.arguments or "{}",
                 )
-                arguments = {
-                    "__tool_argument_parse_error__": True,
-                    "__raw_arguments__": raw_arguments,
-                }
-            tool_calls.append(
-                ModelToolCall(
-                    call_id=call.id,
-                    name=call.function.name,
-                    arguments=arguments,
-                )
-            )
+                for call in msg.tool_calls or []
+            ],
+            task_id=task_id,
+            step=step,
+        )
 
         tc_names = [tc.name for tc in tool_calls]
         logger.info(

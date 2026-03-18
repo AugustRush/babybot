@@ -76,6 +76,7 @@ class OrchestratorAgent:
                     ("heartbeat", heartbeat),
                     ("media_paths", media_paths),
                     ("context_history_tokens", self.config.system.context_history_tokens),
+                    ("stream_callback", stream_callback),
                 ] if v is not None
             },
         )
