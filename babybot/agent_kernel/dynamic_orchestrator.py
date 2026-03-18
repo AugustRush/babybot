@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from .context import ContextManager
@@ -142,6 +142,202 @@ def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
     return "\n可用资源：\n" + "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class ChildTaskEvent:
+    """Lifecycle event emitted for one child task."""
+
+    flow_id: str
+    task_id: str
+    event: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+class InMemoryChildTaskBus:
+    """Simple in-memory event sink for child-task lifecycle events."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, list[ChildTaskEvent]] = {}
+
+    async def publish(self, event: ChildTaskEvent) -> None:
+        self._events.setdefault(event.flow_id, []).append(event)
+
+    def events_for(self, flow_id: str) -> list[ChildTaskEvent]:
+        return list(self._events.get(flow_id, ()))
+
+
+class InProcessChildTaskRuntime:
+    """Current child-task runtime backed by local asyncio tasks."""
+
+    def __init__(
+        self,
+        *,
+        resource_manager: "ResourceManager",
+        bridge: ResourceBridgeExecutor,
+        child_task_bus: InMemoryChildTaskBus,
+        max_parallel: int,
+        max_tasks: int,
+    ) -> None:
+        self._rm = resource_manager
+        self._bridge = bridge
+        self._child_task_bus = child_task_bus
+        self._max_tasks = max_tasks
+        self._semaphore = asyncio.Semaphore(max_parallel)
+        self._in_flight: dict[str, asyncio.Task] = {}
+        self._results: dict[str, TaskResult] = {}
+
+    @property
+    def in_flight(self) -> dict[str, asyncio.Task]:
+        return self._in_flight
+
+    @property
+    def results(self) -> dict[str, TaskResult]:
+        return self._results
+
+    async def dispatch(
+        self,
+        args: dict[str, Any],
+        *,
+        task_counter: int,
+        context: ExecutionContext,
+    ) -> str:
+        if task_counter >= self._max_tasks:
+            return f"error: task limit reached (max {self._max_tasks})"
+
+        resource_id: str = args.get("resource_id", "")
+        description: str = args.get("description", "")
+        deps: list[str] = args.get("deps", [])
+
+        scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
+        if scope is None:
+            return f"error: resource not available: {resource_id}"
+
+        for dep in deps:
+            if dep not in self._in_flight and dep not in self._results:
+                return f"error: unknown dep task_id: {dep}"
+
+        task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
+        flow_id = context.session_id or "orchestrator"
+        lease_dict, skill_ids = scope
+        lease = ToolLease(
+            include_groups=tuple(lease_dict.get("include_groups", ())),
+            include_tools=tuple(lease_dict.get("include_tools", ())),
+            exclude_tools=tuple(lease_dict.get("exclude_tools", ())),
+        )
+        contract = TaskContract(
+            task_id=task_id,
+            description=description,
+            deps=tuple(deps),
+            lease=lease,
+            metadata={"resource_id": resource_id, "skill_ids": list(skill_ids)},
+        )
+        child_context = ContextManager(context).fork(
+            session_id=f"{context.session_id}:{task_id}",
+        )
+
+        await self._child_task_bus.publish(
+            ChildTaskEvent(
+                flow_id=flow_id,
+                task_id=task_id,
+                event="queued",
+                payload={"resource_id": resource_id, "deps": list(deps)},
+            )
+        )
+
+        async def _run_with_deps() -> None:
+            if deps:
+                dep_tasks = [self._in_flight[d] for d in deps if d in self._in_flight]
+                if dep_tasks:
+                    await asyncio.gather(*dep_tasks, return_exceptions=True)
+            try:
+                await self._child_task_bus.publish(
+                    ChildTaskEvent(flow_id=flow_id, task_id=task_id, event="started")
+                )
+                upstream_results = {
+                    dep_id: dep_result.output
+                    for dep_id in deps
+                    if (dep_result := self._results.get(dep_id)) is not None
+                    and dep_result.status == "succeeded"
+                }
+                execution_contract = replace(
+                    contract,
+                    metadata={
+                        **contract.metadata,
+                        "upstream_results": upstream_results,
+                    },
+                )
+                async with self._semaphore:
+                    result = await self._bridge.execute(execution_contract, child_context)
+                self._results[task_id] = result
+                await self._child_task_bus.publish(
+                    ChildTaskEvent(
+                        flow_id=flow_id,
+                        task_id=task_id,
+                        event="succeeded" if result.status == "succeeded" else "failed",
+                        payload={
+                            "status": result.status,
+                            "error": result.error,
+                        },
+                    )
+                )
+                child_media = child_context.state.get("media_paths_collected", [])
+                if child_media:
+                    context.state.setdefault("media_paths_collected", []).extend(child_media)
+            except Exception as exc:
+                self._results[task_id] = TaskResult(
+                    task_id=task_id, status="failed", error=str(exc),
+                )
+                await self._child_task_bus.publish(
+                    ChildTaskEvent(
+                        flow_id=flow_id,
+                        task_id=task_id,
+                        event="failed",
+                        payload={"error": str(exc)},
+                    )
+                )
+            finally:
+                self._in_flight.pop(task_id, None)
+
+        self._in_flight[task_id] = asyncio.create_task(_run_with_deps())
+        return task_id
+
+    async def wait_for_tasks(self, task_ids: list[str]) -> str:
+        awaitables = []
+        for task_id in task_ids:
+            if task_id in self._results:
+                continue
+            if task_id in self._in_flight:
+                awaitables.append(self._in_flight[task_id])
+
+        if awaitables:
+            await asyncio.gather(*awaitables, return_exceptions=True)
+
+        out: dict[str, str] = {}
+        for task_id in task_ids:
+            if task_id in self._results:
+                result = self._results[task_id]
+                if result.status == "succeeded":
+                    out[task_id] = f"succeeded: {result.output}"
+                else:
+                    out[task_id] = f"failed: {result.error}"
+            else:
+                out[task_id] = f"not_found: {task_id}"
+        return json.dumps(out, ensure_ascii=False)
+
+    def get_task_result(self, task_id: str) -> str:
+        if task_id in self._results:
+            result = self._results[task_id]
+            if result.status == "succeeded":
+                return f"succeeded: {result.output}"
+            return f"failed: {result.error}"
+        if task_id in self._in_flight:
+            return "pending"
+        return f"not_found: {task_id}"
+
+    def cancel_all(self) -> None:
+        for task in self._in_flight.values():
+            task.cancel()
+
+
 # ── DynamicOrchestrator ──────────────────────────────────────────────────
 
 
@@ -155,18 +351,24 @@ class DynamicOrchestrator:
         self,
         resource_manager: "ResourceManager",
         gateway: "OpenAICompatibleGateway",
+        child_task_bus: InMemoryChildTaskBus | None = None,
     ) -> None:
         self._rm = resource_manager
         self._gateway = gateway
         self._bridge = ResourceBridgeExecutor(resource_manager, gateway)
+        self._child_task_bus = child_task_bus or InMemoryChildTaskBus()
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
-        in_flight: dict[str, asyncio.Task] = {}
-        results: dict[str, TaskResult] = {}
         task_counter = 0
-        semaphore = asyncio.Semaphore(4)
         heartbeat = context.state.get("heartbeat")
         reply_text: str | None = None
+        runtime = InProcessChildTaskRuntime(
+            resource_manager=self._rm,
+            bridge=self._bridge,
+            child_task_bus=self._child_task_bus,
+            max_parallel=4,
+            max_tasks=self.MAX_TASKS,
+        )
 
         messages = self._build_initial_messages(goal, context)
 
@@ -190,8 +392,7 @@ class DynamicOrchestrator:
             # Process each tool call
             for tc in response.tool_calls:
                 result_text = await self._dispatch_tool(
-                    tc, in_flight, results, context,
-                    semaphore, task_counter,
+                    tc, runtime, context, task_counter,
                 )
                 if tc.name == "dispatch_task" and not result_text.startswith("error:"):
                     task_counter += 1
@@ -204,11 +405,10 @@ class DynamicOrchestrator:
                     reply_text = tc.arguments.get("text", result_text)
 
             if reply_text is not None:
-                for task in in_flight.values():
-                    task.cancel()
-                return FinalResult(conclusion=reply_text, task_results=results)
+                runtime.cancel_all()
+                return FinalResult(conclusion=reply_text, task_results=runtime.results)
 
-        return self._build_fallback_result(goal, results, in_flight)
+        return self._build_fallback_result(goal, runtime.results, runtime.in_flight)
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
@@ -261,10 +461,8 @@ class DynamicOrchestrator:
     async def _dispatch_tool(
         self,
         tool_call: ModelToolCall,
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
+        runtime: InProcessChildTaskRuntime,
         context: ExecutionContext,
-        semaphore: asyncio.Semaphore,
         task_counter: int,
     ) -> str:
         name = tool_call.name
@@ -274,143 +472,14 @@ class DynamicOrchestrator:
             return f"error: invalid arguments: {args.get('__raw_arguments__', '')}"
 
         if name == "dispatch_task":
-            return await self._handle_dispatch(
-                args, in_flight, results, context, semaphore, task_counter,
-            )
+            return await runtime.dispatch(args, task_counter=task_counter, context=context)
         if name == "wait_for_tasks":
-            return await self._handle_wait(args, in_flight, results)
+            return await runtime.wait_for_tasks(args.get("task_ids", []))
         if name == "get_task_result":
-            return self._handle_get_result(args, in_flight, results)
+            return runtime.get_task_result(args.get("task_id", ""))
         if name == "reply_to_user":
             return args.get("text", "")
         return f"error: unknown tool: {name}"
-
-    async def _handle_dispatch(
-        self,
-        args: dict[str, Any],
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
-        context: ExecutionContext,
-        semaphore: asyncio.Semaphore,
-        task_counter: int,
-    ) -> str:
-        if task_counter >= self.MAX_TASKS:
-            return f"error: task limit reached (max {self.MAX_TASKS})"
-
-        resource_id: str = args.get("resource_id", "")
-        description: str = args.get("description", "")
-        deps: list[str] = args.get("deps", [])
-
-        # Validate resource
-        scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
-        if scope is None:
-            return f"error: resource not available: {resource_id}"
-
-        # Validate deps
-        for dep in deps:
-            if dep not in in_flight and dep not in results:
-                return f"error: unknown dep task_id: {dep}"
-
-        task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
-        lease_dict, skill_ids = scope
-        lease = ToolLease(
-            include_groups=tuple(lease_dict.get("include_groups", ())),
-            include_tools=tuple(lease_dict.get("include_tools", ())),
-            exclude_tools=tuple(lease_dict.get("exclude_tools", ())),
-        )
-        contract = TaskContract(
-            task_id=task_id,
-            description=description,
-            deps=tuple(deps),
-            lease=lease,
-            metadata={"resource_id": resource_id, "skill_ids": list(skill_ids)},
-        )
-        child_context = ContextManager(context).fork(
-            session_id=f"{context.session_id}:{task_id}",
-        )
-
-        async def _run_with_deps() -> None:
-            # Wait for deps inside the background task
-            if deps:
-                dep_tasks = [in_flight[d] for d in deps if d in in_flight]
-                if dep_tasks:
-                    await asyncio.gather(*dep_tasks, return_exceptions=True)
-            try:
-                upstream_results = {
-                    dep_id: dep_result.output
-                    for dep_id in deps
-                    if (dep_result := results.get(dep_id)) is not None
-                    and dep_result.status == "succeeded"
-                }
-                execution_contract = replace(
-                    contract,
-                    metadata={
-                        **contract.metadata,
-                        "upstream_results": upstream_results,
-                    },
-                )
-                async with semaphore:
-                    result = await self._bridge.execute(execution_contract, child_context)
-                results[task_id] = result
-                # Merge media paths from child context
-                child_media = child_context.state.get("media_paths_collected", [])
-                if child_media:
-                    context.state.setdefault("media_paths_collected", []).extend(child_media)
-            except Exception as exc:
-                results[task_id] = TaskResult(
-                    task_id=task_id, status="failed", error=str(exc),
-                )
-            finally:
-                in_flight.pop(task_id, None)
-
-        task = asyncio.create_task(_run_with_deps())
-        in_flight[task_id] = task
-        return task_id
-
-    async def _handle_wait(
-        self,
-        args: dict[str, Any],
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
-    ) -> str:
-        task_ids: list[str] = args.get("task_ids", [])
-        awaitables = []
-        for tid in task_ids:
-            if tid in results:
-                pass
-            elif tid in in_flight:
-                awaitables.append(in_flight[tid])
-
-        if awaitables:
-            await asyncio.gather(*awaitables, return_exceptions=True)
-
-        out: dict[str, str] = {}
-        for tid in task_ids:
-            if tid in results:
-                r = results[tid]
-                if r.status == "succeeded":
-                    out[tid] = f"succeeded: {r.output}"
-                else:
-                    out[tid] = f"failed: {r.error}"
-            else:
-                out[tid] = f"not_found: {tid}"
-        return json.dumps(out, ensure_ascii=False)
-
-    @staticmethod
-    def _handle_get_result(
-        args: dict[str, Any],
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
-    ) -> str:
-        task_id: str = args.get("task_id", "")
-        if task_id in results:
-            r = results[task_id]
-            if r.status == "succeeded":
-                return f"succeeded: {r.output}"
-            return f"failed: {r.error}"
-        if task_id in in_flight:
-            return "pending"
-        return f"not_found: {task_id}"
 
     @staticmethod
     def _build_fallback_result(
