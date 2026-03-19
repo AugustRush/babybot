@@ -53,6 +53,26 @@ class DummyResourceManager:
                 "tools_preview": ["get_weather"],
                 "active": True,
             },
+            {
+                "id": "group.scheduler",
+                "type": "group",
+                "name": "scheduler",
+                "purpose": "定时任务",
+                "group": "scheduler",
+                "tool_count": 1,
+                "tools_preview": ["create_scheduled_task"],
+                "active": True,
+            },
+            {
+                "id": "skill.image",
+                "type": "skill",
+                "name": "image",
+                "purpose": "文生图",
+                "group": "skill_image",
+                "tool_count": 1,
+                "tools_preview": ["generate_image"],
+                "active": True,
+            },
         ]
 
     def resolve_resource_scope(
@@ -60,6 +80,10 @@ class DummyResourceManager:
     ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
         if resource_id == "skill.weather":
             return {"include_groups": ["skill_weather"]}, ("weather",)
+        if resource_id == "group.scheduler":
+            return {"include_groups": ["scheduler"]}, ()
+        if resource_id == "skill.image":
+            return {"include_groups": ["skill_image"]}, ("image",)
         return None
 
     async def run_subagent_task(
@@ -521,3 +545,224 @@ def test_build_resource_catalog_includes_tool_previews() -> None:
         },
     ])
     assert "send_image" in catalog
+
+
+def test_runtime_event_callback_receives_child_task_lifecycle_events() -> None:
+    class RuntimeEventGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "查询杭州天气", call_id="c1"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("完成", call_id="c3")
+
+    events: list[dict[str, Any]] = []
+
+    async def _capture(event: dict[str, Any]) -> None:
+        events.append(dict(event))
+
+    gw = RuntimeEventGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+    result = asyncio.run(orch.run(
+        "查询天气",
+        ExecutionContext(session_id="flow-1", state={"runtime_event_callback": _capture}),
+    ))
+
+    assert result.conclusion == "完成"
+    assert [event["event"] for event in events] == ["queued", "started", "succeeded"]
+    assert all(event["flow_id"] == "flow-1" for event in events)
+    assert all(event["payload"]["resource_id"] == "skill.weather" for event in events)
+
+
+def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds() -> None:
+    class SchedulerBoundaryGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._weather_task_id = ""
+            self._scheduler_task_id = ""
+            self.dispatch_error_seen = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "查询杭州天气", call_id="c1"),
+                        _dispatch_tool_call(
+                            "group.scheduler",
+                            "两分钟后发送一段画作描述",
+                            call_id="c2",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role != "tool":
+                        continue
+                    if msg.tool_call_id == "c1":
+                        self._weather_task_id = msg.content
+                    if msg.tool_call_id == "c2":
+                        self._scheduler_task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _wait_tool_call(
+                            [self._weather_task_id, self._scheduler_task_id],
+                            call_id="c3",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 2:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.image",
+                            "根据那条两分钟后的描述立即生成图片",
+                            call_id="c4",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            for msg in request.messages:
+                if msg.role == "tool" and msg.tool_call_id == "c4":
+                    self.dispatch_error_seen = msg.content
+            self._call_idx += 1
+            return _reply_tool_call("已返回当前阶段结果，并等待定时任务触发", call_id="c5")
+
+    gw = SchedulerBoundaryGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+    result = asyncio.run(orch.run("先查天气，两分钟后发描述，再按描述画图", ExecutionContext()))
+
+    assert result.conclusion == "已返回当前阶段结果，并等待定时任务触发"
+    assert "scheduled" in gw.dispatch_error_seen.lower()
+    dispatched = [call["task_description"] for call in rm.calls]
+    assert "查询杭州天气" in dispatched
+    assert any("两分钟后发送一段画作描述" in item for item in dispatched)
+    assert "根据那条两分钟后的描述立即生成图片" not in dispatched
+
+
+def test_scheduler_dispatch_inherits_prior_live_task_results_and_original_goal() -> None:
+    class SchedulerAfterWeatherGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._scheduler_task_id = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "查询杭州天气", call_id="c1"),
+                        _dispatch_tool_call(
+                            "group.scheduler",
+                            "两分钟后处理剩余任务",
+                            call_id="c2",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c2":
+                        self._scheduler_task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._scheduler_task_id], call_id="c3"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("已安排后续阶段", call_id="c4")
+
+    gw = SchedulerAfterWeatherGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+    result = asyncio.run(orch.run(
+        "先查询杭州今天的天气，然后过两分钟后给我发条消息，消息的主题是一副画的描述，然后以这个描述画一幅画发送给我",
+        ExecutionContext(session_id="flow-1", state={"original_goal": "先查询杭州今天的天气，然后过两分钟后给我发条消息，消息的主题是一副画的描述，然后以这个描述画一幅画发送给我"}),
+    ))
+
+    assert result.conclusion == "已安排后续阶段"
+    assert len(rm.calls) == 2
+    scheduler_description = rm.calls[1]["task_description"]
+    assert "--- 上游任务结果 ---" in scheduler_description
+    assert "result for: 查询杭州天气" in scheduler_description
+    assert "原始用户请求" in scheduler_description
+    assert "以这个描述画一幅画发送给我" in scheduler_description
+
+
+def test_scheduler_stage_blocks_mixed_scheduler_and_live_dispatches_in_same_turn() -> None:
+    class MixedDispatchGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.scheduler_dispatch_result = ""
+            self.image_dispatch_result = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "group.scheduler",
+                            "两分钟后发送一段画作描述",
+                            call_id="c1",
+                        ),
+                        _dispatch_tool_call(
+                            "skill.image",
+                            "立刻根据那段未来描述生成图片",
+                            call_id="c2",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            for msg in request.messages:
+                if msg.role == "tool" and msg.tool_call_id == "c1":
+                    self.scheduler_dispatch_result = msg.content
+                if msg.role == "tool" and msg.tool_call_id == "c2":
+                    self.image_dispatch_result = msg.content
+            self._call_idx += 1
+            return _reply_tool_call("当前阶段结束", call_id="c3")
+
+    gw = MixedDispatchGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+    result = asyncio.run(orch.run("两分钟后先发描述，再画图", ExecutionContext()))
+
+    assert result.conclusion == "当前阶段结束"
+    assert gw.scheduler_dispatch_result.startswith("task_")
+    assert "scheduled" in gw.image_dispatch_result.lower()

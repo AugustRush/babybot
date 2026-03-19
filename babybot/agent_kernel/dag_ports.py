@@ -195,14 +195,29 @@ class ResourceBridgeExecutor:
 
     @staticmethod
     def _enrich_with_upstream(task: TaskContract, context: ExecutionContext) -> str:
-        """Append upstream task results to the task description."""
+        """Append runtime context needed by downstream scheduler-style tasks."""
         upstream = task.metadata.get("upstream_results") or context.state.get("upstream_results", {})
-        if not task.deps or not upstream:
-            return task.description
+        resource_id = str(task.metadata.get("resource_id", "") or "")
+        original_goal = str(context.state.get("original_goal", "") or "").strip()
+        parts = [task.description]
+        enriched = False
 
-        parts = [task.description, "\n\n--- 上游任务结果 ---"]
+        if (
+            resource_id == "group.scheduler"
+            and original_goal
+            and original_goal != task.description.strip()
+        ):
+            parts.append("\n\n--- 原始用户请求 ---")
+            parts.append(original_goal)
+            enriched = True
+
+        if not task.deps or not upstream:
+            return "\n".join(parts) if enriched else task.description
+
+        parts.append("\n\n--- 上游任务结果 ---")
         for dep_id in task.deps:
             result = upstream.get(dep_id)
             if result:
                 parts.append(f"\n[{dep_id}]:\n{result}")
-        return "\n".join(parts)
+                enriched = True
+        return "\n".join(parts) if enriched else task.description

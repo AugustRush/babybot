@@ -218,6 +218,33 @@ class CallableTool:
             return Path.cwd().resolve()
         return self._resource_manager._get_active_write_root()
 
+    @staticmethod
+    def _looks_like_path_candidate(candidate: str) -> bool:
+        text = candidate.strip()
+        if not text:
+            return False
+        if "\n" in text or "\r" in text:
+            return False
+        if len(text) > 240:
+            return False
+        if text.startswith("{") or text.startswith("["):
+            return False
+        if "://" in text:
+            return False
+        suffix = Path(text).suffix.lower()
+        if suffix in {
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+            ".pdf", ".txt", ".md", ".json", ".yaml", ".yml",
+            ".csv", ".xlsx", ".pptx", ".docx", ".mp4", ".mp3", ".wav",
+        }:
+            return True
+        return (
+            "/" in text
+            or "\\" in text
+            or text.startswith(".")
+            or text.startswith("~")
+        )
+
     def _collect_artifacts(
         self,
         value: Any,
@@ -239,7 +266,10 @@ class CallableTool:
                 resolved = path.resolve()
             except OSError:
                 return
-            if not resolved.is_file():
+            try:
+                if not resolved.is_file():
+                    return
+            except OSError:
                 return
             resolved_str = str(resolved)
             if resolved_str not in seen:
@@ -253,7 +283,8 @@ class CallableTool:
                 _add_path(os.fspath(item))
                 return
             if isinstance(item, str):
-                _add_path(item)
+                if self._looks_like_path_candidate(item):
+                    _add_path(item)
                 for match in ResourceManager._MEDIA_PATH_RE.finditer(item):
                     _add_path(match.group(1))
                 return
@@ -1308,6 +1339,8 @@ class ResourceManager:
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
     ) -> tuple[str, list[str]]:
+        from .channels.tools import ChannelToolContext
+
         write_root = self._get_output_dir()
         token = self._active_write_root.set(str(write_root))
         started = time.perf_counter()
@@ -1380,6 +1413,7 @@ class ResourceManager:
                         ("tape_store", tape_store),
                         ("context_history_tokens", self.config.system.context_history_tokens),
                         ("media_paths", media_paths),
+                        ("channel_context", ChannelToolContext.get_current()),
                     ] if v is not None
                 },
             )

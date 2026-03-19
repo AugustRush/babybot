@@ -104,6 +104,7 @@ class OrchestratorAgent:
                     ("tape_store", self.tape_store if tape else None),
                     ("heartbeat", heartbeat),
                     ("media_paths", media_paths),
+                    ("original_goal", user_input),
                     ("context_history_tokens", self.config.system.context_history_tokens),
                     ("stream_callback", stream_callback),
                     ("runtime_event_callback", runtime_event_callback),

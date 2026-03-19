@@ -243,11 +243,20 @@ class SingleAgentExecutor:
                             f"Tool error: {result.error}"
                             "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
                         )
-                        logger.info(
-                            "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
-                            task.task_id, tc.name, result.ok,
-                            elapsed, len(output),
-                        )
+                        if result.ok:
+                            logger.info(
+                                "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
+                                task.task_id, tc.name, result.ok,
+                                elapsed, len(output),
+                            )
+                        else:
+                            logger.warning(
+                                "Executor tool failed task=%s tool=%s elapsed=%.2fs error=%s",
+                                task.task_id,
+                                tc.name,
+                                elapsed,
+                                (result.error or "")[:500],
+                            )
                         return tc, output, list(result.artifacts or [])
 
                     done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
