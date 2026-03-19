@@ -128,6 +128,21 @@ def test_plain_text_response() -> None:
     assert result.conclusion == "直接回答"
 
 
+def test_system_prompt_adds_future_task_guard_for_deferred_requests() -> None:
+    gateway = DummyGateway([])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+
+    messages = orch._build_initial_messages(  # type: ignore[attr-defined]
+        "先查询杭州天气，然后过两分钟后给我发一段画面描述，再根据描述画图",
+        ExecutionContext(),
+    )
+
+    system_prompt = messages[0].content
+    assert "不要立刻执行未来动作" in system_prompt
+    assert "未来一次性任务的描述必须自包含" in system_prompt
+
+
 def test_single_task() -> None:
     """dispatch → wait → reply with result."""
     # Step 1: model dispatches a task
@@ -266,6 +281,77 @@ def test_dependent_tasks() -> None:
     result = asyncio.run(orch.run("依赖任务", ExecutionContext()))
     assert result.conclusion == "依赖任务完成"
     assert len(rm.calls) == 2
+
+
+def test_dependent_task_receives_upstream_output() -> None:
+    class RecordingResourceManager(DummyResourceManager):
+        async def run_subagent_task(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> tuple[str, list[str]]:
+            del lease, agent_name, tape, tape_store, heartbeat, media_paths, skill_ids
+            self.calls.append({"task_description": task_description})
+            if task_description == "任务A":
+                return "RESULT_A", []
+            return f"result for: {task_description}", []
+
+    class DepGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_a_id = ""
+            self._task_b_id = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_dispatch_tool_call("skill.weather", "任务A", call_id="c1"),),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_a_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.weather", "任务B", deps=[self._task_a_id], call_id="c2",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 2:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c2":
+                        self._task_b_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_b_id], call_id="c3"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("依赖任务完成", call_id="c4")
+
+    gw = DepGateway()
+    rm = RecordingResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+
+    result = asyncio.run(orch.run("依赖任务", ExecutionContext()))
+
+    assert result.conclusion == "依赖任务完成"
+    assert len(rm.calls) == 2
+    assert "RESULT_A" in rm.calls[1]["task_description"]
 
 
 def test_max_steps_fallback() -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import datetime
 import inspect
 import logging
 import time
@@ -239,7 +241,12 @@ class MessageBus:
             channel_name=msg.channel,
             chat_id=msg.chat_id,
             sender_id=msg.sender_id,
-            metadata=msg.metadata,
+            metadata={
+                **(msg.metadata or {}),
+                "request_received_at": datetime.datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                ),
+            },
         )
         ChannelToolContext.set_current(ctx)
 
@@ -291,6 +298,30 @@ class MessageBus:
             "heartbeat": heartbeat,
             "media_paths": msg.media_paths,
         }
+        runtime_events: list[dict[str, Any]] = []
+
+        async def _runtime_event_callback(event: Any) -> None:
+            if dataclasses.is_dataclass(event):
+                payload = dataclasses.asdict(event)
+            elif isinstance(event, dict):
+                payload = dict(event)
+            else:
+                payload = {
+                    "event": getattr(event, "event", ""),
+                    "task_id": getattr(event, "task_id", ""),
+                    "flow_id": getattr(event, "flow_id", ""),
+                    "payload": dict(getattr(event, "payload", {}) or {}),
+                }
+            runtime_events.append(payload)
+            logger.info(
+                "Runtime event channel=%s chat_id=%s flow_id=%s task_id=%s event=%s",
+                msg.channel,
+                msg.chat_id,
+                payload.get("flow_id", ""),
+                payload.get("task_id", ""),
+                payload.get("event", ""),
+            )
+
         if stream_enabled:
             try:
                 supports_stream_callback = "stream_callback" in inspect.signature(
@@ -300,6 +331,14 @@ class MessageBus:
                 supports_stream_callback = False
             if supports_stream_callback:
                 process_kwargs["stream_callback"] = _stream_callback
+        try:
+            supports_runtime_event_callback = "runtime_event_callback" in inspect.signature(
+                self._orchestrator.process_task
+            ).parameters
+        except (TypeError, ValueError):
+            supports_runtime_event_callback = False
+        if supports_runtime_event_callback:
+            process_kwargs["runtime_event_callback"] = _runtime_event_callback
         try:
             response = await heartbeat.watch(
                 self._orchestrator.process_task(
@@ -361,6 +400,8 @@ class MessageBus:
                 logger.exception("Error sending response on channel '%s'", msg.channel)
 
         elapsed = time.perf_counter() - start
+        if runtime_events and isinstance(msg.metadata, dict):
+            msg.metadata.setdefault("_runtime_events", []).extend(runtime_events)
         logger.info(
             "Bus handled message channel=%s chat_id=%s elapsed=%.2fs text_len=%d media=%d",
             msg.channel,

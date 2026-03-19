@@ -6,11 +6,133 @@ import asyncio
 import contextlib
 import logging
 import time
+from dataclasses import dataclass
 from typing import AsyncIterator, TypeVar
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+@dataclass
+class _TaskHeartbeatRecord:
+    last_beat: float
+    progress: float | None = None
+    status: str = "idle"
+
+
+class TaskHeartbeatHandle:
+    """Per-task heartbeat handle that can also keep a parent heartbeat alive."""
+
+    def __init__(
+        self,
+        registry: "TaskHeartbeatRegistry",
+        flow_id: str,
+        task_id: str,
+        parent: "Heartbeat | None" = None,
+    ) -> None:
+        self._registry = registry
+        self._flow_id = flow_id
+        self._task_id = task_id
+        self._parent = parent
+
+    def beat(
+        self,
+        *,
+        progress: float | None = None,
+        status: str | None = None,
+    ) -> None:
+        self._registry.beat(
+            self._flow_id,
+            self._task_id,
+            progress=progress,
+            status=status,
+        )
+        if self._parent is not None:
+            self._parent.beat()
+
+    @contextlib.asynccontextmanager
+    async def keep_alive(self, interval: float = 5.0) -> AsyncIterator[None]:
+        async def _ticker() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                self.beat()
+
+        task = asyncio.create_task(_ticker())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+class TaskHeartbeatRegistry:
+    """Track child-task heartbeat state independently per flow."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, dict[str, _TaskHeartbeatRecord]] = {}
+
+    def handle(
+        self,
+        flow_id: str,
+        task_id: str,
+        parent: "Heartbeat | None" = None,
+    ) -> TaskHeartbeatHandle:
+        self._records.setdefault(flow_id, {}).setdefault(
+            task_id,
+            _TaskHeartbeatRecord(last_beat=time.monotonic()),
+        )
+        return TaskHeartbeatHandle(self, flow_id, task_id, parent=parent)
+
+    def beat(
+        self,
+        flow_id: str,
+        task_id: str,
+        *,
+        progress: float | None = None,
+        status: str | None = None,
+    ) -> None:
+        record = self._records.setdefault(flow_id, {}).setdefault(
+            task_id,
+            _TaskHeartbeatRecord(last_beat=time.monotonic()),
+        )
+        record.last_beat = time.monotonic()
+        if progress is not None:
+            record.progress = progress
+        if status is not None:
+            record.status = status
+
+    def snapshot(self, flow_id: str) -> dict[str, dict[str, float | str | None]]:
+        records = self._records.get(flow_id, {})
+        return {
+            task_id: {
+                "last_beat": record.last_beat,
+                "progress": record.progress,
+                "status": record.status,
+            }
+            for task_id, record in records.items()
+        }
+
+    def stale_tasks(
+        self,
+        flow_id: str,
+        *,
+        stale_after_s: float,
+    ) -> dict[str, dict[str, float | str | None]]:
+        now = time.monotonic()
+        records = self._records.get(flow_id, {})
+        stale: dict[str, dict[str, float | str | None]] = {}
+        for task_id, record in records.items():
+            age_s = now - record.last_beat
+            if age_s >= stale_after_s:
+                stale[task_id] = {
+                    "last_beat": record.last_beat,
+                    "progress": record.progress,
+                    "status": record.status,
+                    "age_s": age_s,
+                }
+        return stale
 
 
 class Heartbeat:

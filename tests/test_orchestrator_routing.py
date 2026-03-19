@@ -76,8 +76,11 @@ def _make_agent(gateway: _FakeGateway, rm: _FakeResourceManager) -> Orchestrator
     agent.gateway = gateway
     agent.resource_manager = rm
     agent.tape_store = None
+    agent._child_task_bus = None
+    agent._task_heartbeat_registry = None
+    agent._child_task_state_store = None
     agent.config = type("C", (), {
-        "system": type("S", (), {"context_history_tokens": 2000})(),
+        "system": type("S", (), {"context_history_tokens": 2000, "idle_timeout": 30})(),
     })()
     return agent
 
@@ -202,3 +205,48 @@ def test_answer_with_dag_passes_stream_callback_into_context() -> None:
     assert text == "ok"
     assert media == []
     assert seen["stream_callback"] is stream_callback
+
+
+def test_answer_with_dag_passes_runtime_event_callback_and_shared_runtime_adapters() -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    agent._child_task_bus = object()
+    agent._task_heartbeat_registry = object()
+    agent._child_task_state_store = object()
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(
+            self,
+            resource_manager: Any,
+            gateway: Any,
+            child_task_bus: Any = None,
+            task_heartbeat_registry: Any = None,
+            state_store: Any = None,
+            task_stale_after_s: Any = None,
+        ) -> None:
+            del resource_manager, gateway
+            seen["child_task_bus"] = child_task_bus
+            seen["task_heartbeat_registry"] = task_heartbeat_registry
+            seen["state_store"] = state_store
+            seen["task_stale_after_s"] = task_stale_after_s
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok"})()
+
+    runtime_event_callback = lambda event: event
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(
+            agent._answer_with_dag("你好", runtime_event_callback=runtime_event_callback)
+        )
+
+    assert text == "ok"
+    assert media == []
+    assert seen["runtime_event_callback"] is runtime_event_callback
+    assert seen["child_task_bus"] is agent._child_task_bus
+    assert seen["task_heartbeat_registry"] is agent._task_heartbeat_registry
+    assert seen["state_store"] is agent._child_task_state_store
+    assert seen["task_stale_after_s"] == 30

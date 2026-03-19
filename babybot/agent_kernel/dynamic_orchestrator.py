@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any
+import inspect
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from .context import ContextManager
 from .dag_ports import ResourceBridgeExecutor, build_history_summary
+from .errors import classify_error, retry_delay_seconds as default_retry_delay_seconds
 from .model import ModelMessage, ModelRequest, ModelResponse, ModelToolCall
 from .types import ExecutionContext, FinalResult, TaskContract, TaskResult, ToolLease
 
 if TYPE_CHECKING:
+    from ..heartbeat import TaskHeartbeatRegistry
     from ..model_gateway import OpenAICompatibleGateway
     from ..resource import ResourceManager
 
@@ -124,6 +130,24 @@ _SYSTEM_PROMPT_ROLE = (
     "6. 禁止虚构执行结果；需要外部信息必须通过 dispatch_task 获取"
 )
 
+_DEFERRED_TASK_PATTERNS = (
+    "两分钟后",
+    "一分钟后",
+    "稍后",
+    "待会",
+    "过会",
+    "定时",
+    "预约",
+    "提醒我",
+    "之后再",
+)
+
+_DEFERRED_TASK_GUIDANCE = (
+    "\n\n延时/未来任务规则：\n"
+    "7. 如果用户要求稍后、几分钟后、定时或未来某个时间执行动作，当前只应创建/更新定时任务，不要立刻执行未来动作。\n"
+    "8. 未来一次性任务的描述必须自包含，写入定时任务时要包含届时需要完成的完整步骤，不能依赖当前这次对话还保存在上下文中。"
+)
+
 
 def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
     lines: list[str] = []
@@ -141,6 +165,547 @@ def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
     return "\n可用资源：\n" + "\n".join(lines)
 
 
+def _needs_deferred_task_guidance(goal: str) -> bool:
+    lowered = (goal or "").strip()
+    return any(pattern in lowered for pattern in _DEFERRED_TASK_PATTERNS)
+
+
+@dataclass(frozen=True)
+class ChildTaskEvent:
+    """Lifecycle event emitted for one child task."""
+
+    flow_id: str
+    task_id: str
+    event: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+class InMemoryChildTaskBus:
+    """Simple in-memory event sink for child-task lifecycle events."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, list[ChildTaskEvent]] = {}
+        self._subscribers: dict[str, list[asyncio.Queue[ChildTaskEvent]]] = {}
+
+    async def publish(self, event: ChildTaskEvent) -> None:
+        self._events.setdefault(event.flow_id, []).append(event)
+        for queue in list(self._subscribers.get(event.flow_id, ())):
+            queue.put_nowait(event)
+
+    def events_for(self, flow_id: str) -> list[ChildTaskEvent]:
+        return list(self._events.get(flow_id, ()))
+
+    async def subscribe(self, flow_id: str) -> AsyncIterator[ChildTaskEvent]:
+        queue: asyncio.Queue[ChildTaskEvent] = asyncio.Queue()
+        self._subscribers.setdefault(flow_id, []).append(queue)
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            subscribers = self._subscribers.get(flow_id, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+            if not subscribers:
+                self._subscribers.pop(flow_id, None)
+
+
+class FileChildTaskStateStore:
+    """JSON snapshot store for child-task runtime state."""
+
+    def __init__(self, base_dir: str | Path) -> None:
+        self._base_dir = Path(base_dir).expanduser().resolve()
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _slug(flow_id: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in flow_id)
+        return cleaned or "orchestrator"
+
+    def _path_for(self, flow_id: str) -> Path:
+        return self._base_dir / f"{self._slug(flow_id)}.json"
+
+    def save_snapshot(self, flow_id: str, payload: dict[str, Any]) -> None:
+        self._path_for(flow_id).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def load_snapshot(self, flow_id: str) -> dict[str, Any] | None:
+        path = self._path_for(flow_id)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+
+class InProcessChildTaskRuntime:
+    """Current child-task runtime backed by local asyncio tasks."""
+
+    def __init__(
+        self,
+        *,
+        flow_id: str,
+        resource_manager: "ResourceManager",
+        bridge: ResourceBridgeExecutor,
+        child_task_bus: InMemoryChildTaskBus,
+        task_heartbeat_registry: "TaskHeartbeatRegistry",
+        max_parallel: int,
+        max_tasks: int,
+        state_store: FileChildTaskStateStore | None = None,
+        max_retries: int = 0,
+        retry_delay_seconds: Callable[[int], float] = default_retry_delay_seconds,
+        stale_after_s: float | None = None,
+    ) -> None:
+        self._flow_id = flow_id
+        self._rm = resource_manager
+        self._bridge = bridge
+        self._child_task_bus = child_task_bus
+        self._task_heartbeat_registry = task_heartbeat_registry
+        self._max_tasks = max_tasks
+        self._state_store = state_store
+        self._max_retries = max(0, int(max_retries))
+        self._retry_delay_seconds = retry_delay_seconds
+        self._stale_after_s = stale_after_s
+        self._semaphore = asyncio.Semaphore(max_parallel)
+        self._in_flight: dict[str, asyncio.Task] = {}
+        self._results: dict[str, TaskResult] = {}
+        self._task_state: dict[str, dict[str, Any]] = {}
+        self._dead_letters: dict[str, dict[str, Any]] = {}
+        self._restore_snapshot()
+
+    @property
+    def in_flight(self) -> dict[str, asyncio.Task]:
+        return self._in_flight
+
+    @property
+    def results(self) -> dict[str, TaskResult]:
+        return self._results
+
+    def _restore_snapshot(self) -> None:
+        if self._state_store is None:
+            return
+        payload = self._state_store.load_snapshot(self._flow_id) or {}
+        dead_letters = payload.get("dead_letters", {})
+        if isinstance(dead_letters, dict):
+            for task_id, task_payload in dead_letters.items():
+                if isinstance(task_payload, dict):
+                    self._dead_letters[task_id] = dict(task_payload)
+        tasks = payload.get("tasks", {})
+        if not isinstance(tasks, dict):
+            return
+        mutated = False
+        for task_id, task_payload in tasks.items():
+            if not isinstance(task_payload, dict):
+                continue
+            restored_payload = dict(task_payload)
+            status = task_payload.get("status", "")
+            if status in {"succeeded", "failed"}:
+                self._task_state[task_id] = restored_payload
+                self._results[task_id] = TaskResult(
+                    task_id=task_id,
+                    status=status,
+                    output=str(task_payload.get("output", "") or ""),
+                    error=str(task_payload.get("error", "") or ""),
+                    attempts=int(task_payload.get("attempts", 1) or 1),
+                    metadata=dict(task_payload.get("metadata") or {}),
+                )
+                continue
+            if status:
+                restored_payload["status"] = "recoverable"
+                restored_payload["error"] = (
+                    str(restored_payload.get("error", "") or "")
+                    or "previous run interrupted before completion"
+                )
+                self._task_state[task_id] = restored_payload
+                mutated = True
+            else:
+                self._task_state[task_id] = restored_payload
+        if mutated:
+            self._persist_snapshot()
+
+    def _snapshot_payload(self) -> dict[str, Any]:
+        tasks: dict[str, dict[str, Any]] = {}
+        for task_id, payload in self._task_state.items():
+            tasks[task_id] = dict(payload)
+        for task_id, result in self._results.items():
+            existing = tasks.get(task_id, {})
+            existing.update({
+                "status": result.status,
+                "output": result.output,
+                "error": result.error,
+                "attempts": result.attempts,
+                "metadata": result.metadata,
+            })
+            tasks[task_id] = existing
+        return {
+            "flow_id": self._flow_id,
+            "tasks": tasks,
+            "dead_letters": {
+                task_id: dict(payload) for task_id, payload in self._dead_letters.items()
+            },
+        }
+
+    def _persist_snapshot(self) -> None:
+        if self._state_store is None:
+            return
+        self._state_store.save_snapshot(self._flow_id, self._snapshot_payload())
+
+    def _update_task_state(self, task_id: str, **payload: Any) -> None:
+        current = self._task_state.setdefault(task_id, {})
+        current.update(payload)
+        status = payload.get("status")
+        if isinstance(status, str) and status:
+            self._task_heartbeat_registry.beat(
+                self._flow_id,
+                task_id,
+                status=status,
+            )
+        self._persist_snapshot()
+
+    def _stale_task_ids(self, task_ids: list[str]) -> set[str]:
+        if self._stale_after_s is None:
+            return set()
+        stale = self._task_heartbeat_registry.stale_tasks(
+            self._flow_id,
+            stale_after_s=self._stale_after_s,
+        )
+        return {
+            task_id
+            for task_id in task_ids
+            if task_id in self._in_flight and task_id in stale and task_id not in self._results
+        }
+
+    async def _promote_stalled_tasks(self, task_ids: list[str]) -> None:
+        for task_id in self._stale_task_ids(task_ids):
+            running = self._in_flight.pop(task_id, None)
+            if running is not None:
+                running.cancel()
+            self._update_task_state(
+                task_id,
+                status="recoverable",
+                error="child task heartbeat stalled",
+            )
+            await self._child_task_bus.publish(
+                ChildTaskEvent(
+                    flow_id=self._flow_id,
+                    task_id=task_id,
+                    event="stalled",
+                    payload={"error": "child task heartbeat stalled"},
+                )
+            )
+
+    @staticmethod
+    def _normalize_result(task_id: str, result: TaskResult, *, attempts: int) -> TaskResult:
+        return TaskResult(
+            task_id=task_id,
+            status=result.status,
+            output=result.output,
+            error=result.error,
+            attempts=attempts,
+            metadata=dict(result.metadata),
+        )
+
+    def _record_dead_letter(
+        self,
+        task_id: str,
+        result: TaskResult,
+        *,
+        error_type: str,
+        retryable: bool,
+        max_attempts: int,
+    ) -> TaskResult:
+        metadata = dict(result.metadata)
+        metadata.update({
+            "dead_lettered": True,
+            "error_type": error_type,
+            "retryable": retryable,
+            "max_attempts": max_attempts,
+        })
+        final_result = TaskResult(
+            task_id=task_id,
+            status="failed",
+            output=result.output,
+            error=result.error,
+            attempts=result.attempts,
+            metadata=metadata,
+        )
+        self._results[task_id] = final_result
+        self._dead_letters[task_id] = {
+            "task_id": task_id,
+            "attempts": final_result.attempts,
+            "max_attempts": max_attempts,
+            "last_error": final_result.error,
+            "error_type": error_type,
+            "retryable": retryable,
+        }
+        self._update_task_state(
+            task_id,
+            status="failed",
+            output=final_result.output,
+            error=final_result.error,
+            attempts=final_result.attempts,
+            metadata=final_result.metadata,
+            max_attempts=max_attempts,
+            last_error=final_result.error,
+            error_type=error_type,
+        )
+        return final_result
+
+    async def dispatch(
+        self,
+        args: dict[str, Any],
+        *,
+        task_counter: int,
+        context: ExecutionContext,
+    ) -> str:
+        if task_counter >= self._max_tasks:
+            return f"error: task limit reached (max {self._max_tasks})"
+
+        resource_id: str = args.get("resource_id", "")
+        description: str = args.get("description", "")
+        deps: list[str] = args.get("deps", [])
+
+        scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
+        if scope is None:
+            return f"error: resource not available: {resource_id}"
+
+        for dep in deps:
+            if dep not in self._in_flight and dep not in self._results:
+                return f"error: unknown dep task_id: {dep}"
+
+        task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
+        flow_id = self._flow_id
+        lease_dict, skill_ids = scope
+        lease = ToolLease(
+            include_groups=tuple(lease_dict.get("include_groups", ())),
+            include_tools=tuple(lease_dict.get("include_tools", ())),
+            exclude_tools=tuple(lease_dict.get("exclude_tools", ())),
+        )
+        contract = TaskContract(
+            task_id=task_id,
+            description=description,
+            deps=tuple(deps),
+            lease=lease,
+            metadata={"resource_id": resource_id, "skill_ids": list(skill_ids)},
+        )
+        child_context = ContextManager(context).fork(
+            session_id=f"{context.session_id}:{task_id}",
+        )
+        child_context.state["heartbeat"] = self._task_heartbeat_registry.handle(
+            flow_id,
+            task_id,
+            parent=context.state.get("heartbeat"),
+        )
+
+        await self._child_task_bus.publish(
+            ChildTaskEvent(
+                flow_id=flow_id,
+                task_id=task_id,
+                event="queued",
+                payload={"resource_id": resource_id, "deps": list(deps)},
+            )
+        )
+        self._update_task_state(
+            task_id,
+            status="queued",
+            resource_id=resource_id,
+            description=description,
+            deps=list(deps),
+        )
+
+        async def _run_with_deps() -> None:
+            if deps:
+                dep_tasks = [self._in_flight[d] for d in deps if d in self._in_flight]
+                if dep_tasks:
+                    await asyncio.gather(*dep_tasks, return_exceptions=True)
+            try:
+                max_attempts = 1 + self._max_retries
+                attempt = 0
+                while True:
+                    attempt += 1
+                    await self._child_task_bus.publish(
+                        ChildTaskEvent(flow_id=flow_id, task_id=task_id, event="started")
+                    )
+                    self._update_task_state(
+                        task_id,
+                        status="started",
+                        attempts=attempt,
+                        max_attempts=max_attempts,
+                    )
+                    upstream_results = {
+                        dep_id: dep_result.output
+                        for dep_id in deps
+                        if (dep_result := self._results.get(dep_id)) is not None
+                        and dep_result.status == "succeeded"
+                    }
+                    execution_contract = replace(
+                        contract,
+                        metadata={
+                            **contract.metadata,
+                            "upstream_results": upstream_results,
+                        },
+                    )
+                    try:
+                        async with self._semaphore:
+                            raw_result = await self._bridge.execute(execution_contract, child_context)
+                        result = self._normalize_result(task_id, raw_result, attempts=attempt)
+                    except Exception as exc:
+                        result = TaskResult(
+                            task_id=task_id,
+                            status="failed",
+                            error=str(exc),
+                            attempts=attempt,
+                        )
+
+                    if result.status == "succeeded":
+                        self._results[task_id] = result
+                        self._update_task_state(
+                            task_id,
+                            status=result.status,
+                            output=result.output,
+                            error=result.error,
+                            attempts=result.attempts,
+                            metadata=result.metadata,
+                        )
+                        await self._child_task_bus.publish(
+                            ChildTaskEvent(
+                                flow_id=flow_id,
+                                task_id=task_id,
+                                event="succeeded",
+                                payload={"status": result.status, "error": result.error},
+                            )
+                        )
+                        child_media = child_context.state.get("media_paths_collected", [])
+                        if child_media:
+                            context.state.setdefault("media_paths_collected", []).extend(child_media)
+                        break
+
+                    decision = classify_error(result.error)
+                    if decision.retryable and attempt < max_attempts:
+                        self._update_task_state(
+                            task_id,
+                            status="retrying",
+                            output=result.output,
+                            error=result.error,
+                            attempts=attempt,
+                            metadata=result.metadata,
+                            max_attempts=max_attempts,
+                            last_error=result.error,
+                            error_type=decision.error_type,
+                        )
+                        await self._child_task_bus.publish(
+                            ChildTaskEvent(
+                                flow_id=flow_id,
+                                task_id=task_id,
+                                event="retrying",
+                                payload={
+                                    "attempt": attempt,
+                                    "max_attempts": max_attempts,
+                                    "error": result.error,
+                                    "error_type": decision.error_type,
+                                },
+                            )
+                        )
+                        delay_s = float(self._retry_delay_seconds(attempt - 1))
+                        if delay_s > 0:
+                            await asyncio.sleep(delay_s)
+                        continue
+
+                    final_result = self._record_dead_letter(
+                        task_id,
+                        result,
+                        error_type=decision.error_type,
+                        retryable=decision.retryable,
+                        max_attempts=max_attempts,
+                    )
+                    await self._child_task_bus.publish(
+                        ChildTaskEvent(
+                            flow_id=flow_id,
+                            task_id=task_id,
+                            event="dead_lettered",
+                            payload={
+                                "status": final_result.status,
+                                "error": final_result.error,
+                                "attempts": final_result.attempts,
+                                "max_attempts": max_attempts,
+                                "error_type": decision.error_type,
+                            },
+                        )
+                    )
+                    break
+            finally:
+                self._in_flight.pop(task_id, None)
+
+        self._in_flight[task_id] = asyncio.create_task(_run_with_deps())
+        return task_id
+
+    async def wait_for_tasks(self, task_ids: list[str]) -> str:
+        if self._stale_after_s is None:
+            awaitables = []
+            for task_id in task_ids:
+                if task_id in self._results:
+                    continue
+                if task_id in self._in_flight:
+                    awaitables.append(self._in_flight[task_id])
+
+            if awaitables:
+                await asyncio.gather(*awaitables, return_exceptions=True)
+        else:
+            while True:
+                await self._promote_stalled_tasks(task_ids)
+                awaitables = [
+                    self._in_flight[task_id]
+                    for task_id in task_ids
+                    if task_id not in self._results and task_id in self._in_flight
+                ]
+                if not awaitables:
+                    break
+                done, pending = await asyncio.wait(
+                    awaitables,
+                    timeout=max(0.01, min(self._stale_after_s, 0.1)),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                del done, pending
+
+        out: dict[str, str] = {}
+        for task_id in task_ids:
+            if task_id in self._results:
+                result = self._results[task_id]
+                if result.status == "succeeded":
+                    out[task_id] = f"succeeded: {result.output}"
+                else:
+                    out[task_id] = f"failed: {result.error}"
+            elif self._task_state.get(task_id, {}).get("status") == "recoverable":
+                out[task_id] = "recoverable: child task heartbeat stalled"
+            else:
+                out[task_id] = f"not_found: {task_id}"
+        return json.dumps(out, ensure_ascii=False)
+
+    def get_task_result(self, task_id: str) -> str:
+        if task_id in self._in_flight and task_id in self._stale_task_ids([task_id]):
+            return "recoverable: child task heartbeat stalled"
+        if task_id in self._results:
+            result = self._results[task_id]
+            if result.status == "succeeded":
+                return f"succeeded: {result.output}"
+            return f"failed: {result.error}"
+        if task_id in self._in_flight:
+            return "pending"
+        if task_id in self._task_state:
+            status = str(self._task_state[task_id].get("status", "") or "")
+            if status in {"queued", "started", "retrying"}:
+                return "pending"
+            if status == "recoverable":
+                error = str(
+                    self._task_state[task_id].get("error", "") or "previous run interrupted before completion"
+                )
+                return f"recoverable: {error}"
+        return f"not_found: {task_id}"
+
+    def cancel_all(self) -> None:
+        for task in self._in_flight.values():
+            task.cancel()
+
+
 # ── DynamicOrchestrator ──────────────────────────────────────────────────
 
 
@@ -154,60 +719,98 @@ class DynamicOrchestrator:
         self,
         resource_manager: "ResourceManager",
         gateway: "OpenAICompatibleGateway",
+        child_task_bus: InMemoryChildTaskBus | None = None,
+        task_heartbeat_registry: "TaskHeartbeatRegistry | None" = None,
+        state_store: FileChildTaskStateStore | None = None,
+        task_stale_after_s: float | None = None,
     ) -> None:
+        from ..heartbeat import TaskHeartbeatRegistry
+
         self._rm = resource_manager
         self._gateway = gateway
         self._bridge = ResourceBridgeExecutor(resource_manager, gateway)
+        self._child_task_bus = child_task_bus or InMemoryChildTaskBus()
+        self._task_heartbeat_registry = task_heartbeat_registry or TaskHeartbeatRegistry()
+        if state_store is not None:
+            self._state_store = state_store
+        elif hasattr(resource_manager, "config"):
+            home_dir = getattr(resource_manager.config, "home_dir", None)
+            self._state_store = (
+                FileChildTaskStateStore(Path(home_dir) / "runtime" / "child_task_state")
+                if home_dir is not None
+                else None
+            )
+        else:
+            self._state_store = None
+        self._task_stale_after_s = task_stale_after_s
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
-        in_flight: dict[str, asyncio.Task] = {}
-        results: dict[str, TaskResult] = {}
         task_counter = 0
-        semaphore = asyncio.Semaphore(4)
         heartbeat = context.state.get("heartbeat")
         reply_text: str | None = None
+        flow_id = context.session_id or "orchestrator"
+        runtime = InProcessChildTaskRuntime(
+            flow_id=flow_id,
+            resource_manager=self._rm,
+            bridge=self._bridge,
+            child_task_bus=self._child_task_bus,
+            task_heartbeat_registry=self._task_heartbeat_registry,
+            max_parallel=4,
+            max_tasks=self.MAX_TASKS,
+            state_store=self._state_store,
+            stale_after_s=self._task_stale_after_s,
+        )
+        runtime_event_callback = context.state.get("runtime_event_callback")
+        forwarder_task: asyncio.Task[None] | None = None
+        if runtime_event_callback is not None:
+            forwarder_task = asyncio.create_task(
+                self._forward_runtime_events(flow_id, runtime_event_callback)
+            )
 
         messages = self._build_initial_messages(goal, context)
+        try:
+            for step in range(self.MAX_STEPS):
+                if heartbeat is not None:
+                    heartbeat.beat()
 
-        for step in range(self.MAX_STEPS):
-            if heartbeat is not None:
-                heartbeat.beat()
+                response = await self._call_model(messages, context)
 
-            response = await self._call_model(messages, context)
+                # Model responded with plain text (no tool calls)
+                if not response.tool_calls:
+                    return FinalResult(conclusion=response.text)
 
-            # Model responded with plain text (no tool calls)
-            if not response.tool_calls:
-                return FinalResult(conclusion=response.text)
-
-            # Append assistant message with all tool_calls
-            messages.append(ModelMessage(
-                role="assistant",
-                content=response.text,
-                tool_calls=response.tool_calls,
-            ))
-
-            # Process each tool call
-            for tc in response.tool_calls:
-                result_text = await self._dispatch_tool(
-                    tc, in_flight, results, context,
-                    semaphore, task_counter,
-                )
-                if tc.name == "dispatch_task" and not result_text.startswith("error:"):
-                    task_counter += 1
+                # Append assistant message with all tool_calls
                 messages.append(ModelMessage(
-                    role="tool",
-                    content=result_text,
-                    tool_call_id=tc.call_id,
+                    role="assistant",
+                    content=response.text,
+                    tool_calls=response.tool_calls,
                 ))
-                if tc.name == "reply_to_user":
-                    reply_text = tc.arguments.get("text", result_text)
 
-            if reply_text is not None:
-                for task in in_flight.values():
-                    task.cancel()
-                return FinalResult(conclusion=reply_text, task_results=results)
+                # Process each tool call
+                for tc in response.tool_calls:
+                    result_text = await self._dispatch_tool(
+                        tc, runtime, context, task_counter,
+                    )
+                    if tc.name == "dispatch_task" and not result_text.startswith("error:"):
+                        task_counter += 1
+                    messages.append(ModelMessage(
+                        role="tool",
+                        content=result_text,
+                        tool_call_id=tc.call_id,
+                    ))
+                    if tc.name == "reply_to_user":
+                        reply_text = tc.arguments.get("text", result_text)
 
-        return self._build_fallback_result(goal, results, in_flight)
+                if reply_text is not None:
+                    runtime.cancel_all()
+                    return FinalResult(conclusion=reply_text, task_results=runtime.results)
+
+            return self._build_fallback_result(goal, runtime.results, runtime.in_flight)
+        finally:
+            if forwarder_task is not None:
+                forwarder_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await forwarder_task
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
@@ -220,6 +823,8 @@ class DynamicOrchestrator:
         media_paths = context.state.get("media_paths") or ()
 
         system_parts = [_SYSTEM_PROMPT_ROLE, _build_resource_catalog(briefs)]
+        if _needs_deferred_task_guidance(goal):
+            system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
         if history:
             system_parts.append(f"\n{history}")
 
@@ -260,10 +865,8 @@ class DynamicOrchestrator:
     async def _dispatch_tool(
         self,
         tool_call: ModelToolCall,
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
+        runtime: InProcessChildTaskRuntime,
         context: ExecutionContext,
-        semaphore: asyncio.Semaphore,
         task_counter: int,
     ) -> str:
         name = tool_call.name
@@ -273,130 +876,24 @@ class DynamicOrchestrator:
             return f"error: invalid arguments: {args.get('__raw_arguments__', '')}"
 
         if name == "dispatch_task":
-            return await self._handle_dispatch(
-                args, in_flight, results, context, semaphore, task_counter,
-            )
+            return await runtime.dispatch(args, task_counter=task_counter, context=context)
         if name == "wait_for_tasks":
-            return await self._handle_wait(args, in_flight, results)
+            return await runtime.wait_for_tasks(args.get("task_ids", []))
         if name == "get_task_result":
-            return self._handle_get_result(args, in_flight, results)
+            return runtime.get_task_result(args.get("task_id", ""))
         if name == "reply_to_user":
             return args.get("text", "")
         return f"error: unknown tool: {name}"
 
-    async def _handle_dispatch(
+    async def _forward_runtime_events(
         self,
-        args: dict[str, Any],
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
-        context: ExecutionContext,
-        semaphore: asyncio.Semaphore,
-        task_counter: int,
-    ) -> str:
-        if task_counter >= self.MAX_TASKS:
-            return f"error: task limit reached (max {self.MAX_TASKS})"
-
-        resource_id: str = args.get("resource_id", "")
-        description: str = args.get("description", "")
-        deps: list[str] = args.get("deps", [])
-
-        # Validate resource
-        scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
-        if scope is None:
-            return f"error: resource not available: {resource_id}"
-
-        # Validate deps
-        for dep in deps:
-            if dep not in in_flight and dep not in results:
-                return f"error: unknown dep task_id: {dep}"
-
-        task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
-        lease_dict, skill_ids = scope
-        lease = ToolLease(
-            include_groups=tuple(lease_dict.get("include_groups", ())),
-            include_tools=tuple(lease_dict.get("include_tools", ())),
-            exclude_tools=tuple(lease_dict.get("exclude_tools", ())),
-        )
-        contract = TaskContract(
-            task_id=task_id,
-            description=description,
-            deps=tuple(deps),
-            lease=lease,
-            metadata={"resource_id": resource_id, "skill_ids": list(skill_ids)},
-        )
-        child_context = ContextManager(context).fork(
-            session_id=f"{context.session_id}:{task_id}",
-        )
-
-        async def _run_with_deps() -> None:
-            # Wait for deps inside the background task
-            if deps:
-                dep_tasks = [in_flight[d] for d in deps if d in in_flight]
-                if dep_tasks:
-                    await asyncio.gather(*dep_tasks, return_exceptions=True)
-            try:
-                async with semaphore:
-                    result = await self._bridge.execute(contract, child_context)
-                results[task_id] = result
-                # Merge media paths from child context
-                child_media = child_context.state.get("media_paths_collected", [])
-                if child_media:
-                    context.state.setdefault("media_paths_collected", []).extend(child_media)
-            except Exception as exc:
-                results[task_id] = TaskResult(
-                    task_id=task_id, status="failed", error=str(exc),
-                )
-            finally:
-                in_flight.pop(task_id, None)
-
-        task = asyncio.create_task(_run_with_deps())
-        in_flight[task_id] = task
-        return task_id
-
-    async def _handle_wait(
-        self,
-        args: dict[str, Any],
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
-    ) -> str:
-        task_ids: list[str] = args.get("task_ids", [])
-        awaitables = []
-        for tid in task_ids:
-            if tid in results:
-                pass
-            elif tid in in_flight:
-                awaitables.append(in_flight[tid])
-
-        if awaitables:
-            await asyncio.gather(*awaitables, return_exceptions=True)
-
-        out: dict[str, str] = {}
-        for tid in task_ids:
-            if tid in results:
-                r = results[tid]
-                if r.status == "succeeded":
-                    out[tid] = f"succeeded: {r.output}"
-                else:
-                    out[tid] = f"failed: {r.error}"
-            else:
-                out[tid] = f"not_found: {tid}"
-        return json.dumps(out, ensure_ascii=False)
-
-    @staticmethod
-    def _handle_get_result(
-        args: dict[str, Any],
-        in_flight: dict[str, asyncio.Task],
-        results: dict[str, TaskResult],
-    ) -> str:
-        task_id: str = args.get("task_id", "")
-        if task_id in results:
-            r = results[task_id]
-            if r.status == "succeeded":
-                return f"succeeded: {r.output}"
-            return f"failed: {r.error}"
-        if task_id in in_flight:
-            return "pending"
-        return f"not_found: {task_id}"
+        flow_id: str,
+        callback: Callable[[ChildTaskEvent], Any],
+    ) -> None:
+        async for event in self._child_task_bus.subscribe(flow_id):
+            result = callback(event)
+            if inspect.isawaitable(result):
+                await result
 
     @staticmethod
     def _build_fallback_result(

@@ -3,7 +3,8 @@
 .. deprecated::
     This module is superseded by :mod:`babybot.agent_kernel.dynamic_orchestrator`
     which provides dynamic orchestration with tool-calling loop.
-    Kept for backward compatibility; prefer ``DynamicOrchestrator`` for new code.
+    Kept only for backward compatibility; prefer ``DynamicOrchestrator`` and
+    the child-task runtime abstractions for all new orchestration work.
 """
 
 from __future__ import annotations

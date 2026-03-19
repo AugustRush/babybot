@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .agent_kernel import ExecutionContext
-from .agent_kernel.dynamic_orchestrator import DynamicOrchestrator
+from .agent_kernel.dynamic_orchestrator import (
+    DynamicOrchestrator,
+    FileChildTaskStateStore,
+    InMemoryChildTaskBus,
+)
 from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
+from .heartbeat import TaskHeartbeatRegistry
 from .model_gateway import OpenAICompatibleGateway
 from .resource import ResourceManager
 
@@ -50,6 +57,11 @@ class OrchestratorAgent:
             db_path=self.config.home_dir / "memory" / "context.db",
             max_chats=self.config.system.context_max_chats,
         )
+        self._child_task_bus = InMemoryChildTaskBus()
+        self._task_heartbeat_registry = TaskHeartbeatRegistry()
+        self._child_task_state_store = FileChildTaskStateStore(
+            Path(self.config.home_dir) / "runtime" / "child_task_state"
+        )
         self._handoff_locks: dict[str, asyncio.Lock] = {}
         self._init_lock = asyncio.Lock()
         self._initialized = False
@@ -61,11 +73,28 @@ class OrchestratorAgent:
         heartbeat: Heartbeat | None = None,
         media_paths: list[str] | None = None,
         stream_callback: StreamTextCallback | None = None,
+        runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> tuple[str, list[str]]:
-        orchestrator = DynamicOrchestrator(
-            resource_manager=self.resource_manager,
-            gateway=self.gateway,
-        )
+        orchestrator_kwargs: dict[str, Any] = {
+            "resource_manager": self.resource_manager,
+            "gateway": self.gateway,
+        }
+        try:
+            parameters = inspect.signature(DynamicOrchestrator).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        optional_kwargs = {
+            "child_task_bus": getattr(self, "_child_task_bus", None),
+            "task_heartbeat_registry": getattr(self, "_task_heartbeat_registry", None),
+            "state_store": getattr(self, "_child_task_state_store", None),
+            "task_stale_after_s": float(self.config.system.idle_timeout),
+        }
+        for key, value in optional_kwargs.items():
+            if key not in parameters or value is None:
+                continue
+            orchestrator_kwargs[key] = value
+
+        orchestrator = DynamicOrchestrator(**orchestrator_kwargs)
 
         context = ExecutionContext(
             session_id="orchestrator",
@@ -77,6 +106,7 @@ class OrchestratorAgent:
                     ("media_paths", media_paths),
                     ("context_history_tokens", self.config.system.context_history_tokens),
                     ("stream_callback", stream_callback),
+                    ("runtime_event_callback", runtime_event_callback),
                 ] if v is not None
             },
         )
@@ -99,6 +129,7 @@ class OrchestratorAgent:
         heartbeat: Heartbeat | None = None,
         media_paths: list[str] | None = None,
         stream_callback: StreamTextCallback | None = None,
+        runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> TaskResponse:
         if not self._initialized:
             async with self._init_lock:
@@ -132,6 +163,7 @@ class OrchestratorAgent:
                 user_input, tape=tape, heartbeat=heartbeat,
                 media_paths=media_paths,
                 stream_callback=stream_callback,
+                runtime_event_callback=runtime_event_callback,
             )
             if heartbeat is not None:
                 heartbeat.beat()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import contextvars
+import datetime
 import importlib
 import importlib.util
 import inspect
@@ -15,7 +16,6 @@ import re
 import shlex
 import shutil
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,12 +141,14 @@ class CallableTool:
         description: str,
         schema: dict[str, Any],
         preset_kwargs: dict[str, Any] | None = None,
+        resource_manager: ResourceManager | None = None,
     ):
         self._func = func
         self._name = name
         self._description = description
         self._schema = schema
         self._preset_kwargs = dict(preset_kwargs or {})
+        self._resource_manager = resource_manager
 
     @property
     def name(self) -> str:
@@ -176,8 +178,10 @@ class CallableTool:
                 # (e.g. result_image.jpg) resolve inside the workspace.
                 loop = asyncio.get_running_loop()
                 ctx = contextvars.copy_context()
-                mgr = ResourceManager.get_instance()
-                write_root = mgr._get_active_write_root()
+                if self._resource_manager is not None:
+                    write_root = self._resource_manager._get_active_write_root()
+                else:
+                    write_root = Path.cwd().resolve()
                 artifact_base = write_root
 
                 def _run_in_workspace() -> Any:
@@ -209,21 +213,18 @@ class CallableTool:
             return json.dumps(value, ensure_ascii=False, indent=2)
         return str(value)
 
-    @staticmethod
-    def _current_write_root() -> Path:
-        try:
-            return ResourceManager.get_instance()._get_active_write_root()
-        except RuntimeError:
+    def _current_write_root(self) -> Path:
+        if self._resource_manager is None:
             return Path.cwd().resolve()
+        return self._resource_manager._get_active_write_root()
 
-    @classmethod
     def _collect_artifacts(
-        cls,
+        self,
         value: Any,
         *,
         base_dir: Path | None = None,
     ) -> list[str]:
-        root = (base_dir or cls._current_write_root()).resolve()
+        root = (base_dir or self._current_write_root()).resolve()
         found: list[str] = []
         seen: set[str] = set()
 
@@ -268,27 +269,70 @@ class CallableTool:
         return found
 
 
+class ResourceCatalog:
+    """Read-only resource lookup surface exposed to orchestration."""
+
+    def __init__(self, manager: ResourceManager) -> None:
+        self._manager = manager
+
+    def get_resource_briefs(self) -> list[dict[str, Any]]:
+        return self._manager._get_resource_briefs()
+
+    def resolve_resource_scope(
+        self,
+        resource_id: str,
+        require_tools: bool = False,
+    ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+        return self._manager._resolve_resource_scope(
+            resource_id=resource_id,
+            require_tools=require_tools,
+        )
+
+    def search_resources(self, query: str | None = None) -> dict[str, Any]:
+        return self._manager._search_resources(query)
+
+
+class WorkerRuntime:
+    """Execution runtime for sub-agent task launches."""
+
+    def __init__(self, manager: ResourceManager) -> None:
+        self._manager = manager
+
+    def get_shared_gateway(self) -> "OpenAICompatibleGateway":
+        return self._manager._get_shared_gateway()
+
+    async def run_subagent_task(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        tape: "Tape | None" = None,
+        tape_store: "TapeStore | None" = None,
+        heartbeat: "Heartbeat | None" = None,
+        media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
+    ) -> tuple[str, list[str]]:
+        return await self._manager._run_subagent_task(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+            tape=tape,
+            tape_store=tape_store,
+            heartbeat=heartbeat,
+            media_paths=media_paths,
+            skill_ids=skill_ids,
+        )
+
+
 class ResourceManager:
     """Centralized resource manager without external agent frameworks."""
 
-    _instance: "ResourceManager | None" = None
-    _initialized: bool = False
-    _lock = threading.Lock()
     _orchestration_tools = {"create_worker", "dispatch_workers"}
     _MEDIA_PATH_RE = re.compile(
         r"(?:^|[\s'\"(])((?:/~|[~/])?[\w./]+(?:\.(?:png|jpg|jpeg|gif|bmp|webp|pdf|txt|md|json|yaml|yml|csv|xlsx|pptx|docx|mp4|mp3|wav)))"
     )
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> "ResourceManager":
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self, config: Config | None = None):
-        if ResourceManager._initialized:
-            return
         self.config = config or Config()
         self.registry = ToolRegistry()
         self.groups: dict[str, ToolGroup] = {}
@@ -302,6 +346,8 @@ class ResourceManager:
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
         )
+        self.catalog = ResourceCatalog(self)
+        self.runtime = WorkerRuntime(self)
 
         # Keep task-file management available even in CLI mode; gateway mode
         # later binds the live scheduler onto the same manager instance.
@@ -310,7 +356,6 @@ class ResourceManager:
         self.scheduled_task_manager = ScheduledTaskManager(self.config)
         self._load_config()
         self._register_builtin_tools()
-        ResourceManager._initialized = True
 
     async def initialize_async(self) -> None:
         """MCP initialization hook."""
@@ -323,6 +368,20 @@ class ResourceManager:
             return None
         await self._register_mcp_servers(mcp_servers)
         return None
+
+    def _catalog_view(self) -> ResourceCatalog:
+        catalog = getattr(self, "catalog", None)
+        if catalog is None:
+            catalog = ResourceCatalog(self)
+            self.catalog = catalog
+        return catalog
+
+    def _runtime_view(self) -> WorkerRuntime:
+        runtime = getattr(self, "runtime", None)
+        if runtime is None:
+            runtime = WorkerRuntime(self)
+            self.runtime = runtime
+        return runtime
 
     async def _register_mcp_servers(self, mcp_servers: dict[str, dict]) -> None:
         for name, server_conf in mcp_servers.items():
@@ -579,6 +638,7 @@ class ResourceManager:
                             name=tool_name,
                             description=spec.description,
                             schema=spec.schema,
+                            resource_manager=self,
                         ),
                         group=group_name,
                     )
@@ -911,6 +971,9 @@ class ResourceManager:
         }
 
     def get_resource_briefs(self) -> list[dict[str, Any]]:
+        return self._catalog_view().get_resource_briefs()
+
+    def _get_resource_briefs(self) -> list[dict[str, Any]]:
         """Build concise resource descriptors for top-level routing."""
         briefs: list[ResourceBrief] = []
         mcp_groups = set(self.mcp_server_groups.values())
@@ -986,6 +1049,16 @@ class ResourceManager:
         resource_id: str,
         require_tools: bool = False,
     ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+        return self._catalog_view().resolve_resource_scope(
+            resource_id=resource_id,
+            require_tools=require_tools,
+        )
+
+    def _resolve_resource_scope(
+        self,
+        resource_id: str,
+        require_tools: bool = False,
+    ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
         """Map resource id to a least-privilege lease and optional skill ids."""
         normalized = (resource_id or "").strip().lower()
         if not normalized:
@@ -1020,6 +1093,9 @@ class ResourceManager:
         self.scheduled_task_manager = manager
 
     def get_shared_gateway(self) -> "OpenAICompatibleGateway":
+        return self._runtime_view().get_shared_gateway()
+
+    def _get_shared_gateway(self) -> "OpenAICompatibleGateway":
         """Return a shared gateway instance, creating it lazily."""
         if self._shared_gateway is None:
             from .model_gateway import OpenAICompatibleGateway as _GW
@@ -1047,6 +1123,7 @@ class ResourceManager:
                 description=(inspect.getdoc(func) or "").splitlines()[0] if inspect.getdoc(func) else name,
                 schema=self._json_schema_for_callable(func),
                 preset_kwargs=preset_kwargs,
+                resource_manager=self,
             ),
             group=group_name,
         )
@@ -1134,6 +1211,9 @@ class ResourceManager:
         return list(self.registry.tool_schemas(lease))
 
     def search_resources(self, query: str | None = None) -> dict[str, Any]:
+        return self._catalog_view().search_resources(query)
+
+    def _search_resources(self, query: str | None = None) -> dict[str, Any]:
         keyword = (query or "").strip().lower()
         groups = [
             {
@@ -1206,6 +1286,28 @@ class ResourceManager:
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
     ) -> tuple[str, list[str]]:
+        return await self._runtime_view().run_subagent_task(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+            tape=tape,
+            tape_store=tape_store,
+            heartbeat=heartbeat,
+            media_paths=media_paths,
+            skill_ids=skill_ids,
+        )
+
+    async def _run_subagent_task(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        tape: "Tape | None" = None,
+        tape_store: "TapeStore | None" = None,
+        heartbeat: "Heartbeat | None" = None,
+        media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
+    ) -> tuple[str, list[str]]:
         write_root = self._get_output_dir()
         token = self._active_write_root.set(str(write_root))
         started = time.perf_counter()
@@ -1267,7 +1369,7 @@ class ResourceManager:
                 tools=self.registry,
                 sys_prompt=sys_prompt,
                 skill_packs=executor_skills,
-                gateway=self.get_shared_gateway(),
+                gateway=self._get_shared_gateway(),
             )
             exec_context = ExecutionContext(
                 session_id=agent_name,
@@ -1441,6 +1543,32 @@ class ResourceManager:
             )
         return resolved_channel, resolved_chat_id
 
+    @staticmethod
+    def _anchor_delay_to_request_time(
+        *,
+        delay_seconds: float | None,
+        run_at: str | None,
+    ) -> tuple[float | None, str | None]:
+        if delay_seconds is None or run_at is not None:
+            return delay_seconds, run_at
+
+        from .channels.tools import ChannelToolContext
+
+        ctx = ChannelToolContext.get_current()
+        if ctx is None:
+            return delay_seconds, run_at
+        raw_received_at = (ctx.metadata or {}).get("request_received_at")
+        if not isinstance(raw_received_at, str) or not raw_received_at.strip():
+            return delay_seconds, run_at
+        received_at = raw_received_at.strip()
+        if received_at.endswith("Z"):
+            received_at = received_at[:-1] + "+00:00"
+        base = datetime.datetime.fromisoformat(received_at)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=datetime.datetime.now().astimezone().tzinfo)
+        anchored = base.astimezone() + datetime.timedelta(seconds=float(delay_seconds))
+        return None, anchored.isoformat(timespec="seconds")
+
     def list_scheduled_tasks_tool(self) -> Any:
         def list_scheduled_tasks() -> str:
             """List all scheduled tasks from the workspace task file."""
@@ -1471,6 +1599,10 @@ class ResourceManager:
             """
             channel_name, target_chat_id = self._resolve_scheduled_task_target(
                 channel, chat_id
+            )
+            delay_seconds, run_at = self._anchor_delay_to_request_time(
+                delay_seconds=delay_seconds,
+                run_at=run_at,
             )
             task = self._require_scheduled_task_manager().create_task(
                 name=name,
@@ -1511,6 +1643,10 @@ class ResourceManager:
             """
             channel_name, target_chat_id = self._resolve_scheduled_task_target(
                 channel, chat_id
+            )
+            delay_seconds, run_at = self._anchor_delay_to_request_time(
+                delay_seconds=delay_seconds,
+                run_at=run_at,
             )
             task = self._require_scheduled_task_manager().save_task(
                 name=name,
@@ -1556,6 +1692,10 @@ class ResourceManager:
                     )
                 except RuntimeError:
                     pass
+            delay_seconds, run_at = self._anchor_delay_to_request_time(
+                delay_seconds=delay_seconds,
+                run_at=run_at,
+            )
             task = self._require_scheduled_task_manager().update_task(
                 name=name,
                 prompt=prompt,
@@ -1701,12 +1841,6 @@ class ResourceManager:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.reset()
-
-    @classmethod
-    def get_instance(cls) -> "ResourceManager":
-        if cls._instance is None:
-            raise RuntimeError("ResourceManager not initialized yet")
-        return cls._instance
 
     def _resolve_workspace_file(self, file_path: str) -> tuple[str | None, str | None]:
         ws = self.config.workspace_dir.resolve()
