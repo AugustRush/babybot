@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -95,9 +96,10 @@ class OrchestratorAgent:
             orchestrator_kwargs[key] = value
 
         orchestrator = DynamicOrchestrator(**orchestrator_kwargs)
+        flow_id = f"orchestrator:{uuid.uuid4().hex[:12]}"
 
         context = ExecutionContext(
-            session_id="orchestrator",
+            session_id=flow_id,
             state={
                 k: v for k, v in [
                     ("tape", tape),

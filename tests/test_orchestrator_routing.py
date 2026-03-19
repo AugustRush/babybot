@@ -6,7 +6,13 @@ import asyncio
 from typing import Any
 from unittest.mock import patch
 
-from babybot.agent_kernel import ExecutionContext, ModelRequest, ModelResponse, ModelToolCall
+from babybot.agent_kernel import (
+    ExecutionContext,
+    ModelRequest,
+    ModelResponse,
+    ModelToolCall,
+)
+from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
 from babybot.orchestrator import OrchestratorAgent
 
 
@@ -250,3 +256,81 @@ def test_answer_with_dag_passes_runtime_event_callback_and_shared_runtime_adapte
     assert seen["task_heartbeat_registry"] is agent._task_heartbeat_registry
     assert seen["state_store"] is agent._child_task_state_store
     assert seen["task_stale_after_s"] == 30
+
+
+def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:
+    class _RepeatableDispatchGateway(_FakeGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext,
+        ) -> ModelResponse:
+            del context
+            step = self._call_idx % 3
+            self._call_idx += 1
+            if step == 0:
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c1",
+                            name="dispatch_task",
+                            arguments={
+                                "resource_id": "skill.weather-query",
+                                "description": "查询杭州天气",
+                            },
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if step == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c2",
+                            name="wait_for_tasks",
+                            arguments={"task_ids": [self._task_id]},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="c3",
+                        name="reply_to_user",
+                        arguments={"text": "杭州多云 16℃"},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+
+    async def _capture(events: list[dict[str, Any]], event: dict[str, Any]) -> None:
+        events.append(dict(event))
+
+    rm = _FakeResourceManager()
+    agent = _make_agent(_RepeatableDispatchGateway(), rm)
+    agent._child_task_bus = InMemoryChildTaskBus()
+
+    first_events: list[dict[str, Any]] = []
+    second_events: list[dict[str, Any]] = []
+
+    asyncio.run(agent._answer_with_dag(
+        "先告诉我杭州天气",
+        runtime_event_callback=lambda event: _capture(first_events, event),
+    ))
+    asyncio.run(agent._answer_with_dag(
+        "再告诉我杭州天气",
+        runtime_event_callback=lambda event: _capture(second_events, event),
+    ))
+
+    assert [event["event"] for event in first_events] == ["queued", "started", "succeeded"]
+    assert [event["event"] for event in second_events] == ["queued", "started", "succeeded"]
+    assert first_events[0]["flow_id"] != second_events[0]["flow_id"]
