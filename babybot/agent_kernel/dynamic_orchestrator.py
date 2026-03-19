@@ -130,6 +130,24 @@ _SYSTEM_PROMPT_ROLE = (
     "6. 禁止虚构执行结果；需要外部信息必须通过 dispatch_task 获取"
 )
 
+_DEFERRED_TASK_PATTERNS = (
+    "两分钟后",
+    "一分钟后",
+    "稍后",
+    "待会",
+    "过会",
+    "定时",
+    "预约",
+    "提醒我",
+    "之后再",
+)
+
+_DEFERRED_TASK_GUIDANCE = (
+    "\n\n延时/未来任务规则：\n"
+    "7. 如果用户要求稍后、几分钟后、定时或未来某个时间执行动作，当前只应创建/更新定时任务，不要立刻执行未来动作。\n"
+    "8. 未来一次性任务的描述必须自包含，写入定时任务时要包含届时需要完成的完整步骤，不能依赖当前这次对话还保存在上下文中。"
+)
+
 
 def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
     lines: list[str] = []
@@ -145,6 +163,11 @@ def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
     if not lines:
         return "\n可用资源：无"
     return "\n可用资源：\n" + "\n".join(lines)
+
+
+def _needs_deferred_task_guidance(goal: str) -> bool:
+    lowered = (goal or "").strip()
+    return any(pattern in lowered for pattern in _DEFERRED_TASK_PATTERNS)
 
 
 @dataclass(frozen=True)
@@ -800,6 +823,8 @@ class DynamicOrchestrator:
         media_paths = context.state.get("media_paths") or ()
 
         system_parts = [_SYSTEM_PROMPT_ROLE, _build_resource_catalog(briefs)]
+        if _needs_deferred_task_guidance(goal):
+            system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
         if history:
             system_parts.append(f"\n{history}")
 

@@ -128,6 +128,21 @@ def test_plain_text_response() -> None:
     assert result.conclusion == "直接回答"
 
 
+def test_system_prompt_adds_future_task_guard_for_deferred_requests() -> None:
+    gateway = DummyGateway([])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+
+    messages = orch._build_initial_messages(  # type: ignore[attr-defined]
+        "先查询杭州天气，然后过两分钟后给我发一段画面描述，再根据描述画图",
+        ExecutionContext(),
+    )
+
+    system_prompt = messages[0].content
+    assert "不要立刻执行未来动作" in system_prompt
+    assert "未来一次性任务的描述必须自包含" in system_prompt
+
+
 def test_single_task() -> None:
     """dispatch → wait → reply with result."""
     # Step 1: model dispatches a task
