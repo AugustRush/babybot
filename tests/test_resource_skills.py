@@ -1,10 +1,12 @@
 import asyncio
 import contextvars
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from babybot.agent_kernel import TaskResult, ToolLease
-from babybot.resource import LoadedSkill, ResourceManager, ToolGroup
+from babybot.agent_kernel.tools import ToolContext
+from babybot.resource import CallableTool, LoadedSkill, ResourceManager, ToolGroup
 
 
 def test_parse_frontmatter_from_skill_markdown() -> None:
@@ -310,6 +312,62 @@ def test_run_subagent_task_returns_collected_media_from_context(
     assert media == [str(image_path.resolve())]
 
 
+def test_run_subagent_task_propagates_channel_context_to_worker_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from babybot.channels.tools import ChannelToolContext
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test",
+        default=str(tmp_path),
+    )
+    manager._get_output_dir = lambda: tmp_path
+    manager._build_task_lease = lambda lease: ToolLease()
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+    seen: dict[str, object] = {}
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del task
+            seen["channel_context"] = context.state.get("channel_context")
+            return TaskResult(task_id="worker", status="succeeded", output="done")
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    parent_ctx = ChannelToolContext(
+        channel_name="feishu",
+        chat_id="oc_test",
+        sender_id="u1",
+    )
+    ChannelToolContext.set_current(parent_ctx)
+    try:
+        asyncio.run(manager.run_subagent_task("schedule something"))
+    finally:
+        ChannelToolContext.set_current(None)
+
+    assert seen["channel_context"] is parent_ctx
+
+
 def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
@@ -447,3 +505,33 @@ def test_save_scheduled_task_anchors_delay_to_request_received_time() -> None:
     assert captured["chat_id"] == "oc_test"
     assert captured["delay_seconds"] is None
     assert captured["run_at"] == "2026-03-18T17:56:27+08:00"
+
+
+def test_callable_tool_does_not_treat_long_json_text_as_artifact_path() -> None:
+    payload = {
+        "name": "杭州西湖画作描述消息",
+        "prompt": "发送飞书消息：一幅描绘杭州西湖美景的画作",
+        "schedule": {"run_at": "2026-03-19T11:41:23+08:00"},
+        "target": {
+            "channel": "feishu",
+            "chat_id": "oc_cfcc4eb536ba962ffc1f58a3d4c51279",
+        },
+        "enabled": True,
+        "_action": "created",
+    }
+
+    def return_long_json_text() -> str:
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    tool = CallableTool(
+        func=return_long_json_text,
+        name="return_long_json_text",
+        description="return json text",
+        schema={"type": "object", "properties": {}},
+    )
+
+    result = asyncio.run(tool.invoke({}, ToolContext(session_id="s1", state={})))
+
+    assert result.ok is True
+    assert '"_action": "created"' in result.content
+    assert result.artifacts == []

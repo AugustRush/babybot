@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import uuid
@@ -198,6 +199,8 @@ class InMemoryChildTaskBus:
     async def subscribe(self, flow_id: str) -> AsyncIterator[ChildTaskEvent]:
         queue: asyncio.Queue[ChildTaskEvent] = asyncio.Queue()
         self._subscribers.setdefault(flow_id, []).append(queue)
+        for event in self._events.get(flow_id, ()):
+            queue.put_nowait(event)
         try:
             while True:
                 yield await queue.get()
@@ -490,6 +493,7 @@ class InProcessChildTaskRuntime:
         child_context = ContextManager(context).fork(
             session_id=f"{context.session_id}:{task_id}",
         )
+        child_context.state["upstream_results"] = context.state.setdefault("upstream_results", {})
         child_context.state["heartbeat"] = self._task_heartbeat_registry.handle(
             flow_id,
             task_id,
@@ -501,7 +505,11 @@ class InProcessChildTaskRuntime:
                 flow_id=flow_id,
                 task_id=task_id,
                 event="queued",
-                payload={"resource_id": resource_id, "deps": list(deps)},
+                payload={
+                    "resource_id": resource_id,
+                    "description": description,
+                    "deps": list(deps),
+                },
             )
         )
         self._update_task_state(
@@ -523,7 +531,15 @@ class InProcessChildTaskRuntime:
                 while True:
                     attempt += 1
                     await self._child_task_bus.publish(
-                        ChildTaskEvent(flow_id=flow_id, task_id=task_id, event="started")
+                        ChildTaskEvent(
+                            flow_id=flow_id,
+                            task_id=task_id,
+                            event="started",
+                            payload={
+                                "resource_id": resource_id,
+                                "description": description,
+                            },
+                        )
                     )
                     self._update_task_state(
                         task_id,
@@ -571,7 +587,13 @@ class InProcessChildTaskRuntime:
                                 flow_id=flow_id,
                                 task_id=task_id,
                                 event="succeeded",
-                                payload={"status": result.status, "error": result.error},
+                                payload={
+                                    "resource_id": resource_id,
+                                    "description": description,
+                                    "status": result.status,
+                                    "output": result.output,
+                                    "error": result.error,
+                                },
                             )
                         )
                         child_media = child_context.state.get("media_paths_collected", [])
@@ -598,6 +620,8 @@ class InProcessChildTaskRuntime:
                                 task_id=task_id,
                                 event="retrying",
                                 payload={
+                                    "resource_id": resource_id,
+                                    "description": description,
                                     "attempt": attempt,
                                     "max_attempts": max_attempts,
                                     "error": result.error,
@@ -623,6 +647,8 @@ class InProcessChildTaskRuntime:
                             task_id=task_id,
                             event="dead_lettered",
                             payload={
+                                "resource_id": resource_id,
+                                "description": description,
                                 "status": final_result.status,
                                 "error": final_result.error,
                                 "attempts": final_result.attempts,
@@ -748,6 +774,7 @@ class DynamicOrchestrator:
         task_counter = 0
         heartbeat = context.state.get("heartbeat")
         reply_text: str | None = None
+        scheduler_handoff_created = False
         flow_id = context.session_id or "orchestrator"
         runtime = InProcessChildTaskRuntime(
             flow_id=flow_id,
@@ -787,12 +814,31 @@ class DynamicOrchestrator:
                 ))
 
                 # Process each tool call
+                scheduler_dispatch_succeeded_this_turn = False
+                prior_live_task_ids_this_turn: list[str] = []
+                scheduler_dispatch_present_this_turn = any(
+                    tc.name == "dispatch_task"
+                    and tc.arguments.get("resource_id") == "group.scheduler"
+                    for tc in response.tool_calls
+                )
                 for tc in response.tool_calls:
                     result_text = await self._dispatch_tool(
-                        tc, runtime, context, task_counter,
+                        tc,
+                        runtime,
+                        context,
+                        task_counter,
+                        scheduler_handoff_created=scheduler_handoff_created,
+                        scheduler_dispatch_present_this_turn=scheduler_dispatch_present_this_turn,
+                        scheduler_dispatch_seen_before_call=scheduler_dispatch_succeeded_this_turn,
+                        prior_live_task_ids_this_turn=tuple(prior_live_task_ids_this_turn),
                     )
                     if tc.name == "dispatch_task" and not result_text.startswith("error:"):
                         task_counter += 1
+                        resource_id = tc.arguments.get("resource_id")
+                        if resource_id == "group.scheduler":
+                            scheduler_dispatch_succeeded_this_turn = True
+                        else:
+                            prior_live_task_ids_this_turn.append(result_text)
                     messages.append(ModelMessage(
                         role="tool",
                         content=result_text,
@@ -800,6 +846,9 @@ class DynamicOrchestrator:
                     ))
                     if tc.name == "reply_to_user":
                         reply_text = tc.arguments.get("text", result_text)
+
+                if scheduler_dispatch_succeeded_this_turn:
+                    scheduler_handoff_created = True
 
                 if reply_text is not None:
                     runtime.cancel_all()
@@ -868,6 +917,11 @@ class DynamicOrchestrator:
         runtime: InProcessChildTaskRuntime,
         context: ExecutionContext,
         task_counter: int,
+        *,
+        scheduler_handoff_created: bool,
+        scheduler_dispatch_present_this_turn: bool,
+        scheduler_dispatch_seen_before_call: bool,
+        prior_live_task_ids_this_turn: tuple[str, ...],
     ) -> str:
         name = tool_call.name
         args = tool_call.arguments
@@ -876,7 +930,34 @@ class DynamicOrchestrator:
             return f"error: invalid arguments: {args.get('__raw_arguments__', '')}"
 
         if name == "dispatch_task":
-            return await runtime.dispatch(args, task_counter=task_counter, context=context)
+            dispatch_args = dict(args)
+            resource_id = str(dispatch_args.get("resource_id", "") or "")
+            if (
+                resource_id == "group.scheduler"
+                and not dispatch_args.get("deps")
+                and prior_live_task_ids_this_turn
+            ):
+                dispatch_args["deps"] = list(prior_live_task_ids_this_turn)
+            if scheduler_handoff_created and resource_id != "group.scheduler":
+                return (
+                    "error: scheduled handoff already created in this flow; "
+                    "do not dispatch additional live tasks after scheduling future work"
+                )
+            if scheduler_dispatch_seen_before_call and resource_id != "group.scheduler":
+                return (
+                    "error: scheduled handoff was already created earlier in this turn; "
+                    "do not dispatch additional live tasks after it"
+                )
+            if (
+                runtime.results
+                and scheduler_dispatch_present_this_turn
+                and resource_id != "group.scheduler"
+            ):
+                return (
+                    "error: scheduled handoff is being created for a later stage; "
+                    "do not mix new live tasks into the same turn"
+                )
+            return await runtime.dispatch(dispatch_args, task_counter=task_counter, context=context)
         if name == "wait_for_tasks":
             return await runtime.wait_for_tasks(args.get("task_ids", []))
         if name == "get_task_result":
@@ -888,10 +969,10 @@ class DynamicOrchestrator:
     async def _forward_runtime_events(
         self,
         flow_id: str,
-        callback: Callable[[ChildTaskEvent], Any],
+        callback: Callable[[dict[str, Any]], Any],
     ) -> None:
         async for event in self._child_task_bus.subscribe(flow_id):
-            result = callback(event)
+            result = callback(dataclasses.asdict(event))
             if inspect.isawaitable(result):
                 await result
 

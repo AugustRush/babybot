@@ -120,6 +120,24 @@ class MessageBus:
     def _is_scheduled(msg: InboundMessage) -> bool:
         return bool((msg.metadata or {}).get("scheduled_task"))
 
+    @staticmethod
+    def _format_runtime_progress_text(event_payload: dict[str, Any]) -> str:
+        event = str(event_payload.get("event", "") or "").strip().lower()
+        payload = dict(event_payload.get("payload") or {})
+        description = str(payload.get("description", "") or "").strip()
+        output = str(payload.get("output", "") or "").strip()
+        error = str(payload.get("error", "") or "").strip()
+
+        if event == "succeeded" and output:
+            if description:
+                return f"阶段完成：{description}\n结果：{output}"
+            return f"阶段完成：{output}"
+        if event in {"failed", "dead_lettered", "stalled"} and error:
+            if description:
+                return f"阶段异常：{description}\n原因：{error}"
+            return f"阶段异常：{error}"
+        return ""
+
     async def start(self) -> None:
         """Start the consumer loop."""
         if self._running:
@@ -259,6 +277,7 @@ class MessageBus:
         stream_message_id: str | None = None
         stream_last_patched = ""
         stream_lock = asyncio.Lock()
+        stream_detached = False
         stream_cfg = getattr(channel, "config", None)
         stream_enabled = bool(
             channel
@@ -270,12 +289,12 @@ class MessageBus:
         )
 
         async def _stream_callback(accumulated_text: str) -> None:
-            nonlocal stream_message_id, stream_last_patched
+            nonlocal stream_message_id, stream_last_patched, stream_detached
             text = (accumulated_text or "").strip()
             if not text:
                 return
             async with stream_lock:
-                if not stream_enabled or channel is None:
+                if not stream_enabled or channel is None or stream_detached:
                     return
                 if stream_message_id is None:
                     stream_message_id = await channel.create_stream_message(  # type: ignore[attr-defined]
@@ -301,6 +320,7 @@ class MessageBus:
         runtime_events: list[dict[str, Any]] = []
 
         async def _runtime_event_callback(event: Any) -> None:
+            nonlocal stream_detached
             if dataclasses.is_dataclass(event):
                 payload = dataclasses.asdict(event)
             elif isinstance(event, dict):
@@ -313,6 +333,9 @@ class MessageBus:
                     "payload": dict(getattr(event, "payload", {}) or {}),
                 }
             runtime_events.append(payload)
+            stream_detached = True
+            if isinstance(msg.metadata, dict):
+                msg.metadata["_runtime_events"] = list(runtime_events)
             logger.info(
                 "Runtime event channel=%s chat_id=%s flow_id=%s task_id=%s event=%s",
                 msg.channel,
@@ -321,6 +344,24 @@ class MessageBus:
                 payload.get("task_id", ""),
                 payload.get("event", ""),
             )
+            progress_text = self._format_runtime_progress_text(payload)
+            if not progress_text or channel is None:
+                return
+            try:
+                await channel.send_response(
+                    msg.chat_id,
+                    TaskResponse(text=progress_text),
+                    sender_id=msg.sender_id,
+                    metadata=msg.metadata,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to send runtime progress channel=%s chat_id=%s event=%s",
+                    msg.channel,
+                    msg.chat_id,
+                    payload.get("event", ""),
+                    exc_info=True,
+                )
 
         if stream_enabled:
             try:
@@ -373,7 +414,7 @@ class MessageBus:
         if channel:
             try:
                 streamed = bool(stream_message_id)
-                if streamed and response.text.strip():
+                if streamed and not stream_detached and response.text.strip():
                     final_text = response.text.strip()
                     if stream_last_patched != final_text:
                         patched = await channel.patch_stream_message(  # type: ignore[attr-defined]
@@ -382,14 +423,14 @@ class MessageBus:
                         )
                         if patched:
                             stream_last_patched = final_text
-                if streamed and response.media_paths:
+                if streamed and not stream_detached and response.media_paths:
                     await channel.send_response(
                         msg.chat_id,
                         TaskResponse(text="", media_paths=list(response.media_paths)),
                         sender_id=msg.sender_id,
                         metadata=msg.metadata,
                     )
-                elif not streamed:
+                elif not streamed or stream_detached:
                     await channel.send_response(
                         msg.chat_id,
                         response,
@@ -401,7 +442,7 @@ class MessageBus:
 
         elapsed = time.perf_counter() - start
         if runtime_events and isinstance(msg.metadata, dict):
-            msg.metadata.setdefault("_runtime_events", []).extend(runtime_events)
+            msg.metadata["_runtime_events"] = list(runtime_events)
         logger.info(
             "Bus handled message channel=%s chat_id=%s elapsed=%.2fs text_len=%d media=%d",
             msg.channel,

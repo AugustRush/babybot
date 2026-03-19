@@ -59,7 +59,7 @@ class ContextManager:
     # resources (e.g. sqlite3.Connection inside TapeStore).
     # They are passed by reference to child contexts instead of deep-copied.
     _SHARED_STATE_KEYS = frozenset((
-        "tape", "tape_store",
+        "tape", "tape_store", "upstream_results",
     ))
     _OMITTED_STATE_KEYS = frozenset(("heartbeat",))
 
