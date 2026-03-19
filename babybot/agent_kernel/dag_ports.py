@@ -147,15 +147,25 @@ class ResourceBridgeExecutor:
             )
 
         resource_id = task.metadata.get("resource_id", "")
-        scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
-        if scope is None:
-            return TaskResult(
-                task_id=task.task_id,
-                status="failed",
-                error=f"Unknown or unavailable resource: {resource_id}",
-            )
-
-        lease_dict, skill_ids = scope
+        lease_to_dict = getattr(self._rm, "_lease_to_dict", None)
+        if callable(lease_to_dict):
+            lease_dict = lease_to_dict(task.lease)
+        else:
+            lease_dict = {
+                "include_groups": list(task.lease.include_groups),
+                "include_tools": list(task.lease.include_tools),
+                "exclude_tools": list(task.lease.exclude_tools),
+            }
+        skill_ids = tuple(task.metadata.get("skill_ids", ()) or ())
+        if not any(lease_dict.values()) and resource_id:
+            scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
+            if scope is None:
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=f"Unknown or unavailable resource: {resource_id}",
+                )
+            lease_dict, skill_ids = scope
 
         # Enrich task description with upstream results
         enriched = self._enrich_with_upstream(task, context)

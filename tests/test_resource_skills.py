@@ -1,6 +1,8 @@
 import asyncio
 import contextvars
 import json
+import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,6 +119,144 @@ def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
     group, tools = manager._register_skill_tools("text-to-image", skill_dir)
     assert group == "skill_text_to_image"
     assert any(name.endswith("__generate_image") for name in tools)
+
+
+def test_register_skill_tools_skips_cli_main_function(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {"resolve_workspace_path": staticmethod(lambda value: str(value))},
+    )()
+    skill_dir = tmp_path / "ocr_helper"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "tool_impl.py").write_text(
+        "def recognize_text(file_path: str) -> str:\n"
+        "    return file_path\n\n"
+        "def main() -> None:\n"
+        "    raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+
+    group, tools = manager._register_skill_tools("ocr-helper", skill_dir)
+
+    assert group == "skill_ocr_helper"
+    assert "ocr_helper__recognize_text" in tools
+    assert "ocr_helper__main" not in tools
+    assert manager.registry.get("ocr_helper__main") is None
+
+
+def test_register_skill_tools_registers_cli_script_proxy(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {"resolve_workspace_path": staticmethod(lambda value: str(value))},
+    )()
+    skill_dir = tmp_path / "image_cli"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "generate_image.py").write_text(
+        "import argparse\n"
+        "def parse_arguments():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('-p', '--prompt', required=True)\n"
+        "    parser.add_argument('--count', type=int, default=1)\n"
+        "    parser.add_argument('--verbose', action='store_true')\n"
+        "    return parser.parse_args()\n\n"
+        "def main():\n"
+        "    args = parse_arguments()\n"
+        "    print(f'{args.prompt}|{args.count}|{args.verbose}')\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+
+    group, tools = manager._register_skill_tools("image-cli", skill_dir)
+
+    assert group == "skill_image_cli"
+    assert "image_cli__generate_image" in tools
+    assert "image_cli__parse_arguments" not in tools
+    reg = manager.registry.get("image_cli__generate_image")
+    assert reg is not None
+    assert reg.tool.schema["properties"]["prompt"]["type"] == "string"
+    assert reg.tool.schema["properties"]["count"]["type"] == "integer"
+    assert reg.tool.schema["properties"]["verbose"]["type"] == "boolean"
+
+
+def test_cli_script_proxy_invokes_script_with_named_arguments(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "resolve_workspace_path": staticmethod(lambda value: str(value)),
+            "workspace_dir": tmp_path,
+            "system": SimpleNamespace(shell_command_timeout=300, python_executable="python3"),
+        },
+    )()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_cli_proxy",
+        default=str(tmp_path),
+    )
+    skill_dir = tmp_path / "image_cli"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "generate_image.py").write_text(
+        "import argparse\n"
+        "def parse_arguments():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('-p', '--prompt', required=True)\n"
+        "    parser.add_argument('--count', type=int, default=1)\n"
+        "    parser.add_argument('--verbose', action='store_true')\n"
+        "    return parser.parse_args()\n\n"
+        "def main():\n"
+        "    args = parse_arguments()\n"
+        "    print(f'{args.prompt}|{args.count}|{args.verbose}')\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+
+    manager._register_skill_tools("image-cli", skill_dir)
+    reg = manager.registry.get("image_cli__generate_image")
+
+    result = asyncio.run(
+        reg.tool.invoke(  # type: ignore[union-attr]
+            {"prompt": "bird", "count": 2, "verbose": True},
+            ToolContext(session_id="test", state={}),
+        )
+    )
+
+    assert result.ok is True
+    assert "bird|2|True" in result.content
+
+
+def test_get_user_python_prefers_path_python3_over_hardcoded_system_python(tmp_path: Path, monkeypatch) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "system": SimpleNamespace(shell_command_timeout=300, python_executable=""),
+            "workspace_dir": tmp_path,
+        },
+    )()
+    monkeypatch.setattr("babybot.resource.shutil.which", lambda name: {
+        "python3": "/Users/test/miniconda3/bin/python3",
+        "python": "/Users/test/miniconda3/bin/python",
+    }.get(name))
+    monkeypatch.setattr("babybot.resource.os.path.isfile", lambda path: path == "/usr/bin/python3")
+    monkeypatch.setattr("babybot.resource.os.access", lambda path, mode: path == "/usr/bin/python3")
+
+    assert manager._get_user_python() == "/Users/test/miniconda3/bin/python3"
 
 
 def test_select_skill_packs_loads_all_active_skills() -> None:
@@ -368,6 +508,48 @@ def test_run_subagent_task_propagates_channel_context_to_worker_context(
     assert seen["channel_context"] is parent_ctx
 
 
+def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
+    manager = object.__new__(ResourceManager)
+    captured: dict[str, object] = {}
+
+    lease_var = contextvars.ContextVar("current_task_lease_test", default=None)
+    skill_ids_var = contextvars.ContextVar("current_skill_ids_test", default=None)
+    lease_var.set(ToolLease(include_groups=("basic", "skill_auto_skill_creator")))
+    skill_ids_var.set(("auto-skill-creator",))
+    manager._current_task_lease = lease_var
+    manager._current_skill_ids = skill_ids_var
+    manager._lease_to_dict = ResourceManager._lease_to_dict
+
+    async def _run_subagent_task(
+        task_description: str,
+        lease: dict[str, object] | None = None,
+        agent_name: str = "Worker",
+        tape=None,
+        tape_store=None,
+        heartbeat=None,
+        media_paths=None,
+        skill_ids=None,
+    ) -> tuple[str, list[str]]:
+        del tape, tape_store, heartbeat, media_paths
+        captured["task_description"] = task_description
+        captured["lease"] = lease
+        captured["agent_name"] = agent_name
+        captured["skill_ids"] = skill_ids
+        return "done", []
+
+    manager.run_subagent_task = _run_subagent_task
+
+    text = asyncio.run(
+        manager.create_worker_tool()("inspect the project homepage")
+    )
+
+    assert text == "done"
+    assert captured["task_description"] == "inspect the project homepage"
+    assert captured["agent_name"] == "Worker"
+    assert captured["lease"] == {"include_groups": ["basic", "skill_auto_skill_creator"]}
+    assert captured["skill_ids"] == ["auto-skill-creator"]
+
+
 def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
@@ -535,3 +717,43 @@ def test_callable_tool_does_not_treat_long_json_text_as_artifact_path() -> None:
     assert result.ok is True
     assert '"_action": "created"' in result.content
     assert result.artifacts == []
+
+
+def test_callable_tool_relocates_external_artifact_into_workspace_output(tmp_path: Path) -> None:
+    workspace_output = tmp_path / "output"
+    workspace_output.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(b"png-bytes")
+        external_path = Path(f.name).resolve()
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(workspace_dir=tmp_path)
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_artifact_relocation",
+        default=str(workspace_output),
+    )
+    manager._get_output_dir = lambda: workspace_output
+
+    def return_external_path() -> str:
+        return str(external_path)
+
+    tool = CallableTool(
+        func=return_external_path,
+        name="return_external_path",
+        description="return external image path",
+        schema={"type": "object", "properties": {}},
+        resource_manager=manager,
+    )
+
+    try:
+        result = asyncio.run(tool.invoke({}, ToolContext(session_id="s1", state={})))
+    finally:
+        if external_path.exists():
+            external_path.unlink()
+
+    assert result.ok is True
+    assert len(result.artifacts) == 1
+    relocated = Path(result.artifacts[0])
+    assert relocated.parent == workspace_output.resolve()
+    assert relocated.name == external_path.name
+    assert relocated.read_bytes() == b"png-bytes"

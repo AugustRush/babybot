@@ -89,6 +89,23 @@ def test_to_openai_message_missing_image_file():
     assert result["content"][0] == {"type": "text", "text": "看图"}
 
 
+def test_to_openai_message_skips_non_image_media_file(tmp_path: Path):
+    """Non-image attachments like PDF must not be sent as image_url parts."""
+    pdf_path = tmp_path / "doc.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%fake\n")
+
+    msg = ModelMessage(
+        role="user",
+        content="识别这个文件",
+        images=(str(pdf_path),),
+    )
+
+    result = OpenAICompatibleGateway._to_openai_message(msg)
+
+    assert isinstance(result["content"], list)
+    assert result["content"] == [{"type": "text", "text": "识别这个文件"}]
+
+
 # ── Executor media_paths → ModelMessage.images ──
 
 

@@ -43,7 +43,12 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                 "properties": {
                     "resource_id": {
                         "type": "string",
-                        "description": "资源ID，必须来自可用资源列表",
+                        "description": "单个资源ID，必须来自可用资源列表",
+                    },
+                    "resource_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "当一个子任务需要多种能力时，传入多个资源ID并合并使用",
                     },
                     "description": {
                         "type": "string",
@@ -56,7 +61,7 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                         "default": [],
                     },
                 },
-                "required": ["resource_id", "description"],
+                "required": ["description"],
             },
         },
     },
@@ -128,7 +133,9 @@ _SYSTEM_PROMPT_ROLE = (
     "3. 可并行的任务 → 同时 dispatch 多个（不设deps），再 wait_for_tasks 全部等待\n"
     "4. 有依赖的任务 → 在 deps 中声明依赖，任务内部自动等待前置任务完成\n"
     "5. 拿到结果后 → 调用 reply_to_user 汇总并回复用户，reply_to_user 必须单独调用且为最后一步\n"
-    "6. 禁止虚构执行结果；需要外部信息必须通过 dispatch_task 获取"
+    "6. 禁止虚构执行结果；需要外部信息必须通过 dispatch_task 获取\n"
+    "7. 如果单个子任务同时需要多种能力，可在一次 dispatch_task 中使用 resource_ids 组合多个资源。\n"
+    "8. 对于需要查看网页/仓库说明再创建或更新技能的任务，优先在同一个子任务里组合相关技能、browser、必要的 code 资源；不要靠 create_worker 套娃补能力。"
 )
 
 _DEFERRED_TASK_PATTERNS = (
@@ -169,6 +176,21 @@ def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
 def _needs_deferred_task_guidance(goal: str) -> bool:
     lowered = (goal or "").strip()
     return any(pattern in lowered for pattern in _DEFERRED_TASK_PATTERNS)
+
+
+def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
+    raw_multi = args.get("resource_ids")
+    resource_ids: list[str] = []
+    if isinstance(raw_multi, (list, tuple)):
+        resource_ids.extend(
+            str(item).strip()
+            for item in raw_multi
+            if str(item).strip()
+        )
+    single = str(args.get("resource_id", "") or "").strip()
+    if single:
+        resource_ids.append(single)
+    return tuple(dict.fromkeys(resource_ids))
 
 
 @dataclass(frozen=True)
@@ -463,13 +485,17 @@ class InProcessChildTaskRuntime:
         if task_counter >= self._max_tasks:
             return f"error: task limit reached (max {self._max_tasks})"
 
-        resource_id: str = args.get("resource_id", "")
+        resource_ids = _dispatch_resource_ids(args)
         description: str = args.get("description", "")
         deps: list[str] = args.get("deps", [])
-
-        scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
-        if scope is None:
-            return f"error: resource not available: {resource_id}"
+        if not resource_ids:
+            return "error: resource_id or resource_ids is required"
+        resolved_scopes: list[tuple[dict[str, Any], tuple[str, ...]]] = []
+        for resource_id in resource_ids:
+            scope = self._rm.resolve_resource_scope(resource_id, require_tools=True)
+            if scope is None:
+                return f"error: resource not available: {resource_id}"
+            resolved_scopes.append(scope)
 
         for dep in deps:
             if dep not in self._in_flight and dep not in self._results:
@@ -477,18 +503,36 @@ class InProcessChildTaskRuntime:
 
         task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
         flow_id = self._flow_id
-        lease_dict, skill_ids = scope
+        include_groups: set[str] = set()
+        include_tools: set[str] = set()
+        exclude_tools: set[str] = set()
+        merged_skill_ids: list[str] = []
+        seen_skill_ids: set[str] = set()
+        for lease_dict, skill_ids in resolved_scopes:
+            include_groups.update(lease_dict.get("include_groups", ()))
+            include_tools.update(lease_dict.get("include_tools", ()))
+            exclude_tools.update(lease_dict.get("exclude_tools", ()))
+            for skill_id in skill_ids:
+                normalized = str(skill_id).strip()
+                if normalized and normalized not in seen_skill_ids:
+                    seen_skill_ids.add(normalized)
+                    merged_skill_ids.append(normalized)
         lease = ToolLease(
-            include_groups=tuple(lease_dict.get("include_groups", ())),
-            include_tools=tuple(lease_dict.get("include_tools", ())),
-            exclude_tools=tuple(lease_dict.get("exclude_tools", ())),
+            include_groups=tuple(sorted(include_groups)),
+            include_tools=tuple(sorted(include_tools)),
+            exclude_tools=tuple(sorted(exclude_tools)),
         )
+        primary_resource_id = resource_ids[0]
         contract = TaskContract(
             task_id=task_id,
             description=description,
             deps=tuple(deps),
             lease=lease,
-            metadata={"resource_id": resource_id, "skill_ids": list(skill_ids)},
+            metadata={
+                "resource_id": primary_resource_id,
+                "resource_ids": list(resource_ids),
+                "skill_ids": merged_skill_ids,
+            },
         )
         child_context = ContextManager(context).fork(
             session_id=f"{context.session_id}:{task_id}",
@@ -506,7 +550,8 @@ class InProcessChildTaskRuntime:
                 task_id=task_id,
                 event="queued",
                 payload={
-                    "resource_id": resource_id,
+                    "resource_id": primary_resource_id,
+                    "resource_ids": list(resource_ids),
                     "description": description,
                     "deps": list(deps),
                 },
@@ -515,7 +560,8 @@ class InProcessChildTaskRuntime:
         self._update_task_state(
             task_id,
             status="queued",
-            resource_id=resource_id,
+            resource_id=primary_resource_id,
+            resource_ids=list(resource_ids),
             description=description,
             deps=list(deps),
         )
@@ -931,19 +977,20 @@ class DynamicOrchestrator:
 
         if name == "dispatch_task":
             dispatch_args = dict(args)
-            resource_id = str(dispatch_args.get("resource_id", "") or "")
+            resource_ids = _dispatch_resource_ids(dispatch_args)
+            scheduler_dispatch = "group.scheduler" in resource_ids
             if (
-                resource_id == "group.scheduler"
+                scheduler_dispatch
                 and not dispatch_args.get("deps")
                 and prior_live_task_ids_this_turn
             ):
                 dispatch_args["deps"] = list(prior_live_task_ids_this_turn)
-            if scheduler_handoff_created and resource_id != "group.scheduler":
+            if scheduler_handoff_created and not scheduler_dispatch:
                 return (
                     "error: scheduled handoff already created in this flow; "
                     "do not dispatch additional live tasks after scheduling future work"
                 )
-            if scheduler_dispatch_seen_before_call and resource_id != "group.scheduler":
+            if scheduler_dispatch_seen_before_call and not scheduler_dispatch:
                 return (
                     "error: scheduled handoff was already created earlier in this turn; "
                     "do not dispatch additional live tasks after it"
@@ -951,7 +998,7 @@ class DynamicOrchestrator:
             if (
                 runtime.results
                 and scheduler_dispatch_present_this_turn
-                and resource_id != "group.scheduler"
+                and not scheduler_dispatch
             ):
                 return (
                     "error: scheduled handoff is being created for a later stage; "

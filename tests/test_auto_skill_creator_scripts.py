@@ -52,6 +52,44 @@ def test_parse_resources_rejects_unknown_resource_types() -> None:
         raise AssertionError("Expected parse_resources to exit on invalid resource type")
 
 
+def test_parse_resources_ignores_examples_alias() -> None:
+    resources = init_skill.parse_resources("scripts,examples,references")
+
+    assert resources == ["scripts", "references"]
+
+
+def test_parse_resources_accepts_json_stringified_array_items() -> None:
+    resources = init_skill.parse_resources(['["scripts"]', "references"])
+
+    assert resources == ["scripts", "references"]
+
+
+def test_init_skill_accepts_json_stringified_resource_array_items(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "json-array-skill",
+        target="workspace",
+        workspace_skills_dir=tmp_path / "workspace" / "skills",
+        builtin_skills_dir=tmp_path / "builtin" / "skills",
+        resources=['["scripts"]'],
+        include_examples=False,
+    )
+
+    assert (skill_dir / "scripts").is_dir()
+
+
+def test_init_skill_treats_examples_resource_alias_as_include_examples(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "glm ocr",
+        target="workspace",
+        workspace_skills_dir=tmp_path / "workspace" / "skills",
+        builtin_skills_dir=tmp_path / "builtin" / "skills",
+        resources=["scripts", "examples"],
+        include_examples=False,
+    )
+
+    assert (skill_dir / "scripts" / "_example.py").exists()
+
+
 def test_validate_skill_accepts_generated_skill(tmp_path: Path) -> None:
     skill_dir = init_skill.init_skill(
         "validator-skill",
@@ -115,5 +153,50 @@ def test_validate_skill_accepts_current_auto_skill_creator_folder_naming() -> No
     valid, message = quick_validate.validate_skill(
         Path("skills/auto_skill_creator").resolve()
     )
+
+    assert valid, message
+
+
+def test_validate_skill_rejects_public_cli_only_script(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "cli-only-skill",
+        path=tmp_path,
+        resources=["scripts"],
+        include_examples=False,
+    )
+    (skill_dir / "scripts" / "generate_image.py").write_text(
+        "import argparse\n"
+        "def parse_arguments():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('-p', '--prompt', required=True)\n"
+        "    return parser.parse_args()\n\n"
+        "def main():\n"
+        "    args = parse_arguments()\n"
+        "    print(args.prompt)\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+
+    valid, message = quick_validate.validate_skill(skill_dir)
+
+    assert not valid
+    assert "public callable function" in message
+
+
+def test_validate_skill_accepts_public_callable_script(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "callable-skill",
+        path=tmp_path,
+        resources=["scripts"],
+        include_examples=False,
+    )
+    (skill_dir / "scripts" / "generate_image.py").write_text(
+        "def generate_image(prompt: str) -> str:\n"
+        "    return f'img:{prompt}'\n",
+        encoding="utf-8",
+    )
+
+    valid, message = quick_validate.validate_skill(skill_dir)
 
     assert valid, message

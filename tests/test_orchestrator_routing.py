@@ -47,15 +47,27 @@ class _FakeResourceManager:
                 "group": "skill_weather_query",
                 "tool_count": 1,
                 "active": True,
-            }
+            },
+            {
+                "id": "group.browser",
+                "type": "group",
+                "name": "browser",
+                "purpose": "网页浏览",
+                "group": "browser",
+                "tool_count": 1,
+                "active": True,
+            },
         ]
 
     def resolve_resource_scope(
         self, resource_id: str, require_tools: bool = False,
     ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
-        if resource_id != "skill.weather-query":
-            return None
-        return {"include_groups": ["skill_weather_query"]}, ("weather-query",)
+        del require_tools
+        if resource_id == "skill.weather-query":
+            return {"include_groups": ["skill_weather_query"]}, ("weather-query",)
+        if resource_id == "group.browser":
+            return {"include_groups": ["browser"]}, ()
+        return None
 
     async def run_subagent_task(
         self,
@@ -175,7 +187,70 @@ def test_dispatch_subagent_with_resource_scope() -> None:
     assert media == []
     assert len(rm.calls) == 1
     call = rm.calls[0]
-    assert call["lease"] == {"include_groups": ["skill_weather_query"]}
+    assert call["lease"]["include_groups"] == ["skill_weather_query"]
+    assert call["skill_ids"] == ["weather-query"]
+
+
+def test_dispatch_subagent_with_multiple_resource_scopes() -> None:
+    class SmartGateway(_FakeGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c1",
+                            name="dispatch_task",
+                            arguments={
+                                "resource_ids": ["skill.weather-query", "group.browser"],
+                                "description": "查看网页并查询上海今日天气",
+                            },
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c2",
+                            name="wait_for_tasks",
+                            arguments={"task_ids": [self._task_id]},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="c3",
+                        name="reply_to_user",
+                        arguments={"text": "完成"},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+
+    rm = _FakeResourceManager()
+    agent = _make_agent(SmartGateway(), rm)
+    text, media = asyncio.run(agent._answer_with_dag("查看网页并查询天气"))
+    assert text == "完成"
+    assert media == []
+    assert len(rm.calls) == 1
+    call = rm.calls[0]
+    assert set(call["lease"]["include_groups"]) == {"skill_weather_query", "browser"}
     assert call["skill_ids"] == ["weather-query"]
 
 

@@ -167,6 +167,21 @@ def test_system_prompt_adds_future_task_guard_for_deferred_requests() -> None:
     assert "未来一次性任务的描述必须自包含" in system_prompt
 
 
+def test_system_prompt_adds_multi_resource_guidance_for_skill_creation_with_url() -> None:
+    gateway = DummyGateway([])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+
+    messages = orch._build_initial_messages(  # type: ignore[attr-defined]
+        "查看 https://github.com/zai-org/GLM-OCR 创建新的ocr识别技能",
+        ExecutionContext(),
+    )
+
+    system_prompt = messages[0].content
+    assert "resource_ids" in system_prompt
+    assert "不要靠 create_worker 套娃补能力" in system_prompt
+
+
 def test_single_task() -> None:
     """dispatch → wait → reply with result."""
     # Step 1: model dispatches a task

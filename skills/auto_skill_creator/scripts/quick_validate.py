@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 ALLOWED_ROOT_DIRS = {"scripts", "references", "assets"}
 PLACEHOLDER_MARKERS = ("[todo", "todo:")
 MAX_SKILL_NAME_LENGTH = 64
+SKIP_SCRIPT_FUNCTIONS = {"main", "parse_arguments", "create_client"}
 
 
 def _extract_frontmatter(content: str) -> tuple[dict[str, str], str] | tuple[None, None]:
@@ -53,6 +55,35 @@ def _validate_description(description: str) -> str | None:
     return None
 
 
+def _validate_scripts_dir(scripts_dir: Path) -> str | None:
+    for script_path in sorted(scripts_dir.rglob("*.py")):
+        if script_path.name.startswith("_"):
+            continue
+        try:
+            tree = ast.parse(script_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return f"Failed to parse script {script_path.name}: {exc}"
+
+        public_functions = []
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name.startswith("_") or node.name in SKIP_SCRIPT_FUNCTIONS:
+                continue
+            public_functions.append(node.name)
+
+        if public_functions:
+            continue
+
+        return (
+            f"Script '{script_path.name}' does not expose a public callable function. "
+            "Public scripts in scripts/ must define at least one agent-callable function; "
+            "pure CLI/demo/helper modules should be renamed with a leading underscore "
+            "(for example '_helper.py') or wrapped by a public function."
+        )
+    return None
+
+
 def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
     skill_dir = Path(skill_path).expanduser().resolve()
     if not skill_dir.exists():
@@ -89,6 +120,12 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
         if child.is_symlink():
             continue
         return False, f"Unexpected file or directory in skill root: {child.name}"
+
+    scripts_dir = skill_dir / "scripts"
+    if scripts_dir.is_dir():
+        scripts_error = _validate_scripts_dir(scripts_dir)
+        if scripts_error:
+            return False, scripts_error
 
     return True, "Skill is valid!"
 

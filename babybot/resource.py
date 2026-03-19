@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import contextlib
 import contextvars
 import datetime
 import importlib
@@ -131,6 +132,23 @@ class _ScriptFunctionSpec:
     schema: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _CliArgumentSpec:
+    name: str
+    flag: str
+    schema: dict[str, Any]
+    required: bool = False
+    action: str | None = None
+
+
+@dataclass(frozen=True)
+class _CliToolSpec:
+    name: str
+    description: str
+    schema: dict[str, Any]
+    arguments: tuple[_CliArgumentSpec, ...]
+
+
 class CallableTool:
     """Wrap a python callable into kernel Tool protocol."""
 
@@ -254,6 +272,7 @@ class CallableTool:
         root = (base_dir or self._current_write_root()).resolve()
         found: list[str] = []
         seen: set[str] = set()
+        source_seen: set[str] = set()
 
         def _add_path(raw: str) -> None:
             candidate = raw.strip().strip("\"'")
@@ -271,6 +290,11 @@ class CallableTool:
                     return
             except OSError:
                 return
+            source_key = str(resolved)
+            if source_key in source_seen:
+                return
+            source_seen.add(source_key)
+            resolved = self._normalize_artifact_path(resolved)
             resolved_str = str(resolved)
             if resolved_str not in seen:
                 seen.add(resolved_str)
@@ -298,6 +322,37 @@ class CallableTool:
 
         _walk(value)
         return found
+
+    def _normalize_artifact_path(self, resolved: Path) -> Path:
+        if self._resource_manager is None:
+            return resolved
+        try:
+            workspace = self._resource_manager.config.workspace_dir.resolve()
+        except Exception:
+            return resolved
+        try:
+            resolved.relative_to(workspace)
+            return resolved
+        except ValueError:
+            pass
+
+        output_dir = self._resource_manager._get_output_dir()
+        target = output_dir / resolved.name
+        if target == resolved:
+            return resolved
+        stem = resolved.stem
+        suffix = resolved.suffix
+        counter = 1
+        while target.exists():
+            try:
+                if target.samefile(resolved):
+                    return target.resolve()
+            except OSError:
+                pass
+            target = output_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        shutil.copy2(resolved, target)
+        return target.resolve()
 
 
 class ResourceCatalog:
@@ -376,6 +431,14 @@ class ResourceManager:
         self._active_write_root: contextvars.ContextVar[str] = contextvars.ContextVar(
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
+        )
+        self._current_task_lease: contextvars.ContextVar[ToolLease | None] = contextvars.ContextVar(
+            "current_task_lease",
+            default=None,
+        )
+        self._current_skill_ids: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar(
+            "current_skill_ids",
+            default=None,
         )
         self.catalog = ResourceCatalog(self)
         self.runtime = WorkerRuntime(self)
@@ -636,10 +699,14 @@ class ResourceManager:
         for py_file in sorted(scripts_dir.rglob("*.py")):
             if py_file.name.startswith("_"):
                 continue
+            before_count = len(tool_names)
             try:
                 module = self._load_tool_module(str(py_file))
                 for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                    if func.__module__ != module.__name__ or func_name.startswith("_"):
+                    if (
+                        func.__module__ != module.__name__
+                        or self._skip_skill_function_name(func_name)
+                    ):
                         continue
                     tool_name = f"{slug}__{func_name}"
                     self.register_tool(
@@ -674,7 +741,26 @@ class ResourceManager:
                         group=group_name,
                     )
                     tool_names.append(tool_name)
+            if len(tool_names) == before_count:
+                cli_spec = self._extract_cli_tool_spec_from_script(py_file)
+                if cli_spec is not None:
+                    tool_name = f"{slug}__{cli_spec.name}"
+                    self.registry.register(
+                        CallableTool(
+                            func=self._build_external_cli_script_callable(py_file, cli_spec),
+                            name=tool_name,
+                            description=cli_spec.description,
+                            schema=cli_spec.schema,
+                            resource_manager=self,
+                        ),
+                        group=group_name,
+                    )
+                    tool_names.append(tool_name)
         return group_name, tuple(sorted(set(tool_names)))
+
+    @staticmethod
+    def _skip_skill_function_name(name: str) -> bool:
+        return name.startswith("_") or name in {"main", "parse_arguments", "create_client"}
 
     @classmethod
     def _extract_function_specs_from_script(
@@ -692,7 +778,7 @@ class ResourceManager:
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if node.name.startswith("_"):
+            if cls._skip_skill_function_name(node.name):
                 continue
             schema = cls._schema_from_ast_function(node)
             doc = ast.get_docstring(node) or node.name
@@ -705,6 +791,175 @@ class ResourceManager:
                 )
             )
         return specs
+
+    @classmethod
+    def _extract_cli_tool_spec_from_script(
+        cls,
+        script_path: Path,
+    ) -> _CliToolSpec | None:
+        try:
+            text = script_path.read_text(encoding="utf-8", errors="ignore")
+            tree = ast.parse(text)
+        except Exception as exc:
+            logger.warning("Failed to parse CLI skill script %s: %s", script_path, exc)
+            return None
+
+        parse_func: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        has_main = False
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "parse_arguments":
+                    parse_func = node
+                elif node.name == "main":
+                    has_main = True
+        if parse_func is None or not has_main:
+            return None
+
+        parser_names: set[str] = set()
+        args: list[_CliArgumentSpec] = []
+        required: list[str] = []
+        properties: dict[str, Any] = {}
+
+        for node in ast.walk(parse_func):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                call = node.value
+                func = call.func
+                if isinstance(func, ast.Attribute) and func.attr == "ArgumentParser":
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            parser_names.add(target.id)
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr == "add_argument"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in parser_names
+            ):
+                continue
+            option_strings = [
+                arg.value for arg in node.args
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+            ]
+            if not option_strings:
+                continue
+            flag = next((item for item in option_strings if item.startswith("--")), option_strings[-1])
+            name = flag.lstrip("-").replace("-", "_")
+            schema, is_required, action = cls._schema_from_argparse_call(node)
+            properties[name] = schema
+            args.append(
+                _CliArgumentSpec(
+                    name=name,
+                    flag=flag,
+                    schema=schema,
+                    required=is_required,
+                    action=action,
+                )
+            )
+            if is_required:
+                required.append(name)
+
+        if not args:
+            return None
+
+        return _CliToolSpec(
+            name=script_path.stem,
+            description=f"Run CLI script {script_path.stem}",
+            schema={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+            arguments=tuple(args),
+        )
+
+    @classmethod
+    def _schema_from_argparse_call(
+        cls,
+        call: ast.Call,
+    ) -> tuple[dict[str, Any], bool, str | None]:
+        action: str | None = None
+        arg_type: Any = None
+        required = False
+        for keyword in call.keywords:
+            if keyword.arg == "action" and isinstance(keyword.value, ast.Constant):
+                action = str(keyword.value.value)
+            elif keyword.arg == "type":
+                arg_type = cls._annotation_name_from_ast(keyword.value)
+            elif keyword.arg == "required" and isinstance(keyword.value, ast.Constant):
+                required = bool(keyword.value.value)
+        if action == "store_true":
+            return {"type": "boolean"}, False, action
+        if arg_type == "int":
+            schema = {"type": "integer"}
+        elif arg_type == "float":
+            schema = {"type": "number"}
+        elif arg_type == "bool":
+            schema = {"type": "boolean"}
+        else:
+            schema = {"type": "string"}
+        return schema, required, action
+
+    @staticmethod
+    def _annotation_name_from_ast(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return None
+
+    def _build_external_cli_script_callable(
+        self,
+        script_path: Path,
+        cli_spec: _CliToolSpec,
+    ) -> Any:
+        resolved = str(script_path.resolve())
+        arguments = cli_spec.arguments
+
+        async def _runner(**kwargs: Any) -> str:
+            argv = [self._get_user_python(), resolved]
+            for spec in arguments:
+                if spec.name not in kwargs:
+                    continue
+                value = kwargs.get(spec.name)
+                if spec.action == "store_true":
+                    if value:
+                        argv.append(spec.flag)
+                    continue
+                if value is None:
+                    continue
+                argv.extend([spec.flag, self._format_cli_argument(value)])
+            timeout_s = self._coerce_timeout(kwargs.get("timeout"), default=300.0)
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(self._get_active_write_root()),
+                env=self._clean_env(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.communicate()
+                raise RuntimeError(f"CLI tool timeout after {timeout_s}s")
+            out_text = (stdout or b"").decode("utf-8", errors="ignore").strip()
+            err_text = (stderr or b"").decode("utf-8", errors="ignore").strip()
+            if proc.returncode != 0:
+                detail = err_text or out_text or f"exit code {proc.returncode}"
+                raise RuntimeError(detail)
+            return out_text or err_text
+
+        return _runner
+
+    @staticmethod
+    def _format_cli_argument(value: Any) -> str:
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
 
     @classmethod
     def _schema_from_ast_function(
@@ -995,11 +1250,28 @@ class ResourceManager:
 
     @staticmethod
     def _lease_to_dict(lease: ToolLease) -> dict[str, Any]:
-        return {
-            "include_groups": list(lease.include_groups),
-            "include_tools": list(lease.include_tools),
-            "exclude_tools": list(lease.exclude_tools),
-        }
+        payload: dict[str, Any] = {}
+        if lease.include_groups:
+            payload["include_groups"] = list(lease.include_groups)
+        if lease.include_tools:
+            payload["include_tools"] = list(lease.include_tools)
+        if lease.exclude_tools:
+            payload["exclude_tools"] = list(lease.exclude_tools)
+        return payload
+
+    def _get_current_task_lease_var(self) -> contextvars.ContextVar[ToolLease | None]:
+        current = getattr(self, "_current_task_lease", None)
+        if current is None:
+            current = contextvars.ContextVar("current_task_lease", default=None)
+            self._current_task_lease = current
+        return current
+
+    def _get_current_skill_ids_var(self) -> contextvars.ContextVar[tuple[str, ...] | None]:
+        current = getattr(self, "_current_skill_ids", None)
+        if current is None:
+            current = contextvars.ContextVar("current_skill_ids", default=None)
+            self._current_skill_ids = current
+        return current
 
     def get_resource_briefs(self) -> list[dict[str, Any]]:
         return self._catalog_view().get_resource_briefs()
@@ -1344,6 +1616,8 @@ class ResourceManager:
         write_root = self._get_output_dir()
         token = self._active_write_root.set(str(write_root))
         started = time.perf_counter()
+        scope_token: contextvars.Token[ToolLease | None] | None = None
+        skill_ids_token: contextvars.Token[tuple[str, ...] | None] | None = None
         try:
             merged_lease = self._build_task_lease(lease or {})
             skill_packs = await self._select_skill_packs(
@@ -1368,6 +1642,10 @@ class ResourceManager:
                         )
                     ),
                 )
+            scope_token = self._get_current_task_lease_var().set(merged_lease)
+            skill_ids_token = self._get_current_skill_ids_var().set(
+                tuple(skill_ids) if skill_ids is not None else None
+            )
             tools_text = ", ".join(
                 sorted(t.tool.name for t in self.registry.list(merged_lease))
             ) or "无"
@@ -1450,6 +1728,10 @@ class ResourceManager:
             logger.exception("Run subagent crashed agent=%s", agent_name)
             raise
         finally:
+            if skill_ids_token is not None:
+                self._get_current_skill_ids_var().reset(skill_ids_token)
+            if scope_token is not None:
+                self._get_current_task_lease_var().reset(scope_token)
             self._active_write_root.reset(token)
 
     def _build_task_lease(self, lease: dict[str, Any]) -> ToolLease:
@@ -1501,8 +1783,26 @@ class ResourceManager:
         )
 
     def create_worker_tool(self) -> Any:
-        async def create_worker(task_description: str) -> str:
-            text, _ = await self.run_subagent_task(task_description)
+        async def create_worker(
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> str:
+            inherited_lease = lease
+            if inherited_lease is None:
+                current_lease = self._get_current_task_lease_var().get()
+                if current_lease is not None:
+                    inherited_lease = self._lease_to_dict(current_lease)
+            inherited_skill_ids = skill_ids
+            if inherited_skill_ids is None:
+                current_skill_ids = self._get_current_skill_ids_var().get()
+                if current_skill_ids is not None:
+                    inherited_skill_ids = list(current_skill_ids)
+            text, _ = await self.run_subagent_task(
+                task_description,
+                lease=inherited_lease,
+                skill_ids=inherited_skill_ids,
+            )
             return text
 
         return create_worker
@@ -1512,20 +1812,32 @@ class ResourceManager:
             tasks: list[str],
             max_concurrency: int = 3,
             lease: dict[str, Any] | None = None,
+            skill_ids: list[str] | None = None,
         ) -> str:
             normalized = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
             if not normalized:
                 return "No valid tasks were provided."
             limit = max(1, min(int(max_concurrency), len(normalized), 8))
             semaphore = asyncio.Semaphore(limit)
+            inherited_lease = lease
+            if inherited_lease is None:
+                current_lease = self._get_current_task_lease_var().get()
+                if current_lease is not None:
+                    inherited_lease = self._lease_to_dict(current_lease)
+            inherited_skill_ids = skill_ids
+            if inherited_skill_ids is None:
+                current_skill_ids = self._get_current_skill_ids_var().get()
+                if current_skill_ids is not None:
+                    inherited_skill_ids = list(current_skill_ids)
 
             async def run_one(index: int, task: str) -> dict[str, Any]:
                 async with semaphore:
                     try:
                         text, _ = await self.run_subagent_task(
                             task_description=task,
-                            lease=lease,
+                            lease=inherited_lease,
                             agent_name=f"Worker-{index}",
+                            skill_ids=inherited_skill_ids,
                         )
                         return {"index": index, "task": task, "result": text}
                     except Exception as exc:
@@ -1920,6 +2232,13 @@ class ResourceManager:
             normalized = path.replace("\\", "/").lower()
             return "/.venv/" in normalized or "/venv/" in normalized
 
+        found = shutil.which("python3")
+        if found and not _is_venv_path(found):
+            return found
+        found_py = shutil.which("python")
+        if found_py and not _is_venv_path(found_py):
+            return found_py
+
         preferred = [
             "/usr/bin/python3",
             "/usr/local/bin/python3",
@@ -1929,12 +2248,6 @@ class ResourceManager:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return candidate
 
-        found = shutil.which("python3")
-        if found and not _is_venv_path(found):
-            return found
-        found_py = shutil.which("python")
-        if found_py and not _is_venv_path(found_py):
-            return found_py
         return sys.executable
 
     def _clean_env(self) -> dict[str, str]:

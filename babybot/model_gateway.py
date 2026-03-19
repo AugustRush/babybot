@@ -39,6 +39,14 @@ def _image_to_content_part(image_ref: str) -> dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
 
+def _is_supported_image_ref(image_ref: str) -> bool:
+    """Only pass actual image inputs to multimodal APIs."""
+    if image_ref.startswith("data:"):
+        return image_ref.startswith("data:image/")
+    mime = mimetypes.guess_type(image_ref)[0] or ""
+    return mime.startswith("image/")
+
+
 class OpenAICompatibleGateway(ModelProvider):
     """Model gateway for OpenAI-compatible chat completion APIs."""
 
@@ -536,6 +544,9 @@ class OpenAICompatibleGateway(ModelProvider):
             if message.content:
                 parts.append({"type": "text", "text": message.content})
             for img in message.images:
+                if not _is_supported_image_ref(img):
+                    logger.warning("Skipping non-image attachment for multimodal input: %s", img)
+                    continue
                 try:
                     parts.append(_image_to_content_part(img))
                 except FileNotFoundError:

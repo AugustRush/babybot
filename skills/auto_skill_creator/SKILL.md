@@ -55,13 +55,18 @@ python skills/auto_skill_creator/scripts/init_skill.py "<skill name>" --target b
    - `description` must say when to use the skill
    - keep the body procedural and concise
 5. Add or update only the resources that are justified by repeated use.
+   - Any public Python script in `scripts/` must expose at least one top-level callable function that the agent can invoke directly.
+   - Do not leave upstream demo CLIs as the public tool surface. Wrap them in a stable function such as `generate_image(prompt: str, ...) -> str`.
+   - Helper modules, pure clients, and demo entrypoints should be named with a leading underscore such as `_client.py` or `_demo.py` so they are not auto-registered as tools.
 6. Validate before finishing:
 
 ```bash
 python skills/auto_skill_creator/scripts/quick_validate.py <skill-directory>
 ```
 
-7. Do not claim completion until validation passes.
+7. Smoke-test the actual public tool entrypoints, not just the folder structure.
+   - If the skill talks to an external API or CLI, run the public wrapper with representative arguments and capture the real failure or success mode.
+8. Do not claim completion until validation passes and the public tool entrypoints have been exercised.
 
 ## Writing Guidance
 
@@ -74,6 +79,7 @@ python skills/auto_skill_creator/scripts/quick_validate.py <skill-directory>
   - `assets/`
 - Put detailed reference material in `references/`, not in `SKILL.md`.
 - Add scripts when the same fragile logic would otherwise be rewritten repeatedly.
+- Prefer small agent-facing wrappers over copying full upstream demo programs into `scripts/`.
 
 ## Constraints
 

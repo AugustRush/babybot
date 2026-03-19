@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
 MAX_SKILL_NAME_LENGTH = 64
 ALLOWED_RESOURCES = {"scripts", "references", "assets"}
+EXAMPLE_RESOURCE_ALIASES = {"example", "examples"}
 
 SKILL_TEMPLATE = """---
 name: {skill_name}
@@ -30,12 +32,8 @@ Describe what this skill enables and when it should be used.
 """
 
 EXAMPLE_SCRIPT = """#!/usr/bin/env python3
-def main() -> None:
-    print("example script for {skill_name}")
-
-
-if __name__ == "__main__":
-    main()
+def example_tool(input_text: str = "{skill_name}") -> str:
+    return f"example script for {{input_text}}"
 """
 
 EXAMPLE_REFERENCE = """# Reference
@@ -64,13 +62,41 @@ def title_case_skill_name(skill_name: str) -> str:
     return " ".join(part.capitalize() for part in skill_name.split("-"))
 
 
+def _resource_items(raw_resources: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    def _flatten(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            if text.startswith("[") and text.endswith("]"):
+                try:
+                    decoded = json.loads(text)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    decoded = None
+                if isinstance(decoded, (list, tuple)):
+                    flattened: list[str] = []
+                    for item in decoded:
+                        flattened.extend(_flatten(item))
+                    return flattened
+            return [item.strip().lower() for item in text.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            flattened: list[str] = []
+            for item in value:
+                flattened.extend(_flatten(item))
+            return flattened
+        text = str(value).strip()
+        return [text.lower()] if text else []
+
+    return _flatten(raw_resources)
+
+
 def parse_resources(raw_resources: str | list[str] | tuple[str, ...] | None) -> list[str]:
-    if raw_resources is None:
-        return []
-    if isinstance(raw_resources, str):
-        resources = [item.strip() for item in raw_resources.split(",") if item.strip()]
-    else:
-        resources = [str(item).strip() for item in raw_resources if str(item).strip()]
+    resources = [
+        item for item in _resource_items(raw_resources)
+        if item not in EXAMPLE_RESOURCE_ALIASES
+    ]
     invalid = sorted({item for item in resources if item not in ALLOWED_RESOURCES})
     if invalid:
         allowed = ", ".join(sorted(ALLOWED_RESOURCES))
@@ -103,7 +129,7 @@ def _create_resource_dirs(
         if not include_examples:
             continue
         if resource == "scripts":
-            example_script = resource_dir / "example.py"
+            example_script = resource_dir / "_example.py"
             if not example_script.exists():
                 example_script.write_text(
                     EXAMPLE_SCRIPT.format(skill_name=skill_name),
@@ -135,6 +161,9 @@ def init_skill(
 ) -> Path:
     normalized_name = normalize_skill_name(skill_name)
     skill_title = title_case_skill_name(normalized_name)
+    include_examples = include_examples or any(
+        item in EXAMPLE_RESOURCE_ALIASES for item in _resource_items(resources)
+    )
     parsed_resources = parse_resources(resources)
 
     if path is not None:
