@@ -10,6 +10,7 @@ import datetime
 import importlib
 import importlib.util
 import inspect
+import io
 import json
 import logging
 import os
@@ -21,7 +22,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import UnionType
-from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from pydantic import BaseModel, Field
 
@@ -210,9 +219,7 @@ class CallableTool:
                     finally:
                         os.chdir(saved_cwd)
 
-                value = await loop.run_in_executor(
-                    None, ctx.run, _run_in_workspace
-                )
+                value = await loop.run_in_executor(None, ctx.run, _run_in_workspace)
             return ToolResult(
                 ok=True,
                 content=self._normalize_result(value),
@@ -251,16 +258,29 @@ class CallableTool:
             return False
         suffix = Path(text).suffix.lower()
         if suffix in {
-            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
-            ".pdf", ".txt", ".md", ".json", ".yaml", ".yml",
-            ".csv", ".xlsx", ".pptx", ".docx", ".mp4", ".mp3", ".wav",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".webp",
+            ".pdf",
+            ".txt",
+            ".md",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".csv",
+            ".xlsx",
+            ".pptx",
+            ".docx",
+            ".mp4",
+            ".mp3",
+            ".wav",
         }:
             return True
         return (
-            "/" in text
-            or "\\" in text
-            or text.startswith(".")
-            or text.startswith("~")
+            "/" in text or "\\" in text or text.startswith(".") or text.startswith("~")
         )
 
     def _collect_artifacts(
@@ -432,13 +452,17 @@ class ResourceManager:
             "active_write_root",
             default=str(self.config.workspace_dir.resolve()),
         )
-        self._current_task_lease: contextvars.ContextVar[ToolLease | None] = contextvars.ContextVar(
-            "current_task_lease",
-            default=None,
+        self._current_task_lease: contextvars.ContextVar[ToolLease | None] = (
+            contextvars.ContextVar(
+                "current_task_lease",
+                default=None,
+            )
         )
-        self._current_skill_ids: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar(
-            "current_skill_ids",
-            default=None,
+        self._current_skill_ids: contextvars.ContextVar[tuple[str, ...] | None] = (
+            contextvars.ContextVar(
+                "current_skill_ids",
+                default=None,
+            )
         )
         self.catalog = ResourceCatalog(self)
         self.runtime = WorkerRuntime(self)
@@ -606,7 +630,8 @@ class ResourceManager:
                         phrases=phrases,
                         lease=ToolLease(
                             include_groups=tuple(
-                                set(conf.get("include_groups") or ()) | ({tool_group} if tool_group else set())
+                                set(conf.get("include_groups") or ())
+                                | ({tool_group} if tool_group else set())
                             ),
                             include_tools=tuple(conf.get("include_tools") or ()),
                             exclude_tools=tuple(conf.get("exclude_tools") or ()),
@@ -617,7 +642,7 @@ class ResourceManager:
                         tools=tool_names,
                     )
                 )
-            except Exception as exc:
+            except BaseException as exc:
                 logger.warning("Failed to load configured skill %s: %s", name, exc)
 
     def _discover_skills(self) -> None:
@@ -666,7 +691,7 @@ class ResourceManager:
                             tools=tool_names,
                         )
                     )
-                except Exception as exc:
+                except BaseException as exc:
                     logger.warning("Failed to auto-load skill %s: %s", child, exc)
 
     def _upsert_skill(self, skill: LoadedSkill) -> None:
@@ -700,30 +725,8 @@ class ResourceManager:
             if py_file.name.startswith("_"):
                 continue
             before_count = len(tool_names)
-            try:
-                module = self._load_tool_module(str(py_file))
-                for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                    if (
-                        func.__module__ != module.__name__
-                        or self._skip_skill_function_name(func_name)
-                    ):
-                        continue
-                    tool_name = f"{slug}__{func_name}"
-                    self.register_tool(
-                        func=func,
-                        group_name=group_name,
-                        func_name=tool_name,
-                    )
-                    tool_names.append(tool_name)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to import skill script %s: %s; using host-python proxy registration.",
-                    py_file,
-                    exc,
-                )
-                specs = self._extract_function_specs_from_script(py_file)
-                if not specs:
-                    continue
+            specs = self._extract_function_specs_from_script(py_file)
+            if specs:
                 for spec in specs:
                     tool_name = f"{slug}__{spec.name}"
                     proxy = self._build_external_skill_callable(
@@ -741,13 +744,43 @@ class ResourceManager:
                         group=group_name,
                     )
                     tool_names.append(tool_name)
+            else:
+                try:
+                    _saved_stdout, _saved_stderr = sys.stdout, sys.stderr
+                    sys.stdout = io.StringIO()
+                    sys.stderr = io.StringIO()
+                    try:
+                        module = self._load_tool_module(str(py_file))
+                    finally:
+                        sys.stdout, sys.stderr = _saved_stdout, _saved_stderr
+                    for func_name, func in inspect.getmembers(module, inspect.isfunction):
+                        if (
+                            func.__module__ != module.__name__
+                            or self._skip_skill_function_name(func_name)
+                        ):
+                            continue
+                        tool_name = f"{slug}__{func_name}"
+                        self.register_tool(
+                            func=func,
+                            group_name=group_name,
+                            func_name=tool_name,
+                        )
+                        tool_names.append(tool_name)
+                except BaseException as exc:
+                    logger.warning(
+                        "Failed to import skill script %s: %s",
+                        py_file,
+                        exc,
+                    )
             if len(tool_names) == before_count:
                 cli_spec = self._extract_cli_tool_spec_from_script(py_file)
                 if cli_spec is not None:
                     tool_name = f"{slug}__{cli_spec.name}"
                     self.registry.register(
                         CallableTool(
-                            func=self._build_external_cli_script_callable(py_file, cli_spec),
+                            func=self._build_external_cli_script_callable(
+                                py_file, cli_spec
+                            ),
                             name=tool_name,
                             description=cli_spec.description,
                             schema=cli_spec.schema,
@@ -760,7 +793,11 @@ class ResourceManager:
 
     @staticmethod
     def _skip_skill_function_name(name: str) -> bool:
-        return name.startswith("_") or name in {"main", "parse_arguments", "create_client"}
+        return name.startswith("_") or name in {
+            "main",
+            "parse_arguments",
+            "create_client",
+        }
 
     @classmethod
     def _extract_function_specs_from_script(
@@ -839,12 +876,16 @@ class ResourceManager:
             ):
                 continue
             option_strings = [
-                arg.value for arg in node.args
+                arg.value
+                for arg in node.args
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
             ]
             if not option_strings:
                 continue
-            flag = next((item for item in option_strings if item.startswith("--")), option_strings[-1])
+            flag = next(
+                (item for item in option_strings if item.startswith("--")),
+                option_strings[-1],
+            )
             name = flag.lstrip("-").replace("-", "_")
             schema, is_required, action = cls._schema_from_argparse_call(node)
             properties[name] = schema
@@ -940,7 +981,9 @@ class ResourceManager:
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_s
+                )
             except asyncio.TimeoutError:
                 proc.kill()
                 with contextlib.suppress(Exception):
@@ -978,7 +1021,9 @@ class ResourceManager:
             properties[name] = cls._schema_for_ast_annotation(arg.annotation)
             if idx < default_offset:
                 required.append(name)
-        for kw_arg, kw_default in zip(node.args.kwonlyargs or [], node.args.kw_defaults or []):
+        for kw_arg, kw_default in zip(
+            node.args.kwonlyargs or [], node.args.kw_defaults or []
+        ):
             name = kw_arg.arg
             if name in {"self", "context"}:
                 continue
@@ -1071,7 +1116,9 @@ class ResourceManager:
         communicate_coro = proc.communicate()
         try:
             if timeout_s and timeout_s > 0:
-                stdout, stderr = await asyncio.wait_for(communicate_coro, timeout=timeout_s)
+                stdout, stderr = await asyncio.wait_for(
+                    communicate_coro, timeout=timeout_s
+                )
             else:
                 stdout, stderr = await communicate_coro
         except asyncio.TimeoutError:
@@ -1097,7 +1144,9 @@ class ResourceManager:
                 payload_line = line[len(marker) :].strip()
                 break
         if not payload_line:
-            combined = (out_text.strip() + ("\n" + err_text.strip() if err_text.strip() else "")).strip()
+            combined = (
+                out_text.strip() + ("\n" + err_text.strip() if err_text.strip() else "")
+            ).strip()
             return combined or "Tool error: no result returned."
         try:
             payload = json.loads(payload_line)
@@ -1131,7 +1180,9 @@ class ResourceManager:
     ) -> tuple[str, ...]:
         phrases: list[str] = []
         if isinstance(raw_keywords, (list, tuple)):
-            phrases.extend(str(x).strip().lower() for x in raw_keywords if str(x).strip())
+            phrases.extend(
+                str(x).strip().lower() for x in raw_keywords if str(x).strip()
+            )
         elif isinstance(raw_keywords, str) and raw_keywords.strip():
             phrases.extend(
                 p.strip().lower()
@@ -1199,7 +1250,11 @@ class ResourceManager:
 
     def _setup_tool_groups(self, user_groups: dict[str, dict]) -> None:
         defaults = {
-            "basic": ToolGroup("basic", "核心工具：定时/延时发送消息、任务调度管理（创建/修改/删除/列出定时任务）", active=True),
+            "basic": ToolGroup(
+                "basic",
+                "核心工具：定时/延时发送消息、任务调度管理（创建/修改/删除/列出定时任务）",
+                active=True,
+            ),
             "code": ToolGroup(
                 "code",
                 "Code execution and file operations",
@@ -1215,7 +1270,9 @@ class ResourceManager:
             old = self.groups.get(name)
             self.groups[name] = ToolGroup(
                 name=name,
-                description=conf.get("description", old.description if old else f"{name} tools"),
+                description=conf.get(
+                    "description", old.description if old else f"{name} tools"
+                ),
                 notes=conf.get("notes", old.notes if old else ""),
                 active=conf.get("active", old.active if old else False),
             )
@@ -1266,7 +1323,9 @@ class ResourceManager:
             self._current_task_lease = current
         return current
 
-    def _get_current_skill_ids_var(self) -> contextvars.ContextVar[tuple[str, ...] | None]:
+    def _get_current_skill_ids_var(
+        self,
+    ) -> contextvars.ContextVar[tuple[str, ...] | None]:
         current = getattr(self, "_current_skill_ids", None)
         if current is None:
             current = contextvars.ContextVar("current_skill_ids", default=None)
@@ -1290,10 +1349,14 @@ class ResourceManager:
                     resource_id=self._mcp_resource_id(server_name),
                     resource_type="mcp",
                     name=server_name,
-                    purpose=(group.description if group else f"MCP tools from {server_name}"),
+                    purpose=(
+                        group.description if group else f"MCP tools from {server_name}"
+                    ),
                     group=group_name,
                     tool_count=tool_count,
-                    tools_preview=self._preview_tool_names(ToolLease(include_groups=(group_name,))),
+                    tools_preview=self._preview_tool_names(
+                        ToolLease(include_groups=(group_name,))
+                    ),
                     active=(bool(group.active) if group else True) and tool_count > 0,
                 )
             )
@@ -1302,7 +1365,11 @@ class ResourceManager:
             if not skill.active:
                 continue
             skill_lease = skill.lease or ToolLease()
-            tools = self.registry.list(skill_lease) if skill_lease.include_groups or skill_lease.include_tools else []
+            tools = (
+                self.registry.list(skill_lease)
+                if skill_lease.include_groups or skill_lease.include_tools
+                else []
+            )
             tool_count = len(tools)
             briefs.append(
                 ResourceBrief(
@@ -1332,7 +1399,9 @@ class ResourceManager:
                     purpose=group.description,
                     group=group_name,
                     tool_count=tool_count,
-                    tools_preview=self._preview_tool_names(ToolLease(include_groups=(group_name,))),
+                    tools_preview=self._preview_tool_names(
+                        ToolLease(include_groups=(group_name,))
+                    ),
                     active=group.active and tool_count > 0,
                 )
             )
@@ -1392,7 +1461,9 @@ class ResourceManager:
 
         return None
 
-    def set_scheduled_task_manager(self, manager: "ScheduledTaskManager | None") -> None:
+    def set_scheduled_task_manager(
+        self, manager: "ScheduledTaskManager | None"
+    ) -> None:
         self.scheduled_task_manager = manager
 
     def get_shared_gateway(self) -> "OpenAICompatibleGateway":
@@ -1402,6 +1473,7 @@ class ResourceManager:
         """Return a shared gateway instance, creating it lazily."""
         if self._shared_gateway is None:
             from .model_gateway import OpenAICompatibleGateway as _GW
+
             self._shared_gateway = _GW(self.config)
         return self._shared_gateway
 
@@ -1423,7 +1495,9 @@ class ResourceManager:
             CallableTool(
                 func=func,
                 name=name,
-                description=(inspect.getdoc(func) or "").splitlines()[0] if inspect.getdoc(func) else name,
+                description=(inspect.getdoc(func) or "").splitlines()[0]
+                if inspect.getdoc(func)
+                else name,
                 schema=self._json_schema_for_callable(func),
                 preset_kwargs=preset_kwargs,
                 resource_manager=self,
@@ -1442,7 +1516,11 @@ class ResourceManager:
                     continue
                 preset_kwargs = dict(tool_conf.get("preset_kwargs", {}))
                 for key, value in preset_kwargs.items():
-                    if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+                    if (
+                        isinstance(value, str)
+                        and value.startswith("${")
+                        and value.endswith("}")
+                    ):
                         preset_kwargs[key] = os.getenv(value[2:-1], value)
                 self.register_tool(
                     func=func,
@@ -1482,6 +1560,10 @@ class ResourceManager:
             return importlib.import_module(module_name)
         except ModuleNotFoundError:
             pass
+        except SystemExit as exc:
+            raise ModuleNotFoundError(
+                f"Module {module_name} called sys.exit() during import"
+            ) from exc
         resolved = self.config.resolve_workspace_path(module_name)
         spec = importlib.util.spec_from_file_location(
             f"babybot_custom_{abs(hash(resolved))}",
@@ -1489,7 +1571,12 @@ class ResourceManager:
         )
         if spec and spec.loader:
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            try:
+                spec.loader.exec_module(module)
+            except SystemExit as exc:
+                raise ModuleNotFoundError(
+                    f"Module {module_name} called sys.exit() during import"
+                ) from exc
             return module
         raise ModuleNotFoundError(f"Cannot import custom module: {module_name}")
 
@@ -1525,7 +1612,9 @@ class ResourceManager:
                 "description": g.description,
             }
             for g in self.groups.values()
-            if not keyword or keyword in g.name.lower() or keyword in g.description.lower()
+            if not keyword
+            or keyword in g.name.lower()
+            or keyword in g.description.lower()
         ]
         tools = []
         for registered in self.registry.list():
@@ -1534,7 +1623,11 @@ class ResourceManager:
             tools.append({"name": registered.tool.name, "group": registered.group})
         skills = []
         for skill in self.skills.values():
-            if keyword and keyword not in skill.name.lower() and keyword not in skill.description.lower():
+            if (
+                keyword
+                and keyword not in skill.name.lower()
+                and keyword not in skill.description.lower()
+            ):
                 continue
             skills.append(
                 {
@@ -1628,17 +1721,20 @@ class ResourceManager:
                 merged_lease = ToolLease(
                     include_groups=tuple(
                         sorted(
-                            set(merged_lease.include_groups) | set(skill.tool_lease.include_groups)
+                            set(merged_lease.include_groups)
+                            | set(skill.tool_lease.include_groups)
                         )
                     ),
                     include_tools=tuple(
                         sorted(
-                            set(merged_lease.include_tools) | set(skill.tool_lease.include_tools)
+                            set(merged_lease.include_tools)
+                            | set(skill.tool_lease.include_tools)
                         )
                     ),
                     exclude_tools=tuple(
                         sorted(
-                            set(merged_lease.exclude_tools) | set(skill.tool_lease.exclude_tools)
+                            set(merged_lease.exclude_tools)
+                            | set(skill.tool_lease.exclude_tools)
                         )
                     ),
                 )
@@ -1646,9 +1742,10 @@ class ResourceManager:
             skill_ids_token = self._get_current_skill_ids_var().set(
                 tuple(skill_ids) if skill_ids is not None else None
             )
-            tools_text = ", ".join(
-                sorted(t.tool.name for t in self.registry.list(merged_lease))
-            ) or "无"
+            tools_text = (
+                ", ".join(sorted(t.tool.name for t in self.registry.list(merged_lease)))
+                or "无"
+            )
             logger.info(
                 "Run subagent agent=%s write_root=%s selected_skills=%s tools=%s include_groups=%s include_tools=%s exclude_tools=%s",
                 agent_name,
@@ -1685,14 +1782,19 @@ class ResourceManager:
             exec_context = ExecutionContext(
                 session_id=agent_name,
                 state={
-                    k: v for k, v in [
+                    k: v
+                    for k, v in [
                         ("heartbeat", heartbeat),
                         ("tape", tape),
                         ("tape_store", tape_store),
-                        ("context_history_tokens", self.config.system.context_history_tokens),
+                        (
+                            "context_history_tokens",
+                            self.config.system.context_history_tokens,
+                        ),
                         ("media_paths", media_paths),
                         ("channel_context", ChannelToolContext.get_current()),
-                    ] if v is not None
+                    ]
+                    if v is not None
                 },
             )
             result = await executor.execute(
@@ -1741,7 +1843,8 @@ class ResourceManager:
             # Sub-agents must not get channel send-message tools by default;
             # those must be explicitly requested in the task lease.
             include_groups = [
-                name for name, group in self.groups.items()
+                name
+                for name, group in self.groups.items()
                 if group.active and not name.startswith("channel_")
             ]
         else:
@@ -1760,7 +1863,8 @@ class ResourceManager:
             # original explicit request (guards against future misconfiguration
             # where a non-channel group name starts with "channel_" by mistake).
             include_groups = [
-                g for g in include_groups
+                g
+                for g in include_groups
                 if not g.startswith("channel_") or g in explicit_channel_groups
             ]
 
@@ -1776,10 +1880,14 @@ class ResourceManager:
                 list(raw_include_tools),
             )
 
+        exclude_tools = set(lease.get("exclude_tools") or ())
+        if not set(valid_include_tools) & self._orchestration_tools:
+            exclude_tools.update(self._orchestration_tools)
+
         return ToolLease(
             include_groups=tuple(include_groups or ()),
             include_tools=tuple(valid_include_tools),
-            exclude_tools=tuple(lease.get("exclude_tools") or ()),
+            exclude_tools=tuple(sorted(exclude_tools)),
         )
 
     def create_worker_tool(self) -> Any:
@@ -1856,9 +1964,7 @@ class ResourceManager:
 
     def _require_scheduled_task_manager(self) -> "ScheduledTaskManager":
         if self.scheduled_task_manager is None:
-            raise RuntimeError(
-                "Scheduled task manager is unavailable in this runtime."
-            )
+            raise RuntimeError("Scheduled task manager is unavailable in this runtime.")
         return self.scheduled_task_manager
 
     @staticmethod
@@ -2062,7 +2168,9 @@ class ResourceManager:
         def delete_scheduled_task(name: str) -> str:
             """Delete one scheduled task by name."""
             deleted = self._require_scheduled_task_manager().delete_task(name)
-            return json.dumps({"name": name, "deleted": deleted}, ensure_ascii=False, indent=2)
+            return json.dumps(
+                {"name": name, "deleted": deleted}, ensure_ascii=False, indent=2
+            )
 
         return delete_scheduled_task
 
@@ -2092,7 +2200,8 @@ class ResourceManager:
                 if isinstance(item, str) and item.strip()
             }
             selected = [
-                s for s in active
+                s
+                for s in active
                 if s.name.strip().lower() in wanted
                 or self._skill_resource_id(s) in wanted
             ]
@@ -2105,7 +2214,6 @@ class ResourceManager:
             for s in active
         ]
 
-
     def _build_worker_sys_prompt(
         self,
         agent_name: str,
@@ -2116,7 +2224,9 @@ class ResourceManager:
     ) -> str:
         selected_names = ", ".join(skill.name for skill in selected_skill_packs) or "无"
         if merged_lease is not None:
-            skill_catalog = self._format_skill_catalog_for_lease(merged_lease, max_items=24)
+            skill_catalog = self._format_skill_catalog_for_lease(
+                merged_lease, max_items=24
+            )
         else:
             skill_catalog = self._format_skill_catalog(max_items=24)
         lines = [
@@ -2130,10 +2240,13 @@ class ResourceManager:
             "2. 禁止编造工具执行结果或虚构文件路径。",
             "3. 用户询问你能做什么或能力范围时，必须优先介绍可用技能目录与工具能力。",
             "4. 如需某技能但本次未激活，可在回答中明确指出可切换到该技能处理。",
+            "5. 子Agent禁止直接向用户发送消息；即使技能文档提到 send_audio/send_image/send_text，也只返回结果与文件路径，由主Agent统一回复用户。",
         ]
         return "\n".join(lines)
 
-    def _format_skill_catalog_for_lease(self, lease: "ToolLease", max_items: int = 20) -> str:
+    def _format_skill_catalog_for_lease(
+        self, lease: "ToolLease", max_items: int = 20
+    ) -> str:
         """Format skill catalog showing only skills accessible under the given lease."""
         lease_groups = set(lease.include_groups)
         lease_tools = set(lease.include_tools)
@@ -2173,7 +2286,9 @@ class ResourceManager:
         if not skills:
             return "- 无"
         lines: list[str] = []
-        for idx, skill in enumerate(sorted(skills, key=lambda s: s.name.lower()), start=1):
+        for idx, skill in enumerate(
+            sorted(skills, key=lambda s: s.name.lower()), start=1
+        ):
             if idx > max_items:
                 lines.append(f"- ... 还有 {len(skills) - max_items} 个技能")
                 break
@@ -2278,7 +2393,9 @@ class ResourceManager:
         communicate_coro = proc.communicate()
         try:
             if timeout_s and timeout_s > 0:
-                stdout, stderr = await asyncio.wait_for(communicate_coro, timeout=timeout_s)
+                stdout, stderr = await asyncio.wait_for(
+                    communicate_coro, timeout=timeout_s
+                )
             else:
                 stdout, stderr = await communicate_coro
         except asyncio.TimeoutError:
@@ -2322,7 +2439,9 @@ class ResourceManager:
         communicate_coro = proc.communicate()
         try:
             if timeout_s and timeout_s > 0:
-                stdout, stderr = await asyncio.wait_for(communicate_coro, timeout=timeout_s)
+                stdout, stderr = await asyncio.wait_for(
+                    communicate_coro, timeout=timeout_s
+                )
             else:
                 stdout, stderr = await communicate_coro
         except asyncio.TimeoutError:
@@ -2378,7 +2497,11 @@ class ResourceManager:
         if not ranges:
             target.write_text(content, encoding="utf-8")
             return f"Wrote file: {target}"
-        lines = target.read_text(encoding="utf-8").splitlines(keepends=True) if target.exists() else []
+        lines = (
+            target.read_text(encoding="utf-8").splitlines(keepends=True)
+            if target.exists()
+            else []
+        )
         start = max(1, int(ranges[0])) if ranges else 1
         end = int(ranges[1]) if ranges and len(ranges) > 1 else start
         replacement = content.splitlines(keepends=True)
@@ -2397,7 +2520,11 @@ class ResourceManager:
             return err
         target = Path(resolved)
         target.parent.mkdir(parents=True, exist_ok=True)
-        lines = target.read_text(encoding="utf-8").splitlines(keepends=True) if target.exists() else []
+        lines = (
+            target.read_text(encoding="utf-8").splitlines(keepends=True)
+            if target.exists()
+            else []
+        )
         idx = max(0, min(len(lines), int(line_number) - 1))
         lines[idx:idx] = content.splitlines(keepends=True)
         target.write_text("".join(lines), encoding="utf-8")
@@ -2488,7 +2615,8 @@ class ResourceManager:
         if origin in {list, tuple, set}:
             item_schema = (
                 ResourceManager._schema_for_annotation(args[0])
-                if args else {"type": "string"}
+                if args
+                else {"type": "string"}
             )
             return {"type": "array", "items": item_schema}
 
@@ -2513,6 +2641,8 @@ class ResourceManager:
         if origin in {Union, UnionType}:
             if len(args) == 1:
                 return ResourceManager._schema_for_annotation(args[0])
-            return {"anyOf": [ResourceManager._schema_for_annotation(arg) for arg in args]}
+            return {
+                "anyOf": [ResourceManager._schema_for_annotation(arg) for arg in args]
+            }
 
         return {"type": "string"}

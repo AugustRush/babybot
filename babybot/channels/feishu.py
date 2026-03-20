@@ -263,7 +263,7 @@ class FeishuChannel(BaseChannel):
         ".tiff",
         ".tif",
     }
-    _AUDIO_EXTS = {".opus"}
+    _AUDIO_EXTS = {".aac", ".mp3", ".opus", ".wav"}
     _VIDEO_EXTS = {".mp4", ".mov", ".avi"}
     _FILE_TYPE_MAP = {
         ".opus": "opus",

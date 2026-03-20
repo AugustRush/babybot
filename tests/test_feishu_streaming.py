@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from babybot.channels.feishu import FeishuChannel
 from babybot.config import FeishuConfig
+from babybot.orchestrator import TaskResponse
 
 
 def test_create_stream_message_uses_interactive_card_payload() -> None:
@@ -53,3 +55,35 @@ def test_patch_stream_message_uses_interactive_card_payload() -> None:
     assert ok is True
     assert patched[0][0] == "om_mock_message"
     assert "hello world" in patched[0][1]
+
+
+def test_send_response_treats_wav_as_audio_media(tmp_path: Path) -> None:
+    channel = FeishuChannel(FeishuConfig(enabled=False, stream_reply=True), manager=None)
+    wav_path = tmp_path / "sample.wav"
+    wav_path.write_bytes(b"RIFFdemo")
+
+    sent: list[tuple[str, str]] = []
+
+    channel._upload_file_sync = lambda file_path: "file_key_1"  # type: ignore[method-assign]
+
+    def _fake_send(
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+    ) -> bool:
+        del receive_id_type, receive_id
+        sent.append((msg_type, content))
+        return True
+
+    channel._send_message_sync = _fake_send  # type: ignore[method-assign]
+
+    asyncio.run(
+        channel.send_response(
+            "oc_mock_chat",
+            TaskResponse(text="", media_paths=[str(wav_path)]),
+            sender_id="ou_user_1",
+        )
+    )
+
+    assert sent == [("media", '{"file_key": "file_key_1"}')]

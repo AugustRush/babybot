@@ -121,6 +121,36 @@ def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
     assert any(name.endswith("__generate_image") for name in tools)
 
 
+def test_register_skill_tools_avoids_import_side_effects_for_function_scripts(
+    tmp_path: Path,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {"resolve_workspace_path": staticmethod(lambda value: str(value))},
+    )()
+    skill_dir = tmp_path / "text_to_image"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    side_effect_path = tmp_path / "imported.txt"
+    (scripts / "tool_impl.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(side_effect_path)!r}).write_text('imported', encoding='utf-8')\n"
+        "def generate_image(prompt: str) -> str:\n"
+        "    return f'img:{prompt}'\n",
+        encoding="utf-8",
+    )
+
+    group, tools = manager._register_skill_tools("text-to-image", skill_dir)
+
+    assert group == "skill_text_to_image"
+    assert "text_to_image__generate_image" in tools
+    assert not side_effect_path.exists()
+
+
 def test_register_skill_tools_skips_cli_main_function(tmp_path: Path) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
@@ -548,6 +578,42 @@ def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
     assert captured["agent_name"] == "Worker"
     assert captured["lease"] == {"include_groups": ["basic", "skill_auto_skill_creator"]}
     assert captured["skill_ids"] == ["auto-skill-creator"]
+
+
+def test_build_worker_prompt_tells_subagents_to_return_artifacts_to_parent() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {}
+    prompt = manager._build_worker_sys_prompt(
+        agent_name="Worker",
+        task_description="生成一段语音并返回结果",
+        tools_text="mlx_audio__generate_speech",
+        selected_skill_packs=[],
+    )
+
+    assert "子Agent禁止直接向用户发送消息" in prompt
+    assert "由主Agent统一回复用户" in prompt
+
+
+def test_build_task_lease_excludes_nested_orchestration_tools_by_default() -> None:
+    from babybot.agent_kernel import ToolRegistry
+
+    manager = object.__new__(ResourceManager)
+    manager.groups = {"basic": ToolGroup("basic", "core", active=True)}
+    manager.registry = ToolRegistry()
+
+    def _tool_ok() -> str:
+        return "ok"
+
+    manager.register_tool(_tool_ok, group_name="basic", func_name="regular_tool")
+    manager.register_tool(_tool_ok, group_name="basic", func_name="create_worker")
+    manager.register_tool(_tool_ok, group_name="basic", func_name="dispatch_workers")
+
+    lease = manager._build_task_lease({})
+    names = sorted(t.tool.name for t in manager.registry.list(lease))
+
+    assert "regular_tool" in names
+    assert "create_worker" not in names
+    assert "dispatch_workers" not in names
 
 
 def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:
