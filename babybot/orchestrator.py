@@ -83,6 +83,7 @@ class OrchestratorAgent:
             "child_task_bus": getattr(self, "_child_task_bus", None),
             "task_heartbeat_registry": getattr(self, "_task_heartbeat_registry", None),
             "task_stale_after_s": float(self.config.system.idle_timeout),
+            "max_steps": getattr(self.config.system, "orchestrator_max_steps", 30),
         }
         for key, value in optional_kwargs.items():
             if key not in parameters or value is None:

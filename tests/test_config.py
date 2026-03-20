@@ -22,6 +22,8 @@ def test_system_context_fields_loaded_from_config(tmp_path, monkeypatch):
                     "context_history_tokens": 123,
                     "context_compact_threshold": 456,
                     "context_max_chats": 7,
+                    "worker_max_steps": 21,
+                    "orchestrator_max_steps": 31,
                 },
             }
         ),
@@ -32,6 +34,8 @@ def test_system_context_fields_loaded_from_config(tmp_path, monkeypatch):
     assert cfg.system.context_history_tokens == 123
     assert cfg.system.context_compact_threshold == 456
     assert cfg.system.context_max_chats == 7
+    assert cfg.system.worker_max_steps == 21
+    assert cfg.system.orchestrator_max_steps == 31
 
 
 def test_to_dict_includes_system_context_fields(tmp_path, monkeypatch):
@@ -51,6 +55,8 @@ def test_to_dict_includes_system_context_fields(tmp_path, monkeypatch):
                     "context_history_tokens": 321,
                     "context_compact_threshold": 654,
                     "context_max_chats": 9,
+                    "worker_max_steps": 18,
+                    "orchestrator_max_steps": 28,
                 },
             }
         ),
@@ -62,6 +68,8 @@ def test_to_dict_includes_system_context_fields(tmp_path, monkeypatch):
     assert payload["context_history_tokens"] == 321
     assert payload["context_compact_threshold"] == 654
     assert payload["context_max_chats"] == 9
+    assert payload["worker_max_steps"] == 18
+    assert payload["orchestrator_max_steps"] == 28
 
 
 def test_scheduled_tasks_migrated_to_workspace_file(tmp_path, monkeypatch):

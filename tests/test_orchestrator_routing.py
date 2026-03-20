@@ -332,6 +332,29 @@ def test_answer_with_dag_passes_runtime_event_callback_and_shared_runtime_adapte
     assert seen["task_stale_after_s"] == 30
 
 
+def test_answer_with_dag_passes_orchestrator_max_steps() -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    agent.config.system.orchestrator_max_steps = 12
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, max_steps: int | None = None) -> None:
+            del resource_manager, gateway
+            seen["max_steps"] = max_steps
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal, context
+            return type("R", (), {"conclusion": "ok"})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("你好"))
+
+    assert text == "ok"
+    assert media == []
+    assert seen["max_steps"] == 12
+
+
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:
     class _RepeatableDispatchGateway(_FakeGateway):
         def __init__(self) -> None:

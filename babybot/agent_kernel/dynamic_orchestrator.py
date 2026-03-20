@@ -692,6 +692,7 @@ class DynamicOrchestrator:
         child_task_bus: InMemoryChildTaskBus | None = None,
         task_heartbeat_registry: "TaskHeartbeatRegistry | None" = None,
         task_stale_after_s: float | None = None,
+        max_steps: int | None = None,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
@@ -701,6 +702,7 @@ class DynamicOrchestrator:
         self._child_task_bus = child_task_bus or InMemoryChildTaskBus()
         self._task_heartbeat_registry = task_heartbeat_registry or TaskHeartbeatRegistry()
         self._task_stale_after_s = task_stale_after_s
+        self._max_steps = max(1, int(max_steps or self.MAX_STEPS))
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
@@ -727,7 +729,7 @@ class DynamicOrchestrator:
 
         messages = self._build_initial_messages(goal, context)
         try:
-            for step in range(self.MAX_STEPS):
+            for step in range(self._max_steps):
                 if heartbeat is not None:
                     heartbeat.beat()
 

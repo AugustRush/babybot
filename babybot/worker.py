@@ -26,7 +26,9 @@ def create_worker_executor(
     gateway: OpenAICompatibleGateway | None = None,
 ) -> SingleAgentExecutor:
     """Create one worker executor with provided system prompt."""
-    runtime = runtime or WorkerRuntimeConfig()
+    runtime = runtime or WorkerRuntimeConfig(
+        max_steps=getattr(config.system, "worker_max_steps", 14)
+    )
     if gateway is None:
         gateway = OpenAICompatibleGateway(config)
     base_skill = SkillPack(name="worker_base", system_prompt=sys_prompt)

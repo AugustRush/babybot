@@ -60,6 +60,8 @@ class SystemConfig:
     send_ack: bool = True
     python_executable: str = ""
     python_fallback_executables: list[str] | tuple[str, ...] = ()
+    worker_max_steps: int = 14
+    orchestrator_max_steps: int = 30
     context_history_tokens: int = 2000
     context_compact_threshold: int = 3000
     context_max_chats: int = 500
@@ -162,6 +164,8 @@ class Config:
             python_fallback_executables=system_conf.get(
                 "python_fallback_executables", []
             ),
+            worker_max_steps=system_conf.get("worker_max_steps", 14),
+            orchestrator_max_steps=system_conf.get("orchestrator_max_steps", 30),
             context_history_tokens=system_conf.get("context_history_tokens", 2000),
             context_compact_threshold=system_conf.get("context_compact_threshold", 3000),
             context_max_chats=system_conf.get("context_max_chats", 500),
@@ -299,6 +303,8 @@ class Config:
                 "send_ack": True,
                 "python_executable": "",
                 "python_fallback_executables": [],
+                "worker_max_steps": 14,
+                "orchestrator_max_steps": 30,
                 "context_history_tokens": 2000,
                 "context_compact_threshold": 3000,
                 "context_max_chats": 500,
@@ -395,6 +401,8 @@ class Config:
                 "python_fallback_executables": list(
                     self.system.python_fallback_executables
                 ),
+                "worker_max_steps": self.system.worker_max_steps,
+                "orchestrator_max_steps": self.system.orchestrator_max_steps,
                 "context_history_tokens": self.system.context_history_tokens,
                 "context_compact_threshold": self.system.context_compact_threshold,
                 "context_max_chats": self.system.context_max_chats,

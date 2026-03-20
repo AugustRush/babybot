@@ -37,6 +37,8 @@
     "send_ack": true,
     "python_executable": "",
     "python_fallback_executables": [],
+    "worker_max_steps": 14,
+    "orchestrator_max_steps": 30,
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
     "context_max_chats": 500

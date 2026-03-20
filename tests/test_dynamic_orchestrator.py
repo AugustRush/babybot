@@ -410,6 +410,28 @@ def test_max_steps_fallback() -> None:
     assert "编排步数已达上限" in result.conclusion
 
 
+def test_max_steps_can_be_configured() -> None:
+    noop = ModelResponse(
+        text="",
+        tool_calls=(
+            ModelToolCall(
+                call_id="c_noop",
+                name="get_task_result",
+                arguments={"task_id": "xxx"},
+            ),
+        ),
+        finish_reason="tool_calls",
+    )
+    gateway = DummyGateway([noop] * 5)
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway, max_steps=2)
+
+    result = asyncio.run(orch.run("限制两步", ExecutionContext()))
+
+    assert "编排步数已达上限" in result.conclusion
+    assert gateway._call_idx == 2
+
+
 def test_failed_task_handling() -> None:
     """Sub-task fails; wait returns failure; model replies with error info."""
 
