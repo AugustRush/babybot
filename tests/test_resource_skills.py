@@ -527,6 +527,53 @@ def test_resource_briefs_and_scope_resolution() -> None:
     assert unavailable_scope is None
 
 
+def test_search_resources_filters_groups_tools_skills_and_mcp_servers() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "basic": ToolGroup(name="basic", description="Core tools", active=True),
+        "map_services": ToolGroup(
+            name="map_services",
+            description="Map MCP tools",
+            active=True,
+        ),
+    }
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.mcp_server_groups = {"gaode_map": "map_services"}
+    manager.mcp_clients = {"gaode_map": object()}
+    manager.skills = {
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="用于查询天气",
+            directory="/tmp/weather-query",
+            prompt="weather prompt",
+            active=True,
+        )
+    }
+
+    def gaode_map__search(keyword: str) -> str:
+        return keyword
+
+    manager.register_tool(
+        gaode_map__search,
+        group_name="map_services",
+        func_name="gaode_map__search",
+    )
+
+    result = manager.search_resources("map")
+
+    assert result["query"] == "map"
+    assert result["mcp_servers"] == ["gaode_map"]
+    assert result["groups"] == [
+        {
+            "name": "map_services",
+            "active": True,
+            "description": "Map MCP tools",
+        }
+    ]
+    assert result["tools"] == [{"name": "gaode_map__search", "group": "map_services"}]
+    assert result["skills"] == []
+
+
 def test_json_schema_for_callable_handles_collections_and_kwargs() -> None:
     def dispatch_workers(
         tasks: list[str],
@@ -723,6 +770,32 @@ def test_build_task_lease_excludes_nested_orchestration_tools_by_default() -> No
     assert "regular_tool" in names
     assert "create_worker" not in names
     assert "dispatch_workers" not in names
+
+
+def test_build_task_lease_adds_basic_group_and_filters_unknown_include_tools() -> None:
+    from babybot.agent_kernel import ToolRegistry
+
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "basic": ToolGroup("basic", "core", active=True),
+        "analysis": ToolGroup("analysis", "analysis", active=False),
+    }
+    manager.registry = ToolRegistry()
+
+    def _tool_ok() -> str:
+        return "ok"
+
+    manager.register_tool(_tool_ok, group_name="basic", func_name="regular_tool")
+
+    lease = manager._build_task_lease(
+        {
+            "include_groups": ["analysis"],
+            "include_tools": ["regular_tool", "missing_tool"],
+        }
+    )
+
+    assert lease.include_groups == ("analysis", "basic")
+    assert lease.include_tools == ("regular_tool",)
 
 
 def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:
