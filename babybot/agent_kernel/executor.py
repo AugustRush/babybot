@@ -87,6 +87,7 @@ class SingleAgentExecutor:
         usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         max_model_tokens = int(context.state.get("max_model_tokens", 0) or 0)
         loop_guard = LoopGuard(self.policy.loop_guard)
+        blocked_tool_names: set[str] = set()
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
@@ -100,10 +101,17 @@ class SingleAgentExecutor:
             )
 
             messages = loop_guard.compress_messages(messages)
+            if blocked_tool_names:
+                step_tools = [
+                    t for t in available_tools
+                    if t["function"]["name"] not in blocked_tool_names
+                ]
+            else:
+                step_tools = available_tools
             response = await self.model.generate(
                 ModelRequest(
                     messages=tuple(messages),
-                    tools=available_tools,
+                    tools=step_tools,
                     metadata={"task_id": task.task_id, "step": step},
                 ),
                 context,
@@ -145,10 +153,17 @@ class SingleAgentExecutor:
                             "Executor loop guard blocked task=%s tool=%s reason=%s",
                             task.task_id, tool_call.name, verdict.reason,
                         )
-                        error_results.append((tool_call, (
+                        blocked_tool_names.add(tool_call.name)
+                        remaining = [
+                            t["function"]["name"] for t in available_tools
+                            if t["function"]["name"] not in blocked_tool_names
+                        ]
+                        hint = (
                             f"Loop guard: {verdict.reason}"
-                            "\n[Hint: Change strategy instead of repeating the same call pattern.]"
-                        )))
+                            f"\nTool '{tool_call.name}' is now disabled for this task."
+                            f"\nYou MUST use a different tool. Available tools: {remaining}"
+                        )
+                        error_results.append((tool_call, hint))
                         continue
 
                     registered = self.tools.get(tool_call.name)
