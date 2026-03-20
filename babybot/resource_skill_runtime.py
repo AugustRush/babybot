@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+from typing import Any
+
+from .agent_kernel import SkillPack, ToolLease
+
+
+class ResourceSkillRuntime:
+    def __init__(self, owner: Any) -> None:
+        self._owner = owner
+
+    async def select_skill_packs(
+        self,
+        task_description: str,
+        skill_ids: list[str] | None = None,
+    ) -> list[SkillPack]:
+        del task_description
+        active = [skill for skill in self._owner.skills.values() if skill.active]
+        if not active:
+            return []
+        if skill_ids is not None:
+            wanted = {
+                item.strip().lower()
+                for item in skill_ids
+                if isinstance(item, str) and item.strip()
+            }
+            active = [
+                skill
+                for skill in active
+                if skill.name.strip().lower() in wanted
+                or self._owner._skill_resource_id(skill) in wanted
+            ]
+        return [
+            SkillPack(
+                name=skill.name,
+                system_prompt=skill.prompt,
+                tool_lease=skill.lease,
+            )
+            for skill in active
+        ]
+
+    def build_worker_sys_prompt(
+        self,
+        agent_name: str,
+        task_description: str,
+        tools_text: str,
+        selected_skill_packs: list[SkillPack],
+        merged_lease: ToolLease | None = None,
+    ) -> str:
+        selected_names = ", ".join(skill.name for skill in selected_skill_packs) or "无"
+        if merged_lease is not None:
+            skill_catalog = self.format_skill_catalog_for_lease(
+                merged_lease,
+                max_items=24,
+            )
+        else:
+            skill_catalog = self.format_skill_catalog(max_items=24)
+        lines = [
+            f"你是 {agent_name}，请完成任务并输出最终答案。",
+            f"任务：{task_description}",
+            f"已激活技能（本次强相关）：{selected_names}",
+            f"可用技能目录（按需选择）：\n{skill_catalog}",
+            f"可用工具：{tools_text}",
+            "要求：",
+            "1. 当任务需要生成图片、查询信息、发送消息等操作时，必须调用对应工具，不能仅用文字描述。",
+            "2. 禁止编造工具执行结果或虚构文件路径。",
+            "3. 用户询问你能做什么或能力范围时，必须优先介绍可用技能目录与工具能力。",
+            "4. 如需某技能但本次未激活，可在回答中明确指出可切换到该技能处理。",
+            "5. 子Agent禁止直接向用户发送消息；即使技能文档提到 send_audio/send_image/send_text，也只返回结果与文件路径，由主Agent统一回复用户。",
+        ]
+        return "\n".join(lines)
+
+    def format_skill_catalog_for_lease(
+        self,
+        lease: ToolLease,
+        max_items: int = 20,
+    ) -> str:
+        lease_groups = set(lease.include_groups)
+        lease_tools = set(lease.include_tools)
+        if not lease_groups and not lease_tools:
+            return self.format_skill_catalog(max_items=max_items)
+
+        accessible = []
+        for skill in sorted(self._owner.skills.values(), key=lambda item: item.name.lower()):
+            if not skill.active:
+                continue
+            skill_lease = skill.lease or ToolLease()
+            skill_groups = set(skill_lease.include_groups)
+            skill_tools = set(skill_lease.include_tools)
+            if not skill_groups and not skill_tools:
+                accessible.append(skill)
+            elif skill_groups & lease_groups:
+                accessible.append(skill)
+            elif skill_tools and (skill_tools & lease_tools):
+                accessible.append(skill)
+
+        if not accessible:
+            return "- 无"
+        lines: list[str] = []
+        for idx, skill in enumerate(accessible, start=1):
+            if idx > max_items:
+                lines.append(f"- ... 还有 {len(accessible) - max_items} 个技能")
+                break
+            desc = skill.description.strip() or "无描述"
+            lines.append(f"- {skill.name}: {desc}")
+        return "\n".join(lines)
+
+    def format_skill_catalog(self, max_items: int = 20) -> str:
+        skills = [skill for skill in self._owner.skills.values() if skill.active]
+        if not skills:
+            return "- 无"
+        lines: list[str] = []
+        for idx, skill in enumerate(
+            sorted(skills, key=lambda item: item.name.lower()),
+            start=1,
+        ):
+            if idx > max_items:
+                lines.append(f"- ... 还有 {len(skills) - max_items} 个技能")
+                break
+            desc = skill.description.strip() or "无描述"
+            lines.append(f"- {skill.name}: {desc}")
+        return "\n".join(lines)

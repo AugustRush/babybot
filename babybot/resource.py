@@ -42,6 +42,7 @@ from .resource_models import (
     ToolGroup,
 )
 from .resource_python_runner import ExternalPythonRunner
+from .resource_skill_runtime import ResourceSkillRuntime
 from .resource_scope import ResourceScopeHelper
 from .resource_subagent_runtime import ResourceSubagentRuntime
 from .resource_tool_loader import ResourceToolLoader
@@ -446,6 +447,13 @@ class ResourceManager:
         if helper is None:
             helper = ResourceSubagentRuntime(self)
             self._subagent_runtime = helper
+        return helper
+
+    def _skill_runtime_view(self) -> ResourceSkillRuntime:
+        helper = getattr(self, "_skill_runtime", None)
+        if helper is None:
+            helper = ResourceSkillRuntime(self)
+            self._skill_runtime = helper
         return helper
 
     @staticmethod
@@ -1230,29 +1238,10 @@ class ResourceManager:
         task_description: str,
         skill_ids: list[str] | None = None,
     ) -> list[SkillPack]:
-        active = [s for s in self.skills.values() if s.active]
-        if not active:
-            return []
-        if skill_ids is not None:
-            wanted = {
-                item.strip().lower()
-                for item in skill_ids
-                if isinstance(item, str) and item.strip()
-            }
-            selected = [
-                s
-                for s in active
-                if s.name.strip().lower() in wanted
-                or self._skill_resource_id(s) in wanted
-            ]
-            return [
-                SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
-                for s in selected
-            ]
-        return [
-            SkillPack(name=s.name, system_prompt=s.prompt, tool_lease=s.lease)
-            for s in active
-        ]
+        return await self._skill_runtime_view().select_skill_packs(
+            task_description,
+            skill_ids=skill_ids,
+        )
 
     def _build_worker_sys_prompt(
         self,
@@ -1262,79 +1251,24 @@ class ResourceManager:
         selected_skill_packs: list[SkillPack],
         merged_lease: "ToolLease | None" = None,
     ) -> str:
-        selected_names = ", ".join(skill.name for skill in selected_skill_packs) or "无"
-        if merged_lease is not None:
-            skill_catalog = self._format_skill_catalog_for_lease(
-                merged_lease, max_items=24
-            )
-        else:
-            skill_catalog = self._format_skill_catalog(max_items=24)
-        lines = [
-            "你是 %s，请完成任务并输出最终答案。" % agent_name,
-            "任务：%s" % task_description,
-            "已激活技能（本次强相关）：%s" % selected_names,
-            "可用技能目录（按需选择）：\n%s" % skill_catalog,
-            "可用工具：%s" % tools_text,
-            "要求：",
-            "1. 当任务需要生成图片、查询信息、发送消息等操作时，必须调用对应工具，不能仅用文字描述。",
-            "2. 禁止编造工具执行结果或虚构文件路径。",
-            "3. 用户询问你能做什么或能力范围时，必须优先介绍可用技能目录与工具能力。",
-            "4. 如需某技能但本次未激活，可在回答中明确指出可切换到该技能处理。",
-            "5. 子Agent禁止直接向用户发送消息；即使技能文档提到 send_audio/send_image/send_text，也只返回结果与文件路径，由主Agent统一回复用户。",
-        ]
-        return "\n".join(lines)
+        return self._skill_runtime_view().build_worker_sys_prompt(
+            agent_name=agent_name,
+            task_description=task_description,
+            tools_text=tools_text,
+            selected_skill_packs=selected_skill_packs,
+            merged_lease=merged_lease,
+        )
 
     def _format_skill_catalog_for_lease(
         self, lease: "ToolLease", max_items: int = 20
     ) -> str:
-        """Format skill catalog showing only skills accessible under the given lease."""
-        lease_groups = set(lease.include_groups)
-        lease_tools = set(lease.include_tools)
-
-        # No group/tool restrictions on the lease → show all (same as _format_skill_catalog)
-        if not lease_groups and not lease_tools:
-            return self._format_skill_catalog(max_items=max_items)
-
-        accessible: list["LoadedSkill"] = []
-        for skill in sorted(self.skills.values(), key=lambda s: s.name.lower()):
-            if not skill.active:
-                continue
-            skill_lease = skill.lease or ToolLease()
-            skill_groups = set(skill_lease.include_groups)
-            skill_tools = set(skill_lease.include_tools)
-            if not skill_groups and not skill_tools:
-                # Prompt-only skill with no tool requirements → always accessible
-                accessible.append(skill)
-            elif skill_groups & lease_groups:
-                accessible.append(skill)
-            elif skill_tools and (skill_tools & lease_tools):
-                accessible.append(skill)
-
-        if not accessible:
-            return "- 无"
-        lines: list[str] = []
-        for idx, skill in enumerate(accessible, start=1):
-            if idx > max_items:
-                lines.append(f"- ... 还有 {len(accessible) - max_items} 个技能")
-                break
-            desc = skill.description.strip() or "无描述"
-            lines.append(f"- {skill.name}: {desc}")
-        return "\n".join(lines)
+        return self._skill_runtime_view().format_skill_catalog_for_lease(
+            lease,
+            max_items=max_items,
+        )
 
     def _format_skill_catalog(self, max_items: int = 20) -> str:
-        skills = [s for s in self.skills.values() if s.active]
-        if not skills:
-            return "- 无"
-        lines: list[str] = []
-        for idx, skill in enumerate(
-            sorted(skills, key=lambda s: s.name.lower()), start=1
-        ):
-            if idx > max_items:
-                lines.append(f"- ... 还有 {len(skills) - max_items} 个技能")
-                break
-            desc = skill.description.strip() or "无描述"
-            lines.append(f"- {skill.name}: {desc}")
-        return "\n".join(lines)
+        return self._skill_runtime_view().format_skill_catalog(max_items=max_items)
 
     async def __aenter__(self) -> "ResourceManager":
         await self.initialize_async()
