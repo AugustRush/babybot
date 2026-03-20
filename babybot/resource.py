@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextvars
-import datetime
 import inspect
 import json
 import logging
@@ -25,6 +24,18 @@ from .agent_kernel import (
     ToolLease,
     ToolRegistry,
     ToolResult,
+)
+from .builtin_tools import iter_builtin_tool_registrations
+from .builtin_tools.scheduled_tasks import (
+    build_create_scheduled_task_tool,
+    build_delete_scheduled_task_tool,
+    build_list_scheduled_tasks_tool,
+    build_save_scheduled_task_tool,
+    build_update_scheduled_task_tool,
+)
+from .builtin_tools.workers import (
+    build_create_worker_tool,
+    build_dispatch_workers_tool,
 )
 from .config import Config
 from .mcp_runtime import (
@@ -711,18 +722,8 @@ class ResourceManager:
             )
 
     def _register_builtin_tools(self) -> None:
-        self.register_tool(self.create_worker_tool(), group_name="basic")
-        self.register_tool(self.dispatch_workers_tool(), group_name="basic")
-        self.register_tool(self.list_scheduled_tasks_tool(), group_name="basic")
-        self.register_tool(self.save_scheduled_task_tool(), group_name="basic")
-        self.register_tool(self.create_scheduled_task_tool(), group_name="basic")
-        self.register_tool(self.update_scheduled_task_tool(), group_name="basic")
-        self.register_tool(self.delete_scheduled_task_tool(), group_name="basic")
-        self.register_tool(self._workspace_execute_python_code, group_name="code")
-        self.register_tool(self._workspace_execute_shell_command, group_name="code")
-        self.register_tool(self._workspace_view_text_file, group_name="code")
-        self.register_tool(self._workspace_write_text_file, group_name="code")
-        self.register_tool(self._workspace_insert_text_file, group_name="code")
+        for func, group_name in iter_builtin_tool_registrations(self):
+            self.register_tool(func, group_name=group_name)
 
     @staticmethod
     def _resource_slug(value: str) -> str:
@@ -929,288 +930,25 @@ class ResourceManager:
         return self._resource_scope_view().build_task_lease(lease)
 
     def create_worker_tool(self) -> Any:
-        async def create_worker(
-            task_description: str,
-            lease: dict[str, Any] | None = None,
-            skill_ids: list[str] | None = None,
-        ) -> str:
-            inherited_lease = lease
-            if inherited_lease is None:
-                current_lease = self._get_current_task_lease_var().get()
-                if current_lease is not None:
-                    inherited_lease = self._lease_to_dict(current_lease)
-            inherited_skill_ids = skill_ids
-            if inherited_skill_ids is None:
-                current_skill_ids = self._get_current_skill_ids_var().get()
-                if current_skill_ids is not None:
-                    inherited_skill_ids = list(current_skill_ids)
-            text, _ = await self.run_subagent_task(
-                task_description,
-                lease=inherited_lease,
-                skill_ids=inherited_skill_ids,
-            )
-            return text
-
-        return create_worker
+        return build_create_worker_tool(self)
 
     def dispatch_workers_tool(self) -> Any:
-        async def dispatch_workers(
-            tasks: list[str],
-            max_concurrency: int = 3,
-            lease: dict[str, Any] | None = None,
-            skill_ids: list[str] | None = None,
-        ) -> str:
-            normalized = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
-            if not normalized:
-                return "No valid tasks were provided."
-            limit = max(1, min(int(max_concurrency), len(normalized), 8))
-            semaphore = asyncio.Semaphore(limit)
-            inherited_lease = lease
-            if inherited_lease is None:
-                current_lease = self._get_current_task_lease_var().get()
-                if current_lease is not None:
-                    inherited_lease = self._lease_to_dict(current_lease)
-            inherited_skill_ids = skill_ids
-            if inherited_skill_ids is None:
-                current_skill_ids = self._get_current_skill_ids_var().get()
-                if current_skill_ids is not None:
-                    inherited_skill_ids = list(current_skill_ids)
-
-            async def run_one(index: int, task: str) -> dict[str, Any]:
-                async with semaphore:
-                    try:
-                        text, _ = await self.run_subagent_task(
-                            task_description=task,
-                            lease=inherited_lease,
-                            agent_name=f"Worker-{index}",
-                            skill_ids=inherited_skill_ids,
-                        )
-                        return {"index": index, "task": task, "result": text}
-                    except Exception as exc:
-                        return {"index": index, "task": task, "error": str(exc)}
-
-            results = await asyncio.gather(
-                *(run_one(i, task) for i, task in enumerate(normalized, start=1))
-            )
-            return json.dumps(
-                {"max_concurrency": limit, "results": results},
-                ensure_ascii=False,
-                indent=2,
-            )
-
-        return dispatch_workers
-
-    def _require_scheduled_task_manager(self) -> "ScheduledTaskManager":
-        if self.scheduled_task_manager is None:
-            raise RuntimeError("Scheduled task manager is unavailable in this runtime.")
-        return self.scheduled_task_manager
-
-    @staticmethod
-    def _resolve_scheduled_task_target(
-        channel: str | None,
-        chat_id: str | None,
-    ) -> tuple[str, str]:
-        if channel and chat_id:
-            return channel, chat_id
-
-        from .channels.tools import ChannelToolContext
-
-        ctx = ChannelToolContext.get_current()
-        resolved_channel = (channel or "").strip()
-        resolved_chat_id = (chat_id or "").strip()
-        if ctx is not None:
-            if not resolved_channel:
-                resolved_channel = getattr(ctx, "channel_name", "") or str(
-                    (ctx.metadata or {}).get("channel", "")
-                )
-            if not resolved_chat_id:
-                resolved_chat_id = ctx.chat_id
-
-        if not resolved_channel or not resolved_chat_id:
-            raise RuntimeError(
-                "Scheduled task target is missing. In channel conversations this "
-                "should be inherited automatically; otherwise provide channel and chat_id."
-            )
-        return resolved_channel, resolved_chat_id
-
-    @staticmethod
-    def _anchor_delay_to_request_time(
-        *,
-        delay_seconds: float | None,
-        run_at: str | None,
-    ) -> tuple[float | None, str | None]:
-        if delay_seconds is None or run_at is not None:
-            return delay_seconds, run_at
-
-        from .channels.tools import ChannelToolContext
-
-        ctx = ChannelToolContext.get_current()
-        if ctx is None:
-            return delay_seconds, run_at
-        raw_received_at = (ctx.metadata or {}).get("request_received_at")
-        if not isinstance(raw_received_at, str) or not raw_received_at.strip():
-            return delay_seconds, run_at
-        received_at = raw_received_at.strip()
-        if received_at.endswith("Z"):
-            received_at = received_at[:-1] + "+00:00"
-        base = datetime.datetime.fromisoformat(received_at)
-        if base.tzinfo is None:
-            base = base.replace(tzinfo=datetime.datetime.now().astimezone().tzinfo)
-        anchored = base.astimezone() + datetime.timedelta(seconds=float(delay_seconds))
-        return None, anchored.isoformat(timespec="seconds")
+        return build_dispatch_workers_tool(self)
 
     def list_scheduled_tasks_tool(self) -> Any:
-        def list_scheduled_tasks() -> str:
-            """List all scheduled tasks from the workspace task file."""
-            return self._require_scheduled_task_manager().render_tasks()
-
-        return list_scheduled_tasks
+        return build_list_scheduled_tasks_tool(self)
 
     def create_scheduled_task_tool(self) -> Any:
-        def create_scheduled_task(
-            prompt: str,
-            channel: str | None = None,
-            chat_id: str | None = None,
-            name: str | None = None,
-            cron: str | None = None,
-            interval_seconds: float | None = None,
-            run_at: str | None = None,
-            delay_seconds: float | None = None,
-            enabled: bool = True,
-            require_active_runtime: bool = True,
-        ) -> str:
-            """Create a scheduled task.
-
-            Scheduling options (provide exactly one):
-            - delay_seconds: execute once after N seconds (e.g., 120 for 'in 2 minutes')
-            - run_at: execute once at absolute time (ISO format or HH:MM)
-            - cron: recurring cron expression
-            - interval_seconds: recurring every N seconds
-            """
-            channel_name, target_chat_id = self._resolve_scheduled_task_target(
-                channel, chat_id
-            )
-            delay_seconds, run_at = self._anchor_delay_to_request_time(
-                delay_seconds=delay_seconds,
-                run_at=run_at,
-            )
-            task = self._require_scheduled_task_manager().create_task(
-                name=name,
-                prompt=prompt,
-                channel=channel_name,
-                chat_id=target_chat_id,
-                cron=cron,
-                interval_seconds=interval_seconds,
-                run_at=run_at,
-                delay_seconds=delay_seconds,
-                enabled=enabled,
-                require_active_runtime=require_active_runtime,
-            )
-            return json.dumps(task, ensure_ascii=False, indent=2)
-
-        return create_scheduled_task
+        return build_create_scheduled_task_tool(self)
 
     def save_scheduled_task_tool(self) -> Any:
-        def save_scheduled_task(
-            prompt: str,
-            channel: str | None = None,
-            chat_id: str | None = None,
-            name: str | None = None,
-            cron: str | None = None,
-            interval_seconds: float | None = None,
-            run_at: str | None = None,
-            delay_seconds: float | None = None,
-            enabled: bool = True,
-            require_active_runtime: bool = True,
-        ) -> str:
-            """Create or update a scheduled task. Prefer this for natural-language task management.
-
-            Scheduling options (provide exactly one):
-            - delay_seconds: execute once after N seconds (e.g., 120 for 'in 2 minutes')
-            - run_at: execute once at absolute time (ISO format or HH:MM)
-            - cron: recurring cron expression
-            - interval_seconds: recurring every N seconds
-            """
-            channel_name, target_chat_id = self._resolve_scheduled_task_target(
-                channel, chat_id
-            )
-            delay_seconds, run_at = self._anchor_delay_to_request_time(
-                delay_seconds=delay_seconds,
-                run_at=run_at,
-            )
-            task = self._require_scheduled_task_manager().save_task(
-                name=name,
-                prompt=prompt,
-                channel=channel_name,
-                chat_id=target_chat_id,
-                cron=cron,
-                interval_seconds=interval_seconds,
-                run_at=run_at,
-                delay_seconds=delay_seconds,
-                enabled=enabled,
-                require_active_runtime=require_active_runtime,
-            )
-            return json.dumps(task, ensure_ascii=False, indent=2)
-
-        return save_scheduled_task
+        return build_save_scheduled_task_tool(self)
 
     def update_scheduled_task_tool(self) -> Any:
-        def update_scheduled_task(
-            name: str,
-            prompt: str | None = None,
-            channel: str | None = None,
-            chat_id: str | None = None,
-            cron: str | None = None,
-            interval_seconds: float | None = None,
-            run_at: str | None = None,
-            delay_seconds: float | None = None,
-            enabled: bool | None = None,
-            require_active_runtime: bool = True,
-        ) -> str:
-            """Update one scheduled task by name.
-
-            Scheduling options (provide exactly one to switch schedule):
-            - delay_seconds: execute once after N seconds (e.g., 120 for 'in 2 minutes')
-            - run_at: execute once at absolute time (ISO format or HH:MM)
-            - cron: recurring cron expression
-            - interval_seconds: recurring every N seconds
-            """
-            if channel is None or chat_id is None:
-                try:
-                    channel, chat_id = self._resolve_scheduled_task_target(
-                        channel, chat_id
-                    )
-                except RuntimeError:
-                    pass
-            delay_seconds, run_at = self._anchor_delay_to_request_time(
-                delay_seconds=delay_seconds,
-                run_at=run_at,
-            )
-            task = self._require_scheduled_task_manager().update_task(
-                name=name,
-                prompt=prompt,
-                channel=channel,
-                chat_id=chat_id,
-                cron=cron,
-                interval_seconds=interval_seconds,
-                run_at=run_at,
-                delay_seconds=delay_seconds,
-                enabled=enabled,
-                require_active_runtime=require_active_runtime,
-            )
-            return json.dumps(task, ensure_ascii=False, indent=2)
-
-        return update_scheduled_task
+        return build_update_scheduled_task_tool(self)
 
     def delete_scheduled_task_tool(self) -> Any:
-        def delete_scheduled_task(name: str) -> str:
-            """Delete one scheduled task by name."""
-            deleted = self._require_scheduled_task_manager().delete_task(name)
-            return json.dumps(
-                {"name": name, "deleted": deleted}, ensure_ascii=False, indent=2
-            )
-
-        return delete_scheduled_task
+        return build_delete_scheduled_task_tool(self)
 
     def reset(self) -> None:
         close_clients_best_effort(self.mcp_clients)

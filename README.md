@@ -77,6 +77,7 @@ uv run gateway
 | `resource_tool_loader.py` | workspace tools 的注册/加载 |
 | `resource_subagent_runtime.py` | 子 agent 运行时 orchestration |
 | `resource_skill_runtime.py` | skill pack 选择、worker prompt 与技能目录格式化 |
+| `builtin_tools/` | 内置 basic/code 工具定义与注册清单 |
 
 ## 运行模式
 
@@ -372,6 +373,7 @@ babybot/
 │   ├── resource_subagent_runtime.py # 子 agent 运行时 orchestration
 │   ├── resource_tool_loader.py  # workspace tools 加载
 │   ├── resource_workspace_tools.py # workspace 文件与代码工具
+│   ├── builtin_tools/           # 内置工具定义（worker/scheduler/code）
 │   ├── worker.py                # Worker 执行器工厂
 │   ├── model_gateway.py         # OpenAI 兼容网关
 │   ├── message_bus.py           # 异步消息总线
