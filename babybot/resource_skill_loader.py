@@ -46,11 +46,11 @@ class SkillLoader:
                     callable_tool_cls=self._owner._callable_tool_cls(),
                 )
                 description = conf.get("description") or meta.get("description", "")
-                keywords = self._owner._normalize_keywords(
+                keywords = self.normalize_keywords(
                     conf.get("keywords"),
                     fallback=(description, name),
                 )
-                phrases = self._owner._normalize_phrases(
+                phrases = self.normalize_phrases(
                     conf.get("keywords"),
                     fallback=(description, name),
                 )
@@ -102,11 +102,11 @@ class SkillLoader:
                     if key in self._owner.skills:
                         continue
                     description = meta.get("description", f"Skill: {name}")
-                    keywords = self._owner._normalize_keywords(
+                    keywords = self.normalize_keywords(
                         None,
                         fallback=(description, name, prompt[:400]),
                     )
-                    phrases = self._owner._normalize_phrases(
+                    phrases = self.normalize_phrases(
                         None,
                         fallback=(description, name),
                     )
@@ -259,6 +259,62 @@ class SkillLoader:
             "parse_arguments",
             "create_client",
         }
+
+    @classmethod
+    def normalize_keywords(
+        cls,
+        raw_keywords: Any,
+        fallback: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        values: list[str] = []
+        if isinstance(raw_keywords, (list, tuple)):
+            values.extend(str(x) for x in raw_keywords if str(x).strip())
+        elif isinstance(raw_keywords, str) and raw_keywords.strip():
+            values.extend([w for w in re.split(r"[,\n]+", raw_keywords) if w.strip()])
+        values.extend(str(item) for item in fallback if str(item).strip())
+        terms: set[str] = set()
+        for value in values:
+            terms.update(cls.tokenize(str(value)))
+        return tuple(sorted(terms))
+
+    @staticmethod
+    def normalize_phrases(
+        raw_keywords: Any,
+        fallback: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        phrases: list[str] = []
+        if isinstance(raw_keywords, (list, tuple)):
+            phrases.extend(
+                str(x).strip().lower() for x in raw_keywords if str(x).strip()
+            )
+        elif isinstance(raw_keywords, str) and raw_keywords.strip():
+            phrases.extend(
+                p.strip().lower() for p in re.split(r"[,\n]+", raw_keywords) if p.strip()
+            )
+        phrases.extend(str(x).strip().lower() for x in fallback if str(x).strip())
+        normalized = []
+        for phrase in phrases:
+            phrase = re.sub(r"\s+", " ", phrase).strip()
+            if phrase and len(phrase) >= 2:
+                normalized.append(phrase)
+        return tuple(sorted(set(normalized)))
+
+    @staticmethod
+    def tokenize(text: str) -> set[str]:
+        text = (text or "").lower()
+        tokens: set[str] = set()
+        words = re.findall(r"[a-z0-9_]{2,}", text)
+        tokens.update(words)
+        for word in words:
+            if len(word) >= 5:
+                for i in range(0, len(word) - 2):
+                    tokens.add(word[i : i + 3])
+        for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            tokens.add(seg)
+            if len(seg) >= 2:
+                for i in range(0, len(seg) - 1):
+                    tokens.add(seg[i : i + 2])
+        return {token for token in tokens if token}
 
     @classmethod
     def extract_function_specs_from_script(

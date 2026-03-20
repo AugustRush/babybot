@@ -50,6 +50,12 @@ class ExternalPythonRunner:
         normalized = str(path).replace("\\", "/").lower()
         return "/.venv/" in normalized or "/venv/" in normalized
 
+    @staticmethod
+    def format_cli_argument(value: Any) -> str:
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
     def discover_host_python_candidates(self) -> list[str]:
         candidates: list[str] = []
         for name in ("python3", "python"):
@@ -237,7 +243,7 @@ class ExternalPythonRunner:
                     continue
                 if value is None:
                     continue
-                argv_tail.extend([spec.flag, owner._format_cli_argument(value)])
+                argv_tail.extend([spec.flag, self.format_cli_argument(value)])
             timeout_s = owner._coerce_timeout(kwargs.get("timeout"), default=300.0)
             attempts: list[str] = []
             for candidate in owner._get_python_candidates(runtime):
