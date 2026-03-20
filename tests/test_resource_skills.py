@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from babybot.agent_kernel import TaskResult, ToolLease
+from babybot.agent_kernel import SkillPack, TaskResult, ToolLease
 from babybot.agent_kernel.tools import ToolContext
 from babybot.resource import CallableTool, LoadedSkill, ResourceManager, ToolGroup
 
@@ -774,6 +774,74 @@ def test_run_subagent_task_propagates_channel_context_to_worker_context(
         ChannelToolContext.set_current(None)
 
     assert seen["channel_context"] is parent_ctx
+
+
+def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_merge_lease",
+        default=str(tmp_path),
+    )
+    manager._get_output_dir = lambda: tmp_path
+    manager._build_task_lease = lambda lease: ToolLease(
+        include_groups=("basic",),
+        include_tools=("regular_tool",),
+        exclude_tools=("create_worker",),
+    )
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return [
+            SkillPack(
+                name="weather-query",
+                system_prompt="weather",
+                tool_lease=ToolLease(
+                    include_groups=("skill_weather_query",),
+                    include_tools=("weather_query__fetch_weather",),
+                    exclude_tools=("dispatch_workers",),
+                ),
+            )
+        ]
+
+    manager._select_skill_packs = _select_skill_packs
+    captured: dict[str, object] = {}
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del context
+            captured["lease"] = task.lease
+            return TaskResult(task_id="worker", status="succeeded", output="done")
+
+    def _fake_create_worker_executor(**kwargs):
+        captured["skill_packs"] = kwargs["skill_packs"]
+        return _FakeExecutor()
+
+    monkeypatch.setattr("babybot.resource.create_worker_executor", _fake_create_worker_executor)
+
+    text, media = asyncio.run(manager.run_subagent_task("check weather"))
+
+    assert text == "done"
+    assert media == []
+    merged_lease = captured["lease"]
+    assert isinstance(merged_lease, ToolLease)
+    assert merged_lease.include_groups == ("basic", "skill_weather_query")
+    assert merged_lease.include_tools == ("regular_tool", "weather_query__fetch_weather")
+    assert merged_lease.exclude_tools == ("create_worker", "dispatch_workers")
+
+    executor_skill_packs = captured["skill_packs"]
+    assert isinstance(executor_skill_packs, list)
+    assert [pack.name for pack in executor_skill_packs] == ["weather-query"]
+    assert all(pack.tool_lease == ToolLease() for pack in executor_skill_packs)
 
 
 def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
