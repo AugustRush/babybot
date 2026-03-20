@@ -269,6 +269,108 @@ def test_cli_script_proxy_invokes_script_with_named_arguments(tmp_path: Path) ->
     assert "bird|2|True" in result.content
 
 
+def test_cli_script_proxy_retries_with_fallback_python_on_env_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "resolve_workspace_path": staticmethod(lambda value: str(value)),
+            "workspace_dir": tmp_path,
+            "system": SimpleNamespace(
+                shell_command_timeout=300,
+                python_executable="",
+                python_fallback_executables=[],
+            ),
+        },
+    )()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_cli_proxy_fallback",
+        default=str(tmp_path),
+    )
+    skill_dir = tmp_path / "image_cli"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "generate_image.py").write_text(
+        "import argparse\n"
+        "def parse_arguments():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('-p', '--prompt', required=True)\n"
+        "    return parser.parse_args()\n\n"
+        "def main():\n"
+        "    args = parse_arguments()\n"
+        "    print(args.prompt)\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
+        {
+            "executable": "/broken/python",
+            "required_modules": (),
+            "source": "skill.python_executable",
+        },
+        {
+            "executable": "/healthy/python",
+            "required_modules": (),
+            "source": "skill.python_fallback_executables",
+        },
+    ])
+    monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
+
+    calls: list[str] = []
+
+    class _Proc:
+        def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stderr = stderr
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+        def kill(self) -> None:
+            return None
+
+    async def _fake_exec(program, *args, **kwargs):
+        del args, kwargs
+        calls.append(program)
+        if program == "/broken/python":
+            return _Proc(1, b"", b"ModuleNotFoundError: No module named 'PIL'\n")
+        return _Proc(0, b"bird\n", b"")
+
+    monkeypatch.setattr("babybot.resource.asyncio.create_subprocess_exec", _fake_exec)
+
+    manager._register_skill_tools(
+        "image-cli",
+        skill_dir,
+        runtime=ResourceManager._build_skill_runtime(
+            {
+                "python_executable": "/broken/python",
+                "python_fallback_executables": ["/healthy/python"],
+            }
+        ),
+    )
+    reg = manager.registry.get("image_cli__generate_image")
+
+    result = asyncio.run(
+        reg.tool.invoke(  # type: ignore[union-attr]
+            {"prompt": "bird"},
+            ToolContext(session_id="test", state={}),
+        )
+    )
+
+    assert result.ok is True
+    assert result.content == "bird"
+    assert calls == ["/broken/python", "/healthy/python"]
+
+
 def test_get_user_python_prefers_path_python3_over_hardcoded_system_python(tmp_path: Path, monkeypatch) -> None:
     manager = object.__new__(ResourceManager)
     manager.config = type(
@@ -823,3 +925,189 @@ def test_callable_tool_relocates_external_artifact_into_workspace_output(tmp_pat
     assert relocated.parent == workspace_output.resolve()
     assert relocated.name == external_path.name
     assert relocated.read_bytes() == b"png-bytes"
+
+
+def test_get_python_candidates_prefers_skill_runtime_then_fallbacks(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "system": SimpleNamespace(
+                shell_command_timeout=300,
+                python_executable="/global/python",
+                python_fallback_executables=["/global/fallback"],
+            ),
+            "workspace_dir": tmp_path,
+        },
+    )()
+
+    runtime = ResourceManager._build_skill_runtime(
+        {
+            "python_executable": "/skill/python",
+            "python_fallback_executables": "/skill/fallback-a, /skill/fallback-b",
+            "python_required_modules": "mlx_audio, soundfile",
+        }
+    )
+
+    candidates = manager._get_python_candidates(runtime)
+
+    assert [item["executable"] for item in candidates[:5]] == [
+        "/skill/python",
+        "/skill/fallback-a",
+        "/skill/fallback-b",
+        "/global/python",
+        "/global/fallback",
+    ]
+    assert candidates[0]["required_modules"] == ("mlx_audio", "soundfile")
+
+
+def test_invoke_external_skill_function_retries_with_fallback_python_on_env_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "system": SimpleNamespace(
+                shell_command_timeout=300,
+                python_executable="",
+                python_fallback_executables=[],
+            ),
+            "workspace_dir": tmp_path,
+        },
+    )()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_external_skill_fallback",
+        default=str(tmp_path),
+    )
+
+    runtime = ResourceManager._build_skill_runtime(
+        {
+            "python_executable": "/broken/python",
+            "python_fallback_executables": ["/healthy/python"],
+        }
+    )
+    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
+        {
+            "executable": "/broken/python",
+            "required_modules": (),
+            "source": "skill.python_executable",
+        },
+        {
+            "executable": "/healthy/python",
+            "required_modules": (),
+            "source": "skill.python_fallback_executables",
+        },
+    ])
+    monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
+
+    calls: list[str] = []
+
+    class _Proc:
+        def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stderr = stderr
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+        def kill(self) -> None:
+            return None
+
+    async def _fake_exec(program, *args, **kwargs):
+        del args, kwargs
+        calls.append(program)
+        if program == "/broken/python":
+            return _Proc(
+                1,
+                b"",
+                b"Traceback (most recent call last):\nModuleNotFoundError: No module named 'mlx_audio'\n",
+            )
+        return _Proc(
+            0,
+            b'__BABYBOT_RESULT__{"ok": true, "result": "audio.wav"}\n',
+            b"",
+        )
+
+    monkeypatch.setattr("babybot.resource.asyncio.create_subprocess_exec", _fake_exec)
+
+    result = asyncio.run(
+        manager._invoke_external_skill_function(
+            script_path=str(tmp_path / "tool.py"),
+            function_name="generate_speech",
+            arguments={"text": "hello"},
+            runtime=runtime,
+        )
+    )
+
+    assert result == "audio.wav"
+    assert calls == ["/broken/python", "/healthy/python"]
+
+
+def test_invoke_external_skill_function_does_not_retry_business_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "system": SimpleNamespace(
+                shell_command_timeout=300,
+                python_executable="",
+                python_fallback_executables=[],
+            ),
+            "workspace_dir": tmp_path,
+        },
+    )()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_external_skill_business_failure",
+        default=str(tmp_path),
+    )
+
+    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
+        {"executable": "/primary/python", "required_modules": (), "source": "auto"},
+        {"executable": "/fallback/python", "required_modules": (), "source": "auto"},
+    ])
+    monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
+
+    calls: list[str] = []
+
+    class _Proc:
+        def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stderr = stderr
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+        def kill(self) -> None:
+            return None
+
+    async def _fake_exec(program, *args, **kwargs):
+        del args, kwargs
+        calls.append(program)
+        return _Proc(
+            0,
+            b'__BABYBOT_RESULT__{"ok": false, "error": "text is empty"}\n',
+            b"",
+        )
+
+    monkeypatch.setattr("babybot.resource.asyncio.create_subprocess_exec", _fake_exec)
+
+    result = asyncio.run(
+        manager._invoke_external_skill_function(
+            script_path=str(tmp_path / "tool.py"),
+            function_name="generate_speech",
+            arguments={"text": ""},
+        )
+    )
+
+    assert result == "Tool error: text is empty"
+    assert calls == ["/primary/python"]

@@ -36,6 +36,7 @@
     "max_per_chat": 1,
     "send_ack": true,
     "python_executable": "",
+    "python_fallback_executables": [],
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
     "context_max_chats": 500
