@@ -9,7 +9,6 @@ from typing import Any
 from babybot.agent_kernel import ExecutionContext, ModelRequest, ModelResponse, ModelToolCall
 from babybot.agent_kernel.dynamic_orchestrator import (
     DynamicOrchestrator,
-    FileChildTaskStateStore,
     InMemoryChildTaskBus,
     InProcessChildTaskRuntime,
 )
@@ -74,6 +73,9 @@ class _DummyGateway:
 
 
 class _DummyResourceManager:
+    def __init__(self) -> None:
+        self.config = type("C", (), {"home_dir": "/tmp/babybot-home"})()
+
     def get_resource_briefs(self) -> list[dict[str, Any]]:
         return [
             {
@@ -145,58 +147,16 @@ def test_dynamic_orchestrator_emits_child_task_lifecycle_events() -> None:
     assert len({event.task_id for event in events}) == 1
 
 
-def test_dynamic_orchestrator_persists_flow_snapshot(tmp_path) -> None:
-    store = FileChildTaskStateStore(tmp_path)
-    bus = InMemoryChildTaskBus()
+def test_dynamic_orchestrator_uses_in_memory_state_only_by_default() -> None:
     orchestrator = DynamicOrchestrator(
         resource_manager=_DummyResourceManager(),  # type: ignore[arg-type]
         gateway=_DummyGateway(),  # type: ignore[arg-type]
-        child_task_bus=bus,
-        state_store=store,
     )
 
-    asyncio.run(orchestrator.run("查天气", ExecutionContext(session_id="flow-1")))
-
-    payload = json.loads((tmp_path / "flow-1.json").read_text(encoding="utf-8"))
-    task_id = next(iter(payload["tasks"]))
-    assert payload["flow_id"] == "flow-1"
-    assert payload["tasks"][task_id]["status"] == "succeeded"
+    assert not hasattr(orchestrator, "_state_store")
 
 
-def test_runtime_restores_completed_results_from_snapshot(tmp_path) -> None:
-    store = FileChildTaskStateStore(tmp_path)
-    store.save_snapshot(
-        "flow-restore",
-        {
-            "flow_id": "flow-restore",
-            "tasks": {
-                "task_1_done": {
-                    "status": "succeeded",
-                    "output": "cached result",
-                    "error": "",
-                    "attempts": 1,
-                    "metadata": {},
-                }
-            },
-        },
-    )
-
-    runtime = InProcessChildTaskRuntime(
-        flow_id="flow-restore",
-        resource_manager=_DummyResourceManager(),  # type: ignore[arg-type]
-        bridge=ResourceBridgeExecutor(_DummyResourceManager(), _DummyGateway()),  # type: ignore[arg-type]
-        child_task_bus=InMemoryChildTaskBus(),
-        task_heartbeat_registry=TaskHeartbeatRegistry(),
-        max_parallel=1,
-        max_tasks=5,
-        state_store=store,
-    )
-
-    assert runtime.get_task_result("task_1_done") == "succeeded: cached result"
-
-
-def test_runtime_retries_retryable_failures_before_succeeding(tmp_path) -> None:
-    store = FileChildTaskStateStore(tmp_path)
+def test_runtime_retries_retryable_failures_before_succeeding() -> None:
     bus = InMemoryChildTaskBus()
     bridge = _ScriptedBridge([
         TaskResult(task_id="ignored", status="failed", error="timeout while calling worker"),
@@ -210,7 +170,6 @@ def test_runtime_retries_retryable_failures_before_succeeding(tmp_path) -> None:
         task_heartbeat_registry=TaskHeartbeatRegistry(),
         max_parallel=1,
         max_tasks=5,
-        state_store=store,
         max_retries=2,
         retry_delay_seconds=lambda attempt: 0.0,
     )
@@ -225,7 +184,6 @@ def test_runtime_retries_retryable_failures_before_succeeding(tmp_path) -> None:
 
     task_id, wait_payload = asyncio.run(_run())
     payload = json.loads(wait_payload)
-    snapshot = json.loads((tmp_path / "flow-retry-success.json").read_text(encoding="utf-8"))
 
     assert payload[task_id] == "succeeded: done after retry"
     assert runtime.results[task_id].attempts == 2
@@ -236,12 +194,10 @@ def test_runtime_retries_retryable_failures_before_succeeding(tmp_path) -> None:
         "started",
         "succeeded",
     ]
-    assert snapshot["tasks"][task_id]["attempts"] == 2
     assert bridge.calls == 2
 
 
-def test_runtime_dead_letters_after_retry_budget_exhausted(tmp_path) -> None:
-    store = FileChildTaskStateStore(tmp_path)
+def test_runtime_dead_letters_after_retry_budget_exhausted() -> None:
     bus = InMemoryChildTaskBus()
     bridge = _ScriptedBridge([
         TaskResult(task_id="ignored", status="failed", error="timeout while calling worker"),
@@ -255,7 +211,6 @@ def test_runtime_dead_letters_after_retry_budget_exhausted(tmp_path) -> None:
         task_heartbeat_registry=TaskHeartbeatRegistry(),
         max_parallel=1,
         max_tasks=5,
-        state_store=store,
         max_retries=1,
         retry_delay_seconds=lambda attempt: 0.0,
     )
@@ -270,7 +225,6 @@ def test_runtime_dead_letters_after_retry_budget_exhausted(tmp_path) -> None:
 
     task_id, wait_payload = asyncio.run(_run())
     payload = json.loads(wait_payload)
-    snapshot = json.loads((tmp_path / "flow-dead-letter.json").read_text(encoding="utf-8"))
 
     assert payload[task_id] == "failed: timeout while calling worker"
     assert runtime.results[task_id].attempts == 2
@@ -281,37 +235,3 @@ def test_runtime_dead_letters_after_retry_budget_exhausted(tmp_path) -> None:
         "started",
         "dead_lettered",
     ]
-    assert snapshot["dead_letters"][task_id]["attempts"] == 2
-    assert snapshot["dead_letters"][task_id]["last_error"] == "timeout while calling worker"
-
-
-def test_runtime_restores_unfinished_tasks_as_recoverable(tmp_path) -> None:
-    store = FileChildTaskStateStore(tmp_path)
-    store.save_snapshot(
-        "flow-recoverable",
-        {
-            "flow_id": "flow-recoverable",
-            "tasks": {
-                "task_1_running": {
-                    "status": "started",
-                    "output": "",
-                    "error": "",
-                    "attempts": 1,
-                    "metadata": {},
-                }
-            },
-        },
-    )
-
-    runtime = InProcessChildTaskRuntime(
-        flow_id="flow-recoverable",
-        resource_manager=_DummyResourceManager(),  # type: ignore[arg-type]
-        bridge=ResourceBridgeExecutor(_DummyResourceManager(), _DummyGateway()),  # type: ignore[arg-type]
-        child_task_bus=InMemoryChildTaskBus(),
-        task_heartbeat_registry=TaskHeartbeatRegistry(),
-        max_parallel=1,
-        max_tasks=5,
-        state_store=store,
-    )
-
-    assert runtime.get_task_result("task_1_running") == "recoverable: previous run interrupted before completion"

@@ -14,7 +14,7 @@ Current runtime shape:
 - `mcp.py`: MCP client port and MCP-to-tool adapter.
 - `skills.py`: skill pack and prompt/lease composition helpers.
 - `executor.py`: reference single-agent executor built on model/tools/skills.
-- `dynamic_orchestrator.py`: dynamic orchestration loop, child-task runtime, event bus, and snapshot persistence.
+- `dynamic_orchestrator.py`: dynamic orchestration loop, child-task runtime, and event bus.
 
 ## Runtime Layers
 
@@ -30,10 +30,8 @@ Current runtime shape:
 3. `InProcessChildTaskRuntime` (Current Child-Task Transport)
 - Owns in-flight tasks and completed task results.
 - Emits lifecycle events through `InMemoryChildTaskBus`.
-- Persists minimal flow snapshots through `FileChildTaskStateStore`.
 - Applies runtime-level retry classification for transient child-task failures.
 - Captures terminal child-task failures into dead-letter records.
-- Restores unfinished snapshot entries as recoverable state instead of pretending they are still running.
 
 4. `SingleAgentExecutor` (Worker Execution)
 - Runs one sub-agent loop with model/tool calling.
@@ -67,4 +65,4 @@ Current runtime shape:
 
 - `scheduler.py` is deprecated and kept only for backward compatibility.
 - `engine.py` is a compatibility stub; new code should use `DynamicOrchestrator`.
-- The current child-task runtime is still in-process, but it now has explicit event bus, retry/dead-letter, and snapshot boundaries for future durable transports.
+- The current child-task runtime is still in-process, with explicit event bus and retry/dead-letter boundaries for future transport changes.

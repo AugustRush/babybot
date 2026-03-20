@@ -96,7 +96,6 @@ def _make_agent(gateway: _FakeGateway, rm: _FakeResourceManager) -> Orchestrator
     agent.tape_store = None
     agent._child_task_bus = None
     agent._task_heartbeat_registry = None
-    agent._child_task_state_store = None
     agent.config = type("C", (), {
         "system": type("S", (), {"context_history_tokens": 2000, "idle_timeout": 30})(),
     })()
@@ -329,7 +328,7 @@ def test_answer_with_dag_passes_runtime_event_callback_and_shared_runtime_adapte
     assert seen["runtime_event_callback"] is runtime_event_callback
     assert seen["child_task_bus"] is agent._child_task_bus
     assert seen["task_heartbeat_registry"] is agent._task_heartbeat_registry
-    assert seen["state_store"] is agent._child_task_state_store
+    assert seen["state_store"] is None
     assert seen["task_stale_after_s"] == 30
 
 

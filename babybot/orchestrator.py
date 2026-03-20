@@ -8,13 +8,11 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .agent_kernel import ExecutionContext
 from .agent_kernel.dynamic_orchestrator import (
     DynamicOrchestrator,
-    FileChildTaskStateStore,
     InMemoryChildTaskBus,
 )
 from .config import Config
@@ -60,9 +58,6 @@ class OrchestratorAgent:
         )
         self._child_task_bus = InMemoryChildTaskBus()
         self._task_heartbeat_registry = TaskHeartbeatRegistry()
-        self._child_task_state_store = FileChildTaskStateStore(
-            Path(self.config.home_dir) / "runtime" / "child_task_state"
-        )
         self._handoff_locks: dict[str, asyncio.Lock] = {}
         self._init_lock = asyncio.Lock()
         self._initialized = False
@@ -87,7 +82,6 @@ class OrchestratorAgent:
         optional_kwargs = {
             "child_task_bus": getattr(self, "_child_task_bus", None),
             "task_heartbeat_registry": getattr(self, "_task_heartbeat_registry", None),
-            "state_store": getattr(self, "_child_task_state_store", None),
             "task_stale_after_s": float(self.config.system.idle_timeout),
         }
         for key, value in optional_kwargs.items():
