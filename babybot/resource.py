@@ -15,10 +15,7 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
-import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +58,7 @@ from .resource_models import (
     ToolGroup,
 )
 from .resource_python_runner import ExternalPythonRunner
+from .resource_workspace_tools import WorkspaceToolSuite, check_shell_safety as _check_shell_safety
 from .worker import create_worker_executor
 
 logger = logging.getLogger(__name__)
@@ -72,26 +70,6 @@ if TYPE_CHECKING:
     from .heartbeat import Heartbeat
     from .model_gateway import OpenAICompatibleGateway
 
-
-_DANGEROUS_PATTERNS: list[tuple[str, str]] = [
-    (r"rm\s+(-[^\s]*\s+)*-[^\s]*[rR]", "recursive delete"),
-    (r"rm\s+-rf\s+/", "recursive delete from root"),
-    (r"mkfs", "filesystem format"),
-    (r"dd\s+if=", "disk overwrite"),
-    (r">\s*/dev/sd", "device overwrite"),
-    (r":()\{\s*:\|:&\s*\};:", "fork bomb"),
-    (r"chmod\s+-R\s+777\s+/", "recursive permission change on root"),
-    (r"curl[^|]*\|\s*(sudo\s+)?bash", "pipe to shell"),
-    (r"wget[^|]*\|\s*(sudo\s+)?bash", "pipe to shell"),
-]
-
-
-def _check_shell_safety(command: str) -> str | None:
-    """Return an error string if *command* matches a dangerous pattern, else None."""
-    for pattern, label in _DANGEROUS_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return f"Blocked: command matches dangerous pattern ({label})"
-    return None
 
 class CallableTool:
     """Wrap a python callable into kernel Tool protocol."""
@@ -443,6 +421,13 @@ class ResourceManager:
             runner = ExternalPythonRunner(self.config)
             self._python_runner = runner
         return runner
+
+    def _workspace_tools_view(self) -> WorkspaceToolSuite:
+        tools = getattr(self, "_workspace_tools", None)
+        if tools is None:
+            tools = WorkspaceToolSuite(self)
+            self._workspace_tools = tools
+        return tools
 
     async def _register_mcp_servers(self, mcp_servers: dict[str, dict]) -> None:
         for name, server_conf in mcp_servers.items():
@@ -2261,43 +2246,11 @@ class ResourceManager:
         timeout: float | int | str | None = 300,
         **kwargs: Any,
     ) -> str:
-        ws = str(self._get_active_write_root())
-        proc = await asyncio.create_subprocess_exec(
-            self._get_user_python(),
-            "-c",
-            f"import os\nos.chdir({ws!r})\n{code}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._clean_env(),
+        return await self._workspace_tools_view().execute_python_code(
+            code,
+            timeout=timeout,
+            **kwargs,
         )
-        timeout_s = self._coerce_timeout(timeout, default=300.0)
-        communicate_coro = proc.communicate()
-        try:
-            if timeout_s and timeout_s > 0:
-                stdout, stderr = await asyncio.wait_for(
-                    communicate_coro, timeout=timeout_s
-                )
-            else:
-                stdout, stderr = await communicate_coro
-        except asyncio.TimeoutError:
-            proc.kill()
-            try:
-                await proc.communicate()
-            except Exception:
-                pass
-            return f"Timeout: python execution exceeded {timeout_s}s."
-        except Exception:
-            try:
-                communicate_coro.close()
-            except Exception:
-                pass
-            raise
-        out = (stdout or b"").decode("utf-8", errors="ignore")
-        err = (stderr or b"").decode("utf-8", errors="ignore")
-        text = out.strip()
-        if err.strip():
-            text = f"{text}\n{err.strip()}".strip()
-        return text
 
     async def _workspace_execute_shell_command(
         self,
@@ -2305,64 +2258,21 @@ class ResourceManager:
         timeout: float | int | str | None = 300,
         **kwargs: Any,
     ) -> str:
-        safety_error = _check_shell_safety(command)
-        if safety_error:
-            return safety_error
-        ws = shlex.quote(str(self._get_active_write_root()))
-        guarded = f"cd {ws} && {command}"
-        proc = await asyncio.create_subprocess_shell(
-            guarded,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._clean_env(),
+        return await self._workspace_tools_view().execute_shell_command(
+            command,
+            timeout=timeout,
+            **kwargs,
         )
-        timeout_s = self._coerce_timeout(timeout, default=300.0)
-        communicate_coro = proc.communicate()
-        try:
-            if timeout_s and timeout_s > 0:
-                stdout, stderr = await asyncio.wait_for(
-                    communicate_coro, timeout=timeout_s
-                )
-            else:
-                stdout, stderr = await communicate_coro
-        except asyncio.TimeoutError:
-            proc.kill()
-            try:
-                await proc.communicate()
-            except Exception:
-                pass
-            return f"Timeout: shell command exceeded {timeout_s}s."
-        except Exception:
-            try:
-                communicate_coro.close()
-            except Exception:
-                pass
-            raise
-        out = (stdout or b"").decode("utf-8", errors="ignore")
-        err = (stderr or b"").decode("utf-8", errors="ignore")
-        text = out.strip()
-        if err.strip():
-            text = f"{text}\n{err.strip()}".strip()
-        return text
 
     async def _workspace_view_text_file(
         self,
         file_path: str,
         ranges: list[int] | None = None,
     ) -> str:
-        resolved, err = self._resolve_workspace_file(file_path)
-        if err:
-            return err
-        with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        if not ranges:
-            return "".join(lines)
-        chunks: list[str] = []
-        for i in range(0, len(ranges), 2):
-            start = max(1, int(ranges[i]))
-            end = int(ranges[i + 1]) if i + 1 < len(ranges) else start
-            chunks.extend(lines[start - 1 : end])
-        return "".join(chunks)
+        return await self._workspace_tools_view().view_text_file(
+            file_path,
+            ranges=ranges,
+        )
 
     async def _workspace_write_text_file(
         self,
@@ -2370,25 +2280,11 @@ class ResourceManager:
         content: str,
         ranges: list[int] | None = None,
     ) -> str:
-        resolved, err = self._resolve_workspace_file(file_path)
-        if err:
-            return err
-        target = Path(resolved)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not ranges:
-            target.write_text(content, encoding="utf-8")
-            return f"Wrote file: {target}"
-        lines = (
-            target.read_text(encoding="utf-8").splitlines(keepends=True)
-            if target.exists()
-            else []
+        return await self._workspace_tools_view().write_text_file(
+            file_path,
+            content,
+            ranges=ranges,
         )
-        start = max(1, int(ranges[0])) if ranges else 1
-        end = int(ranges[1]) if ranges and len(ranges) > 1 else start
-        replacement = content.splitlines(keepends=True)
-        lines[start - 1 : end] = replacement
-        target.write_text("".join(lines), encoding="utf-8")
-        return f"Updated file range in: {target}"
 
     async def _workspace_insert_text_file(
         self,
@@ -2396,20 +2292,11 @@ class ResourceManager:
         content: str,
         line_number: int,
     ) -> str:
-        resolved, err = self._resolve_workspace_file(file_path)
-        if err:
-            return err
-        target = Path(resolved)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        lines = (
-            target.read_text(encoding="utf-8").splitlines(keepends=True)
-            if target.exists()
-            else []
+        return await self._workspace_tools_view().insert_text_file(
+            file_path,
+            content,
+            line_number,
         )
-        idx = max(0, min(len(lines), int(line_number) - 1))
-        lines[idx:idx] = content.splitlines(keepends=True)
-        target.write_text("".join(lines), encoding="utf-8")
-        return f"Inserted text into: {target}"
 
     def _extract_media_from_text(self, text: str) -> list[str]:
         paths: list[str] = []
