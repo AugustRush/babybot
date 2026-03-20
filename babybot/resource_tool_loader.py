@@ -4,7 +4,6 @@ import importlib
 import importlib.util
 import inspect
 import logging
-import os
 import sys
 from pathlib import Path
 from types import UnionType
@@ -46,32 +45,6 @@ class ResourceToolLoader:
             ),
             group=group_name,
         )
-
-    def register_custom_tools(self, custom_tools: dict[str, dict]) -> None:
-        self.ensure_workspace_on_pythonpath()
-        for name, tool_conf in custom_tools.items():
-            try:
-                module = self.load_tool_module(tool_conf["module"])
-                func_name = tool_conf.get("function", name)
-                func = getattr(module, func_name, None)
-                if func is None:
-                    continue
-                preset_kwargs = dict(tool_conf.get("preset_kwargs", {}))
-                for key, value in preset_kwargs.items():
-                    if (
-                        isinstance(value, str)
-                        and value.startswith("${")
-                        and value.endswith("}")
-                    ):
-                        preset_kwargs[key] = os.getenv(value[2:-1], value)
-                self.register_tool(
-                    func=func,
-                    group_name=tool_conf.get("group_name", "basic"),
-                    preset_kwargs=preset_kwargs,
-                    func_name=func_name,
-                )
-            except Exception as exc:
-                logger.warning("Failed to register custom tool %s: %s", name, exc)
 
     def discover_workspace_tools(self) -> None:
         tools_root = self._owner.config.workspace_tools_dir

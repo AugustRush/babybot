@@ -129,3 +129,32 @@ def test_invalid_scheduled_tasks_file_raises(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="Scheduled tasks file must contain a JSON list"):
         Config(config_file=str(config_path))
+
+
+def test_config_repr_no_longer_reports_custom_tool_count(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {
+                    "model_name": "test-model",
+                    "api_key": "k",
+                    "api_base": "",
+                    "temperature": 0.7,
+                    "max_tokens": 256,
+                },
+                "custom_tools": {
+                    "demo": {
+                        "module": "tools.search",
+                        "function": "web_search",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config(config_file=str(config_path))
+
+    assert "tools=" not in repr(cfg)

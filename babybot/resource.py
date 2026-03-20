@@ -537,13 +537,6 @@ class ResourceManager:
             if not k.startswith("_")
         }
         self._setup_tool_groups(tool_groups)
-        custom_tools = {
-            k: v
-            for k, v in self.config.get_custom_tools().items()
-            if not k.startswith("_")
-        }
-        if custom_tools:
-            self._register_custom_tools(custom_tools)
         self._discover_workspace_tools()
         self._register_configured_skills(
             {
@@ -826,9 +819,6 @@ class ResourceManager:
             preset_kwargs=preset_kwargs,
             func_name=func_name,
         )
-
-    def _register_custom_tools(self, custom_tools: dict[str, dict]) -> None:
-        self._tool_loader_view().register_custom_tools(custom_tools)
 
     def _discover_workspace_tools(self) -> None:
         self._tool_loader_view().discover_workspace_tools()

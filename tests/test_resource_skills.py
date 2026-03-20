@@ -669,46 +669,6 @@ def test_discover_workspace_tools_registers_public_functions(tmp_path: Path) -> 
     assert manager.registry.get("_hidden") is None
 
 
-def test_register_custom_tools_expands_env_preset_kwargs(tmp_path: Path, monkeypatch) -> None:
-    manager = object.__new__(ResourceManager)
-    manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
-    module_path = tmp_path / "custom_echo.py"
-    module_path.write_text(
-        "def echo_value(value: str) -> str:\n"
-        "    return value\n",
-        encoding="utf-8",
-    )
-    manager.config = SimpleNamespace(
-        workspace_dir=tmp_path,
-        resolve_workspace_path=lambda value: str(value),
-    )
-    manager._active_write_root = contextvars.ContextVar(
-        "active_write_root_custom_tools",
-        default=str(tmp_path),
-    )
-    monkeypatch.setenv("RESOURCE_TEST_VALUE", "expanded")
-
-    manager._register_custom_tools(
-        {
-            "echo_value": {
-                "module": str(module_path),
-                "function": "echo_value",
-                "group_name": "basic",
-                "preset_kwargs": {"value": "${RESOURCE_TEST_VALUE}"},
-            }
-        }
-    )
-
-    reg = manager.registry.get("echo_value")
-    result = asyncio.run(
-        reg.tool.invoke({}, ToolContext(session_id="custom-tool", state={}))  # type: ignore[union-attr]
-    )
-
-    assert result.ok is True
-    assert result.content == "expanded"
-
-
 def test_run_subagent_task_returns_collected_media_from_context(
     tmp_path: Path,
     monkeypatch,

@@ -179,9 +179,6 @@ class Config:
         self.tool_groups: dict[str, dict] = (
             self.raw_config.get("tool_groups") or _res.get("tool_groups") or {}
         )
-        self.custom_tools: dict[str, dict] = (
-            self.raw_config.get("custom_tools") or _res.get("custom_tools") or {}
-        )
         self.agent_skills: dict[str, dict] = (
             self.raw_config.get("agent_skills") or _res.get("agent_skills") or {}
         )
@@ -347,10 +344,6 @@ class Config:
         """Get MCP server configurations."""
         return self.mcp_servers
 
-    def get_custom_tools(self) -> dict[str, dict]:
-        """Get custom tool configurations."""
-        return self.custom_tools
-
     def get_agent_skills(self) -> dict[str, dict]:
         """Get agent skill configurations."""
         return self.agent_skills
@@ -427,7 +420,4 @@ class Config:
         }
 
     def __repr__(self) -> str:
-        return (
-            f"Config(model={self.model.model_name}, tools={len(self.custom_tools)}, "
-            f"config_file={self.config_file})"
-        )
+        return f"Config(model={self.model.model_name}, config_file={self.config_file})"

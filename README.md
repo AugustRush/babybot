@@ -74,7 +74,7 @@ uv run gateway
 | `resource_workspace_tools.py` | workspace 文件读写、代码执行、shell 执行 |
 | `resource_skill_loader.py` | `SKILL.md`、脚本 AST/CLI 解析、技能工具注册 |
 | `resource_scope.py` | 资源 brief、scope 解析、lease 组装 |
-| `resource_tool_loader.py` | 自定义工具与 workspace tools 的注册/加载 |
+| `resource_tool_loader.py` | workspace tools 的注册/加载 |
 | `resource_subagent_runtime.py` | 子 agent 运行时 orchestration |
 | `resource_skill_runtime.py` | skill pack 选择、worker prompt 与技能目录格式化 |
 
@@ -104,7 +104,7 @@ uv run gateway
 - 工作区：`~/.babybot/workspace`（可由 `BABYBOT_WORKSPACE` 覆盖）
 - 定时任务：`~/.babybot/workspace/scheduled_tasks.json`
 - workspace 技能目录：`~/.babybot/workspace/skills`
-- workspace 自定义工具目录：`~/.babybot/workspace/tools`
+- workspace 工具目录：`~/.babybot/workspace/tools`
 
 完整模板见 `config.json.example` 和 `scheduled_tasks.json.example`。
 
@@ -231,24 +231,17 @@ uv run gateway
 }
 ```
 
-### 自定义工具
+### Workspace tools
 
-```json
-{
-  "custom_tools": {
-    "web_search": {
-      "module": "tools.search",
-      "function": "web_search",
-      "group_name": "search",
-      "preset_kwargs": {
-        "api_key": "${SEARCH_API_KEY}"
-      }
-    }
-  }
-}
+将 Python 函数放到 `~/.babybot/workspace/tools` 下即可自动发现并注册为工具。按子目录划分工具组，例如：
+
+```text
+~/.babybot/workspace/tools/
+  search/web.py
+  analysis/summary.py
 ```
 
-将 Python 函数注册为可调用工具。`preset_kwargs` 中的环境变量会在加载时展开。
+其中 `search/web.py` 中的公开函数会进入 `search` 组；根目录下的公开函数默认进入 `basic` 组。
 
 ### Agent 技能
 
@@ -377,7 +370,7 @@ babybot/
 │   ├── resource_skill_loader.py # 技能发现、frontmatter、脚本解析
 │   ├── resource_skill_runtime.py # skill pack 选择与 worker prompt
 │   ├── resource_subagent_runtime.py # 子 agent 运行时 orchestration
-│   ├── resource_tool_loader.py  # 自定义工具 / workspace tools 加载
+│   ├── resource_tool_loader.py  # workspace tools 加载
 │   ├── resource_workspace_tools.py # workspace 文件与代码工具
 │   ├── worker.py                # Worker 执行器工厂
 │   ├── model_gateway.py         # OpenAI 兼容网关
@@ -401,7 +394,6 @@ babybot/
 │       ├── tools.py             # ChannelToolContext / ChannelCapabilities
 │       └── feishu.py            # 飞书通道实现
 ├── skills/                      # 技能目录
-├── tools/                       # 自定义工具目录
 ├── config.json                  # 配置文件
 ├── config.json.example          # 配置模板
 ├── scheduled_tasks.json.example # 定时任务模板
