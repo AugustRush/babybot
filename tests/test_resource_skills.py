@@ -100,6 +100,43 @@ def test_build_worker_prompt_contains_skill_catalog() -> None:
     assert "data-analysis: Analyze datasets" in prompt
 
 
+def test_format_skill_catalog_for_lease_filters_inaccessible_skills() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "prompt-only": LoadedSkill(
+            name="prompt-only",
+            description="No tool lease",
+            directory="/tmp/prompt-only",
+            prompt="prompt-only",
+            active=True,
+        ),
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="Weather tools",
+            directory="/tmp/weather-query",
+            prompt="weather",
+            active=True,
+            lease=ToolLease(include_groups=("skill_weather_query",)),
+        ),
+        "image-gen": LoadedSkill(
+            name="image-gen",
+            description="Image tools",
+            directory="/tmp/image-gen",
+            prompt="image",
+            active=True,
+            lease=ToolLease(include_groups=("skill_image_gen",)),
+        ),
+    }
+
+    catalog = manager._format_skill_catalog_for_lease(
+        ToolLease(include_groups=("skill_weather_query",))
+    )
+
+    assert "prompt-only: No tool lease" in catalog
+    assert "weather-query: Weather tools" in catalog
+    assert "image-gen: Image tools" not in catalog
+
+
 def test_coerce_timeout_handles_invalid_values() -> None:
     assert ResourceManager._coerce_timeout(None) == 300.0
     assert ResourceManager._coerce_timeout("12") == 12.0
