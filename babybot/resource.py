@@ -20,10 +20,8 @@ from typing import (
 )
 
 from .agent_kernel import (
-    ExecutionContext,
     SkillPack,
     register_mcp_tools,
-    TaskContract,
     ToolLease,
     ToolRegistry,
     ToolResult,
@@ -45,6 +43,7 @@ from .resource_models import (
 )
 from .resource_python_runner import ExternalPythonRunner
 from .resource_scope import ResourceScopeHelper
+from .resource_subagent_runtime import ResourceSubagentRuntime
 from .resource_tool_loader import ResourceToolLoader
 from .resource_workspace_tools import (
     WorkspaceToolSuite,
@@ -440,6 +439,13 @@ class ResourceManager:
         if helper is None:
             helper = ResourceToolLoader(self)
             self._tool_loader = helper
+        return helper
+
+    def _subagent_runtime_view(self) -> ResourceSubagentRuntime:
+        helper = getattr(self, "_subagent_runtime", None)
+        if helper is None:
+            helper = ResourceSubagentRuntime(self)
+            self._subagent_runtime = helper
         return helper
 
     @staticmethod
@@ -910,137 +916,16 @@ class ResourceManager:
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
     ) -> tuple[str, list[str]]:
-        from .channels.tools import ChannelToolContext
-
-        write_root = self._get_output_dir()
-        token = self._active_write_root.set(str(write_root))
-        started = time.perf_counter()
-        scope_token: contextvars.Token[ToolLease | None] | None = None
-        skill_ids_token: contextvars.Token[tuple[str, ...] | None] | None = None
-        try:
-            merged_lease = self._build_task_lease(lease or {})
-            skill_packs = await self._select_skill_packs(
-                task_description,
-                skill_ids=skill_ids,
-            )
-            for skill in skill_packs:
-                merged_lease = ToolLease(
-                    include_groups=tuple(
-                        sorted(
-                            set(merged_lease.include_groups)
-                            | set(skill.tool_lease.include_groups)
-                        )
-                    ),
-                    include_tools=tuple(
-                        sorted(
-                            set(merged_lease.include_tools)
-                            | set(skill.tool_lease.include_tools)
-                        )
-                    ),
-                    exclude_tools=tuple(
-                        sorted(
-                            set(merged_lease.exclude_tools)
-                            | set(skill.tool_lease.exclude_tools)
-                        )
-                    ),
-                )
-            scope_token = self._get_current_task_lease_var().set(merged_lease)
-            skill_ids_token = self._get_current_skill_ids_var().set(
-                tuple(skill_ids) if skill_ids is not None else None
-            )
-            tools_text = (
-                ", ".join(sorted(t.tool.name for t in self.registry.list(merged_lease)))
-                or "无"
-            )
-            logger.info(
-                "Run subagent agent=%s write_root=%s selected_skills=%s tools=%s include_groups=%s include_tools=%s exclude_tools=%s",
-                agent_name,
-                write_root,
-                [s.name for s in skill_packs],
-                tools_text,
-                list(merged_lease.include_groups),
-                list(merged_lease.include_tools),
-                list(merged_lease.exclude_tools),
-            )
-            sys_prompt = self._build_worker_sys_prompt(
-                agent_name=agent_name,
-                task_description=task_description,
-                tools_text=tools_text,
-                selected_skill_packs=skill_packs,
-                merged_lease=merged_lease,
-            )
-            # Strip tool_leases from skill packs before passing to executor:
-            # run_subagent_task already merged skill groups into merged_lease
-            # via UNION.  If we pass the original skill packs, the executor's
-            # merge_leases() would INTERSECT them again, dropping basic/code/
-            # channel groups and potentially leaving tools=[].
-            executor_skills = [
-                SkillPack(name=sp.name, system_prompt=sp.system_prompt)
-                for sp in skill_packs
-            ]
-            executor = create_worker_executor(
-                config=self.config,
-                tools=self.registry,
-                sys_prompt=sys_prompt,
-                skill_packs=executor_skills,
-                gateway=self._get_shared_gateway(),
-            )
-            exec_context = ExecutionContext(
-                session_id=agent_name,
-                state={
-                    k: v
-                    for k, v in [
-                        ("heartbeat", heartbeat),
-                        ("tape", tape),
-                        ("tape_store", tape_store),
-                        (
-                            "context_history_tokens",
-                            self.config.system.context_history_tokens,
-                        ),
-                        ("media_paths", media_paths),
-                        ("channel_context", ChannelToolContext.get_current()),
-                    ]
-                    if v is not None
-                },
-            )
-            result = await executor.execute(
-                TaskContract(
-                    task_id=agent_name,
-                    description=task_description,
-                    lease=merged_lease,
-                    retries=0,
-                ),
-                exec_context,
-            )
-            text = result.output if result.status == "succeeded" else result.error
-            if result.status != "succeeded":
-                logger.error(
-                    "Subagent failed agent=%s status=%s error=%s metadata=%s",
-                    agent_name,
-                    result.status,
-                    result.error,
-                    (result.metadata or {}),
-                )
-            logger.info(
-                "Run subagent done agent=%s status=%s elapsed=%.2fs output_len=%d",
-                agent_name,
-                result.status,
-                time.perf_counter() - started,
-                len(text or ""),
-            )
-            collected_media = list(exec_context.state.get("media_paths_collected", []))
-            fallback_media = self._extract_media_from_text(text)
-            merged_media = list(dict.fromkeys(collected_media + fallback_media))
-            return text.strip() or "任务完成但没有文本输出。", merged_media
-        except Exception:
-            logger.exception("Run subagent crashed agent=%s", agent_name)
-            raise
-        finally:
-            if skill_ids_token is not None:
-                self._get_current_skill_ids_var().reset(skill_ids_token)
-            if scope_token is not None:
-                self._get_current_task_lease_var().reset(scope_token)
-            self._active_write_root.reset(token)
+        return await self._subagent_runtime_view().run_subagent_task(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+            tape=tape,
+            tape_store=tape_store,
+            heartbeat=heartbeat,
+            media_paths=media_paths,
+            skill_ids=skill_ids,
+        )
 
     def _build_task_lease(self, lease: dict[str, Any]) -> ToolLease:
         return self._resource_scope_view().build_task_lease(lease)
@@ -1636,6 +1521,10 @@ class ResourceManager:
             if path.is_file():
                 paths.append(str(path.resolve()))
         return sorted(set(paths))
+
+    @staticmethod
+    def _create_worker_executor(**kwargs: Any) -> Any:
+        return create_worker_executor(**kwargs)
 
     @staticmethod
     def _coerce_timeout(
