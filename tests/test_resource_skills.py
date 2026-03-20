@@ -590,6 +590,88 @@ def test_json_schema_for_callable_handles_collections_and_kwargs() -> None:
     assert "kwargs" not in schema["properties"]
 
 
+def test_load_tool_module_raises_when_script_calls_sys_exit(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    script_path = tmp_path / "exit_tool.py"
+    script_path.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    manager.config = SimpleNamespace(resolve_workspace_path=lambda value: str(value))
+
+    try:
+        manager._load_tool_module(str(script_path))
+    except ModuleNotFoundError as exc:
+        assert "called sys.exit() during import" in str(exc)
+    else:
+        raise AssertionError("expected ModuleNotFoundError")
+
+
+def test_discover_workspace_tools_registers_public_functions(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    tools_root = tmp_path / "tools"
+    analysis_dir = tools_root / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_dir / "demo.py").write_text(
+        "def make_summary(topic: str) -> str:\n"
+        "    return topic\n\n"
+        "def _hidden() -> str:\n"
+        "    return 'hidden'\n",
+        encoding="utf-8",
+    )
+    manager.config = SimpleNamespace(
+        workspace_dir=tmp_path,
+        workspace_tools_dir=tools_root,
+        resolve_workspace_path=lambda value: str(tmp_path / value),
+    )
+
+    manager._discover_workspace_tools()
+
+    registered = manager.registry.get("make_summary")
+    assert registered is not None
+    assert registered.group == "analysis"
+    assert manager.registry.get("_hidden") is None
+
+
+def test_register_custom_tools_expands_env_preset_kwargs(tmp_path: Path, monkeypatch) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    module_path = tmp_path / "custom_echo.py"
+    module_path.write_text(
+        "def echo_value(value: str) -> str:\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    manager.config = SimpleNamespace(
+        workspace_dir=tmp_path,
+        resolve_workspace_path=lambda value: str(value),
+    )
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_custom_tools",
+        default=str(tmp_path),
+    )
+    monkeypatch.setenv("RESOURCE_TEST_VALUE", "expanded")
+
+    manager._register_custom_tools(
+        {
+            "echo_value": {
+                "module": str(module_path),
+                "function": "echo_value",
+                "group_name": "basic",
+                "preset_kwargs": {"value": "${RESOURCE_TEST_VALUE}"},
+            }
+        }
+    )
+
+    reg = manager.registry.get("echo_value")
+    result = asyncio.run(
+        reg.tool.invoke({}, ToolContext(session_id="custom-tool", state={}))  # type: ignore[union-attr]
+    )
+
+    assert result.ok is True
+    assert result.content == "expanded"
+
+
 def test_run_subagent_task_returns_collected_media_from_context(
     tmp_path: Path,
     monkeypatch,
