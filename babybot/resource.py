@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import UnionType
 from typing import (
@@ -50,6 +50,15 @@ from .mcp_runtime import (
     HttpMCPRuntimeClient,
     StdioMCPRuntimeClient,
     close_clients_best_effort,
+)
+from .resource_models import (
+    CliArgumentSpec as _CliArgumentSpec,
+    CliToolSpec as _CliToolSpec,
+    LoadedSkill,
+    ResourceBrief,
+    ScriptFunctionSpec as _ScriptFunctionSpec,
+    SkillRuntimeConfig,
+    ToolGroup,
 )
 from .worker import create_worker_executor
 
@@ -82,90 +91,6 @@ def _check_shell_safety(command: str) -> str | None:
         if re.search(pattern, command, re.IGNORECASE):
             return f"Blocked: command matches dangerous pattern ({label})"
     return None
-
-
-@dataclass
-class ToolGroup:
-    name: str
-    description: str
-    notes: str = ""
-    active: bool = False
-
-
-@dataclass
-class ResourceBrief:
-    """One concise resource record exposed to the main routing agent."""
-
-    resource_id: str
-    resource_type: str
-    name: str
-    purpose: str
-    group: str = ""
-    tool_count: int = 0
-    tools_preview: tuple[str, ...] = ()
-    active: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.resource_id,
-            "type": self.resource_type,
-            "name": self.name,
-            "purpose": self.purpose,
-            "group": self.group,
-            "tool_count": self.tool_count,
-            "tools_preview": list(self.tools_preview),
-            "active": self.active,
-        }
-
-
-@dataclass
-class LoadedSkill:
-    """Resolved skill metadata for runtime routing."""
-
-    name: str
-    description: str
-    directory: str
-    prompt: str = ""
-    keywords: tuple[str, ...] = ()
-    phrases: tuple[str, ...] = ()
-    lease: ToolLease = ToolLease()
-    source: str = "auto"
-    active: bool = True
-    tool_group: str = ""
-    tools: tuple[str, ...] = ()
-    runtime: SkillRuntimeConfig = field(default_factory=lambda: SkillRuntimeConfig())
-
-
-@dataclass(frozen=True)
-class SkillRuntimeConfig:
-    python_executable: str = ""
-    python_fallback_executables: tuple[str, ...] = ()
-    python_required_modules: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class _ScriptFunctionSpec:
-    name: str
-    description: str
-    schema: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class _CliArgumentSpec:
-    name: str
-    flag: str
-    schema: dict[str, Any]
-    required: bool = False
-    action: str | None = None
-
-
-@dataclass(frozen=True)
-class _CliToolSpec:
-    name: str
-    description: str
-    schema: dict[str, Any]
-    arguments: tuple[_CliArgumentSpec, ...]
-
 
 class CallableTool:
     """Wrap a python callable into kernel Tool protocol."""

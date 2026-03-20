@@ -11,6 +11,13 @@ from babybot.agent_kernel.tools import ToolContext
 from babybot.resource import CallableTool, LoadedSkill, ResourceManager, ToolGroup
 
 
+def test_resource_manager_exposes_expected_registration_and_runtime_entrypoints() -> None:
+    assert hasattr(ResourceManager, "_register_skill_tools")
+    assert hasattr(ResourceManager, "_invoke_external_skill_function")
+    assert hasattr(ResourceManager, "_build_external_cli_script_callable")
+    assert hasattr(ResourceManager, "_run_subagent_task")
+
+
 def test_parse_frontmatter_from_skill_markdown() -> None:
     text = """---
 name: sample-skill
