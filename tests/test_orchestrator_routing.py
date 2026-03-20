@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -13,6 +15,7 @@ from babybot.agent_kernel import (
     ModelToolCall,
 )
 from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
+from babybot.context import TapeStore
 from babybot.orchestrator import OrchestratorAgent
 
 
@@ -431,3 +434,104 @@ def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() 
     assert [event["event"] for event in first_events] == ["queued", "started", "succeeded"]
     assert [event["event"] for event in second_events] == ["queued", "started", "succeeded"]
     assert first_events[0]["flow_id"] != second_events[0]["flow_id"]
+
+
+def test_process_task_persists_runtime_events_to_tape(tmp_path: Path) -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._initialized = True
+    agent._init_lock = asyncio.Lock()
+    agent.resource_manager = object()
+    agent.gateway = object()
+    agent.tape_store = TapeStore(db_path=tmp_path / "context.db")
+    agent._handoff_locks = {}
+
+    class _Config:
+        system = type(
+            "S",
+            (),
+            {
+                "context_history_tokens": 2000,
+                "context_compact_threshold": 999999,
+                "context_max_chats": 100,
+                "idle_timeout": 30,
+            },
+        )()
+
+    agent.config = _Config()
+
+    async def _answer_with_dag(
+        user_input: str,
+        tape=None,
+        heartbeat=None,
+        media_paths=None,
+        stream_callback=None,
+        runtime_event_callback=None,
+    ):
+        del user_input, tape, heartbeat, media_paths, stream_callback
+        if runtime_event_callback is not None:
+            await runtime_event_callback(
+                {
+                    "flow_id": "flow-1",
+                    "task_id": "task-1",
+                    "event": "started",
+                    "payload": {"resource_id": "skill.weather", "description": "查询天气"},
+                }
+            )
+        return "done", []
+
+    agent._answer_with_dag = _answer_with_dag
+
+    response = asyncio.run(agent.process_task("查询天气", chat_key="feishu:chat-1"))
+
+    assert response.text == "done"
+    tape = agent.tape_store.get_or_create("feishu:chat-1")
+    event_entries = [entry for entry in tape.entries if entry.kind == "event"]
+    assert len(event_entries) == 1
+    assert event_entries[0].payload["event"] == "started"
+    assert event_entries[0].payload["payload"]["resource_id"] == "skill.weather"
+
+
+def test_maybe_handoff_writes_extended_anchor_state(tmp_path: Path) -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._handoff_locks = {}
+    agent.tape_store = TapeStore(db_path=tmp_path / "context.db")
+
+    class _Gateway:
+        async def complete(self, prompt: str, history_text: str) -> str:
+            del prompt, history_text
+            return json.dumps(
+                {
+                    "summary": "用户正在修改小猪图片",
+                    "entities": ["小猪", "背景"],
+                    "user_intent": "继续编辑图片",
+                    "pending": "等待确认颜色",
+                    "next_steps": ["把小猪改成白色"],
+                    "artifacts": ["pig.png"],
+                    "open_questions": ["是否保留蓝色背景"],
+                    "decisions": ["继续沿用之前生成的图片"],
+                },
+                ensure_ascii=False,
+            )
+
+    class _Config:
+        system = type("S", (), {"context_compact_threshold": 1})()
+
+    agent.gateway = _Gateway()
+    agent.config = _Config()
+
+    tape = agent.tape_store.get_or_create("feishu:chat-1")
+    start = tape.append("anchor", {"name": "session/start", "state": {}})
+    user = tape.append("message", {"role": "user", "content": "画一只小猪"})
+    assistant = tape.append("message", {"role": "assistant", "content": "已生成黑色小猪"})
+    agent.tape_store.save_entries("feishu:chat-1", [start, user, assistant])
+
+    asyncio.run(agent._maybe_handoff(tape, "feishu:chat-1"))
+
+    anchor = tape.last_anchor()
+    assert anchor is not None
+    state = anchor.payload["state"]
+    assert state["summary"] == "用户正在修改小猪图片"
+    assert state["next_steps"] == ["把小猪改成白色"]
+    assert state["artifacts"] == ["pig.png"]
+    assert state["open_questions"] == ["是否保留蓝色背景"]
+    assert state["decisions"] == ["继续沿用之前生成的图片"]

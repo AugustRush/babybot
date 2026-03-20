@@ -13,7 +13,7 @@ from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, Mod
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import ExecutionContext, TaskContract, TaskResult, ToolLease
-from ..context import _extract_keywords
+from ..context import Entry, _extract_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,19 @@ class SingleAgentExecutor:
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
+        tape = context.state.get("tape")
+        tape_store = context.state.get("tape_store")
+
+        def _persist_tape_entry(entry: Entry) -> None:
+            if tape is None:
+                return
+            if tape_store is None:
+                return
+            save_entry = getattr(tape_store, "save_entry", None)
+            chat_id = getattr(tape, "chat_id", "")
+            if callable(save_entry) and chat_id:
+                save_entry(chat_id, entry)
+
         for step in range(1, max(1, self.policy.max_steps) + 1):
             if heartbeat is not None:
                 heartbeat.beat()
@@ -135,6 +148,21 @@ class SingleAgentExecutor:
                     task.task_id, step,
                     [tc.name for tc in response.tool_calls],
                 )
+                if tape is not None:
+                    for tool_call in response.tool_calls:
+                        entry = tape.append(
+                            "tool_call",
+                            {
+                                "name": tool_call.name,
+                                "arguments": dict(tool_call.arguments),
+                                "call_id": tool_call.call_id,
+                            },
+                            {
+                                "task_id": task.task_id,
+                                "step": step,
+                            },
+                        )
+                        _persist_tape_entry(entry)
                 messages.append(
                     ModelMessage(
                         role="assistant",
@@ -277,6 +305,22 @@ class SingleAgentExecutor:
                     done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
                     for tc, output, artifacts in done:
                         _collect_media(artifacts)
+                        if tape is not None:
+                            entry = tape.append(
+                                "tool_result",
+                                {
+                                    "name": tc.name,
+                                    "ok": not output.startswith("Tool error:"),
+                                    "content_preview": output[:500],
+                                    "artifacts": artifacts,
+                                    "call_id": tc.call_id,
+                                },
+                                {
+                                    "task_id": task.task_id,
+                                    "step": step,
+                                },
+                            )
+                            _persist_tape_entry(entry)
                         tool_result_map[tc.call_id] = ModelMessage(
                             role="tool",
                             name=tc.name,
@@ -571,6 +615,42 @@ class EchoModelProvider:
         return ModelResponse(text=last.content)
 
 
+def _history_entry_text(entry: object) -> str:
+    kind = getattr(entry, "kind", "")
+    payload = getattr(entry, "payload", {}) or {}
+    if kind == "message":
+        role = payload.get("role", "?")
+        content = payload.get("content", "")
+        return f"{role}: {content}"
+    if kind == "tool_result":
+        name = str(payload.get("name", "") or "?")
+        status = "成功" if payload.get("ok") else "失败"
+        preview = str(payload.get("content_preview", "") or "").strip()
+        artifacts = payload.get("artifacts") or []
+        suffix = f"\n产物: {', '.join(str(item) for item in artifacts)}" if artifacts else ""
+        return f"[工具结果][{status}] {name}: {preview}{suffix}".rstrip()
+    if kind == "tool_call":
+        name = str(payload.get("name", "") or "?")
+        arguments = payload.get("arguments", {})
+        return f"[工具调用] {name}: {_json.dumps(arguments, ensure_ascii=False)}"
+    if kind == "event":
+        event_name = str(payload.get("event", "") or "?")
+        event_payload = payload.get("payload") or {}
+        description = str(event_payload.get("description", "") or "").strip()
+        error = str(event_payload.get("error", "") or "").strip()
+        output = str(event_payload.get("output", "") or "").strip()
+        details_parts = [part for part in (description, output, error) if part]
+        details = " | ".join(details_parts) if details_parts else _json.dumps(
+            event_payload, ensure_ascii=False
+        )
+        return f"[运行事件] {event_name}: {details}"
+    if kind == "anchor":
+        state = payload.get("state") or {}
+        summary = state.get("summary", "") if isinstance(state, dict) else ""
+        return f"[历史摘要] {summary}".strip()
+    return ""
+
+
 def _build_history_messages(
     tape: object,
     token_budget: int,
@@ -606,6 +686,18 @@ def _build_history_messages(
             pending = state.get("pending")
             if pending:
                 parts.append(f"待办: {pending}")
+            next_steps = state.get("next_steps")
+            if next_steps and isinstance(next_steps, list):
+                parts.append(f"下一步: {', '.join(str(item) for item in next_steps)}")
+            open_questions = state.get("open_questions")
+            if open_questions and isinstance(open_questions, list):
+                parts.append(f"待确认: {', '.join(str(item) for item in open_questions)}")
+            decisions = state.get("decisions")
+            if decisions and isinstance(decisions, list):
+                parts.append(f"已确认: {', '.join(str(item) for item in decisions)}")
+            artifacts = state.get("artifacts")
+            if artifacts and isinstance(artifacts, list):
+                parts.append(f"产物: {', '.join(str(item) for item in artifacts)}")
             anchor_text = "\n".join(parts)
             anchor_cost = len(anchor_text) // 3
             messages.append(ModelMessage(role="system", content=anchor_text))
@@ -622,6 +714,10 @@ def _build_history_messages(
 
     recent = entries_since()
     msg_entries = [e for e in recent if e.kind == "message"]
+    recent_state_entries = [
+        e for e in recent
+        if e.kind in {"tool_result", "event"}
+    ]
     # Exclude the last user message (it's the current turn, added by executor)
     if msg_entries and msg_entries[-1].payload.get("role") == "user":
         msg_entries = msg_entries[:-1]
@@ -644,9 +740,10 @@ def _build_history_messages(
                 est = max(1, int(entry.token_estimate))
                 if recall_tokens + est > recall_budget:
                     break
-                role = entry.payload.get("role", "?")
-                content = entry.payload.get("content", "")
-                recall_lines.append(f"{role}: {content}")
+                line = _history_entry_text(entry)
+                if not line:
+                    continue
+                recall_lines.append(line)
                 recall_tokens += est
             if recall_lines:
                 messages.append(ModelMessage(
@@ -654,6 +751,34 @@ def _build_history_messages(
                     content="[相关历史]\n" + "\n".join(recall_lines),
                 ))
                 budget_remaining -= recall_tokens
+
+    # 2.5. Recent non-message execution state (tool results / failed events)
+    if recent_state_entries and budget_remaining > 0:
+        state_lines: list[str] = []
+        state_tokens = 0
+        for entry in recent_state_entries[-5:]:
+            if entry.kind == "event" and entry.payload.get("event") not in {
+                "failed",
+                "dead_lettered",
+                "stalled",
+            }:
+                continue
+            line = _history_entry_text(entry)
+            if not line:
+                continue
+            est = max(1, int(entry.token_estimate))
+            if state_tokens + est > max(1, budget_remaining // 3):
+                continue
+            state_lines.append(line)
+            state_tokens += est
+        if state_lines:
+            messages.append(
+                ModelMessage(
+                    role="system",
+                    content="[近期执行状态]\n" + "\n".join(state_lines),
+                )
+            )
+            budget_remaining -= state_tokens
 
     # 3. Recent entries → hybrid recency+relevance scoring
     if msg_entries and query:

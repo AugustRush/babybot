@@ -32,7 +32,11 @@ _SUMMARIZE_PROMPT = (
     '{"summary":"不超过200字的摘要，保留关键事实和已完成操作",'
     '"entities":["提到的关键实体，如人名、物品、话题等，最多5个"],'
     '"user_intent":"用户当前最可能的意图，一句话",'
-    '"pending":"未完成的事项，如无则为空字符串"}\n\n'
+    '"pending":"未完成的事项，如无则为空字符串",'
+    '"next_steps":["建议的下一步，最多3条"],'
+    '"artifacts":["重要产物文件名或标识，最多5条"],'
+    '"open_questions":["仍需用户确认的问题，最多3条"],'
+    '"decisions":["已经确认的重要决定，最多3条"]}\n\n'
 )
 
 
@@ -156,12 +160,44 @@ class OrchestratorAgent:
             pending_entries.append(user_entry)
             self.tape_store.save_entries(chat_key, pending_entries)
 
+        wrapped_runtime_event_callback = runtime_event_callback
+        if tape is not None and chat_key:
+            async def _record_runtime_event(event: Any) -> None:
+                payload: dict[str, Any]
+                if isinstance(event, dict):
+                    payload = dict(event)
+                else:
+                    payload = {
+                        "event": getattr(event, "event", ""),
+                        "task_id": getattr(event, "task_id", ""),
+                        "flow_id": getattr(event, "flow_id", ""),
+                        "payload": dict(getattr(event, "payload", {}) or {}),
+                    }
+                entry = tape.append(
+                    "event",
+                    {
+                        "event": str(payload.get("event", "") or ""),
+                        "payload": dict(payload.get("payload") or {}),
+                    },
+                    {
+                        "task_id": str(payload.get("task_id", "") or ""),
+                        "flow_id": str(payload.get("flow_id", "") or ""),
+                    },
+                )
+                self.tape_store.save_entry(chat_key, entry)
+                if runtime_event_callback is not None:
+                    maybe = runtime_event_callback(event)
+                    if inspect.isawaitable(maybe):
+                        await maybe
+
+            wrapped_runtime_event_callback = _record_runtime_event
+
         try:
             text, collected_media = await self._answer_with_dag(
                 user_input, tape=tape, heartbeat=heartbeat,
                 media_paths=media_paths,
                 stream_callback=stream_callback,
-                runtime_event_callback=runtime_event_callback,
+                runtime_event_callback=wrapped_runtime_event_callback,
             )
             if heartbeat is not None:
                 heartbeat.beat()
@@ -220,6 +256,21 @@ class OrchestratorAgent:
                     structured = {"summary": raw_summary.strip()}
 
                 summary_text = structured.get("summary", raw_summary.strip())
+                entities = structured.get("entities", [])
+                next_steps = structured.get("next_steps", [])
+                artifacts = structured.get("artifacts", [])
+                open_questions = structured.get("open_questions", [])
+                decisions = structured.get("decisions", [])
+                if not isinstance(entities, list):
+                    entities = []
+                if not isinstance(next_steps, list):
+                    next_steps = []
+                if not isinstance(artifacts, list):
+                    artifacts = []
+                if not isinstance(open_questions, list):
+                    open_questions = []
+                if not isinstance(decisions, list):
+                    decisions = []
 
                 source_ids = [e.entry_id for e in old_entries]
 
@@ -249,9 +300,13 @@ class OrchestratorAgent:
                     "name": f"compact/{tape.turn_count()}",
                     "state": {
                         "summary": summary_text,
-                        "entities": structured.get("entities", []),
+                        "entities": entities,
                         "user_intent": structured.get("user_intent", ""),
                         "pending": structured.get("pending", ""),
+                        "next_steps": [str(item) for item in next_steps[:3]],
+                        "artifacts": [str(item) for item in artifacts[:5]],
+                        "open_questions": [str(item) for item in open_questions[:3]],
+                        "decisions": [str(item) for item in decisions[:3]],
                         "phase": phase,
                         "source_ids": source_ids,
                         "turn_count": tape.turn_count(),

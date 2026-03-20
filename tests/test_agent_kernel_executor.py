@@ -17,6 +17,7 @@ from babybot.agent_kernel import (
     ToolRegistry,
     ToolResult,
 )
+from babybot.context import Tape
 
 
 class AddTool(Tool):
@@ -281,6 +282,31 @@ def test_single_agent_executor_collects_tool_artifacts_into_context(tmp_path: Pa
 
     assert result.status == "succeeded"
     assert context.state["media_paths_collected"] == [str(image_path.resolve())]
+
+
+def test_single_agent_executor_persists_tool_call_and_result_to_tape() -> None:
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    executor = SingleAgentExecutor(model=TwoStepModel(), tools=registry)
+    tape = Tape("chat1")
+    context = ExecutionContext(session_id="s1", state={"tape": tape})
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="compute"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    kinds = [entry.kind for entry in tape.entries]
+    assert "tool_call" in kinds
+    assert "tool_result" in kinds
+    tool_call = next(entry for entry in tape.entries if entry.kind == "tool_call")
+    tool_result = next(entry for entry in tape.entries if entry.kind == "tool_result")
+    assert tool_call.payload["name"] == "add"
+    assert tool_result.payload["name"] == "add"
+    assert tool_result.payload["ok"] is True
 
 
 def test_single_agent_executor_enforces_token_budget() -> None:

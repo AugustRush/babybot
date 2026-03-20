@@ -30,6 +30,36 @@ class TestEntry:
         e = Entry.anchor(1, "start")
         assert e.payload["state"] == {}
 
+    def test_tool_call_factory(self):
+        e = Entry.tool_call(3, "add", {"a": 1, "b": 2}, task_id="t1", step=1)
+        assert e.kind == "tool_call"
+        assert e.payload["name"] == "add"
+        assert e.payload["arguments"] == {"a": 1, "b": 2}
+        assert e.meta["task_id"] == "t1"
+
+    def test_tool_result_factory(self):
+        e = Entry.tool_result(
+            4,
+            "add",
+            ok=True,
+            content_preview="3",
+            artifacts=["/tmp/out.txt"],
+            task_id="t1",
+            step=1,
+        )
+        assert e.kind == "tool_result"
+        assert e.payload["name"] == "add"
+        assert e.payload["ok"] is True
+        assert e.payload["content_preview"] == "3"
+        assert e.payload["artifacts"] == ["/tmp/out.txt"]
+
+    def test_event_factory(self):
+        e = Entry.event(5, "started", task_id="task-1", flow_id="flow-1")
+        assert e.kind == "event"
+        assert e.payload["event"] == "started"
+        assert e.meta["task_id"] == "task-1"
+        assert e.meta["flow_id"] == "flow-1"
+
     def test_token_estimate(self):
         e = Entry.message(1, "user", "hello world")
         assert e.token_estimate > 0
@@ -241,6 +271,35 @@ class TestTapeStore:
         contents = [r.payload.get("content", "") for r in results]
         assert any("小猪" in c for c in contents)
 
+    def test_search_relevant_matches_anchor_and_tool_result_content(self, tmp_path):
+        store = self._make_store(tmp_path)
+        tape = store.get_or_create("chat1")
+        e1 = tape.append(
+            "anchor",
+            {
+                "name": "compact/1",
+                "state": {
+                    "summary": "用户正在编辑小猪图片",
+                    "pending": "等待确认是否改成白色",
+                },
+            },
+        )
+        e2 = tape.append(
+            "tool_result",
+            {
+                "name": "generate_image",
+                "ok": True,
+                "content_preview": "已生成黑色小猪图片",
+                "artifacts": [],
+            },
+        )
+        store.save_entries("chat1", [e1, e2])
+
+        results = store.search_relevant("chat1", "小猪 白色", limit=5)
+        payload_text = json.dumps([r.payload for r in results], ensure_ascii=False)
+        assert "小猪" in payload_text
+        assert "白色" in payload_text or "黑色小猪图片" in payload_text
+
     def test_search_relevant_excludes_ids(self, tmp_path):
         store = self._make_store(tmp_path)
         tape = store.get_or_create("chat1")
@@ -320,6 +379,10 @@ class TestBuildHistoryMessages:
             "entities": ["小猪", "黑色"],
             "user_intent": "生成图片",
             "pending": "等待用户确认颜色",
+            "next_steps": ["把小猪改成白色"],
+            "artifacts": ["pig.png"],
+            "open_questions": ["是否保留背景"],
+            "decisions": ["继续使用上一张图"],
         }})
         tape.append("message", {"role": "user", "content": "继续"})
 
@@ -329,6 +392,10 @@ class TestBuildHistoryMessages:
         assert "小猪" in content
         assert "生成图片" in content
         assert "等待用户确认颜色" in content
+        assert "把小猪改成白色" in content
+        assert "pig.png" in content
+        assert "是否保留背景" in content
+        assert "继续使用上一张图" in content
 
     def test_with_history_messages(self):
         from babybot.agent_kernel.executor import _build_history_messages
@@ -439,3 +506,80 @@ class TestBuildHistoryMessages:
         all_content = " ".join(m.content for m in msgs)
         assert "画了小猪" in all_content  # anchor summary
         assert "黑色小猪" in all_content  # BM25 recalled from pre-anchor
+
+    def test_cross_anchor_recall_formats_tool_results_and_failed_events(self, tmp_path):
+        from babybot.agent_kernel.executor import _build_history_messages
+
+        store = TapeStore(db_path=tmp_path / "test.db")
+        tape = store.get_or_create("chat1")
+
+        e1 = tape.append(
+            "tool_result",
+            {
+                "name": "generate_image",
+                "ok": True,
+                "content_preview": "已生成黑色小猪图片",
+                "artifacts": ["pig.png"],
+            },
+        )
+        e2 = tape.append(
+            "event",
+            {
+                "event": "failed",
+                "payload": {
+                    "description": "发送语音",
+                    "error": "tts timeout",
+                },
+            },
+        )
+        e3 = tape.append("anchor", {"name": "compact/1", "state": {"summary": "前面做过图片和语音尝试"}})
+        e4 = tape.append("message", {"role": "user", "content": "把之前那个小猪发我，并说明语音为什么失败"})
+        store.save_entries("chat1", [e1, e2, e3, e4])
+
+        msgs = _build_history_messages(
+            tape,
+            2000,
+            query="之前那个小猪和语音失败",
+            tape_store=store,
+        )
+
+        system_texts = [m.content for m in msgs if m.role == "system"]
+        merged = "\n".join(system_texts)
+        assert "generate_image" in merged
+        assert "已生成黑色小猪图片" in merged
+        assert "发送语音" in merged
+        assert "tts timeout" in merged
+
+    def test_history_view_includes_recent_tool_results_and_failed_events(self):
+        from babybot.agent_kernel.executor import _build_history_messages
+
+        tape = Tape("chat1")
+        tape.append("anchor", {"name": "compact/1", "state": {"summary": "前面做过图片尝试"}})
+        tape.append(
+            "tool_result",
+            {
+                "name": "generate_image",
+                "ok": True,
+                "content_preview": "已生成白色小猪图片",
+                "artifacts": ["pig-white.png"],
+            },
+        )
+        tape.append(
+            "event",
+            {
+                "event": "failed",
+                "payload": {
+                    "description": "发送语音",
+                    "error": "tts timeout",
+                },
+            },
+        )
+        tape.append("message", {"role": "user", "content": "把结果再发我"})
+
+        msgs = _build_history_messages(tape, 2000, query="发我之前的小猪结果")
+        system_texts = "\n".join(m.content for m in msgs if m.role == "system")
+
+        assert "近期执行状态" in system_texts
+        assert "generate_image" in system_texts
+        assert "已生成白色小猪图片" in system_texts
+        assert "发送语音" in system_texts

@@ -33,6 +33,60 @@ _LATIN_STOPWORDS: set[str] = {
 }
 
 
+def _payload_search_text(kind: str, payload: dict[str, Any]) -> str:
+    if kind == "message":
+        return str(payload.get("content", "") or "")
+    if kind == "anchor":
+        state = payload.get("state") or {}
+        if not isinstance(state, dict):
+            return ""
+        parts: list[str] = []
+        for key in (
+            "summary",
+            "user_intent",
+            "pending",
+            "next_steps",
+            "artifacts",
+            "open_questions",
+            "decisions",
+            "entities",
+        ):
+            value = state.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+            elif isinstance(value, list):
+                parts.extend(str(item).strip() for item in value if str(item).strip())
+        return "\n".join(parts)
+    if kind == "tool_result":
+        parts = [
+            str(payload.get("name", "") or ""),
+            str(payload.get("content_preview", "") or ""),
+        ]
+        artifacts = payload.get("artifacts") or []
+        if isinstance(artifacts, list):
+            parts.extend(str(item).strip() for item in artifacts if str(item).strip())
+        return "\n".join(part for part in parts if part)
+    if kind == "tool_call":
+        return "\n".join(
+            part
+            for part in (
+                str(payload.get("name", "") or ""),
+                json.dumps(payload.get("arguments", {}), ensure_ascii=False),
+            )
+            if part
+        )
+    if kind == "event":
+        return "\n".join(
+            part
+            for part in (
+                str(payload.get("event", "") or ""),
+                json.dumps(payload.get("payload", {}), ensure_ascii=False),
+            )
+            if part
+        )
+    return ""
+
+
 def _extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
     """Extract search keywords from text.
 
@@ -89,6 +143,53 @@ class Entry:
     @staticmethod
     def anchor(entry_id: int, name: str, state: dict[str, Any] | None = None, **meta: Any) -> Entry:
         return Entry(entry_id, "anchor", {"name": name, "state": state or {}}, dict(meta), time.time())
+
+    @staticmethod
+    def tool_call(
+        entry_id: int,
+        name: str,
+        arguments: dict[str, Any],
+        **meta: Any,
+    ) -> Entry:
+        return Entry(
+            entry_id,
+            "tool_call",
+            {"name": name, "arguments": dict(arguments)},
+            dict(meta),
+            time.time(),
+        )
+
+    @staticmethod
+    def tool_result(
+        entry_id: int,
+        name: str,
+        ok: bool,
+        content_preview: str = "",
+        artifacts: list[str] | None = None,
+        **meta: Any,
+    ) -> Entry:
+        return Entry(
+            entry_id,
+            "tool_result",
+            {
+                "name": name,
+                "ok": bool(ok),
+                "content_preview": content_preview,
+                "artifacts": list(artifacts or []),
+            },
+            dict(meta),
+            time.time(),
+        )
+
+    @staticmethod
+    def event(entry_id: int, event: str, payload: dict[str, Any] | None = None, **meta: Any) -> Entry:
+        return Entry(
+            entry_id,
+            "event",
+            {"event": event, "payload": dict(payload or {})},
+            dict(meta),
+            time.time(),
+        )
 
 
 class Tape:
@@ -179,9 +280,21 @@ class TapeStore:
             db.execute("SELECT content FROM entries LIMIT 0")
         except sqlite3.OperationalError:
             db.execute("ALTER TABLE entries ADD COLUMN content TEXT DEFAULT ''")
-            db.execute(
-                "UPDATE entries SET content = json_extract(payload, '$.content') "
-                "WHERE kind = 'message' AND (content IS NULL OR content = '')"
+        rows = db.execute(
+            "SELECT entry_id, chat_id, kind, payload FROM entries "
+            "WHERE content IS NULL OR content = ''"
+        ).fetchall()
+        if rows:
+            db.executemany(
+                "UPDATE entries SET content = ? WHERE chat_id = ? AND entry_id = ?",
+                [
+                    (
+                        _payload_search_text(kind, json.loads(payload)),
+                        chat_id,
+                        entry_id,
+                    )
+                    for entry_id, chat_id, kind, payload in rows
+                ],
             )
             db.commit()
 
@@ -218,7 +331,7 @@ class TapeStore:
                     entry.kind,
                     json.dumps(entry.payload, ensure_ascii=False),
                     json.dumps(entry.meta, ensure_ascii=False),
-                    entry.payload.get("content", "") if entry.kind == "message" else "",
+                    _payload_search_text(entry.kind, entry.payload),
                     entry.timestamp,
                 )
                 for entry in entries
@@ -230,7 +343,7 @@ class TapeStore:
         self, chat_id: str, query: str, limit: int = 5,
         exclude_ids: set[int] | None = None,
     ) -> list[Entry]:
-        """Search across ALL message entries for this chat (cross-anchor recall).
+        """Search across searchable entries for this chat (cross-anchor recall).
 
         Uses keyword extraction + LIKE candidate fetching + BM25 ranking.
         Supports both CJK and Latin text without external dependencies.
@@ -247,7 +360,8 @@ class TapeStore:
 
         # Fetch candidates via LIKE on content column (any keyword match)
         conditions = []
-        params: list[str | int] = [chat_id, "message"]
+        searchable_kinds = ("message", "anchor", "tool_result", "event")
+        params: list[str | int] = [chat_id, *searchable_kinds]
         for kw in keywords:
             conditions.append("content LIKE ?")
             params.append(f"%{kw}%")
@@ -255,7 +369,7 @@ class TapeStore:
         where_clause = " OR ".join(conditions)
         rows = db.execute(
             f"SELECT entry_id, kind, payload, meta, timestamp FROM entries "
-            f"WHERE chat_id=? AND kind=? AND ({where_clause}) "
+            f"WHERE chat_id=? AND kind IN (?, ?, ?, ?) AND ({where_clause}) "
             f"ORDER BY entry_id DESC LIMIT ?",
             [*params, limit * 3],
         ).fetchall()
@@ -263,10 +377,10 @@ class TapeStore:
         if not rows:
             return []
 
-        # Fetch total message count + avg content length for BM25
+        # Fetch total searchable count + avg content length for BM25
         stats = db.execute(
             "SELECT COUNT(*), AVG(LENGTH(content)) FROM entries "
-            "WHERE chat_id=? AND kind='message'",
+            "WHERE chat_id=? AND kind IN ('message', 'anchor', 'tool_result', 'event')",
             (chat_id,),
         ).fetchone()
         total_docs = max(1, stats[0])
@@ -277,7 +391,7 @@ class TapeStore:
         for kw in keywords:
             df_row = db.execute(
                 "SELECT COUNT(*) FROM entries "
-                "WHERE chat_id=? AND kind='message' AND content LIKE ?",
+                "WHERE chat_id=? AND kind IN ('message', 'anchor', 'tool_result', 'event') AND content LIKE ?",
                 (chat_id, f"%{kw}%"),
             ).fetchone()
             doc_freq[kw] = df_row[0] if df_row else 0
@@ -291,7 +405,7 @@ class TapeStore:
             if eid in exclude:
                 continue
             entry = Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[4])
-            content = entry.payload.get("content", "")
+            content = _payload_search_text(entry.kind, entry.payload)
             dl = len(content)
             score = 0.0
             for kw in keywords:
