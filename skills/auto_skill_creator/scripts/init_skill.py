@@ -12,6 +12,23 @@ from pathlib import Path
 MAX_SKILL_NAME_LENGTH = 64
 ALLOWED_RESOURCES = {"scripts", "references", "assets"}
 EXAMPLE_RESOURCE_ALIASES = {"example", "examples"}
+RESOURCE_ALIASES = {
+    "script": "scripts",
+    "scripts": "scripts",
+    "code": "scripts",
+    "codes": "scripts",
+    "reference": "references",
+    "references": "references",
+    "ref": "references",
+    "refs": "references",
+    "doc": "references",
+    "docs": "references",
+    "documentation": "references",
+    "asset": "assets",
+    "assets": "assets",
+    "template": "assets",
+    "templates": "assets",
+}
 
 SKILL_TEMPLATE = """---
 name: {skill_name}
@@ -94,7 +111,8 @@ def _resource_items(raw_resources: str | list[str] | tuple[str, ...] | None) -> 
 
 def parse_resources(raw_resources: str | list[str] | tuple[str, ...] | None) -> list[str]:
     resources = [
-        item for item in _resource_items(raw_resources)
+        RESOURCE_ALIASES.get(item, item)
+        for item in _resource_items(raw_resources)
         if item not in EXAMPLE_RESOURCE_ALIASES
     ]
     invalid = sorted({item for item in resources if item not in ALLOWED_RESOURCES})

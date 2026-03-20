@@ -64,6 +64,12 @@ def test_parse_resources_accepts_json_stringified_array_items() -> None:
     assert resources == ["scripts", "references"]
 
 
+def test_parse_resources_accepts_common_resource_aliases() -> None:
+    resources = init_skill.parse_resources(["code", "docs", "template"])
+
+    assert resources == ["scripts", "references", "assets"]
+
+
 def test_init_skill_accepts_json_stringified_resource_array_items(tmp_path: Path) -> None:
     skill_dir = init_skill.init_skill(
         "json-array-skill",
