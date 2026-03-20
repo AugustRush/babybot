@@ -2,15 +2,23 @@
 
 轻量级多通道对话 Agent 框架，无 AgentScope 依赖。支持工具调用、MCP 服务、技能路由、长期记忆、多模态图片，以及飞书等即时通讯平台接入。
 
+当前实现已经形成比较清晰的分层：
+
+- `ResourceManager` 对外仍是统一 facade
+- 技能加载、工具注册、资源作用域、宿主 Python 执行、workspace 工具、subagent runtime 等内部职责已拆到独立模块
+- 只有主 agent 负责最终向通道发送消息；子 agent 只执行任务并返回文本/文件路径
+
 ## 快速开始
 
 ```bash
 # 安装依赖
 uv sync
 
-# 配置
+# 配置主文件
 cp config.json.example config.json
 # 编辑 config.json，填入模型 API key 等
+
+# 初始化工作区定时任务文件
 cp scheduled_tasks.json.example ~/.babybot/workspace/scheduled_tasks.json
 
 # 交互式 CLI（本地调试）
@@ -50,10 +58,25 @@ uv run gateway
 | **MessageBus** | `message_bus.py` | 异步消息队列，全局 + 单聊并发信号量 |
 | **Heartbeat** | `heartbeat.py` | 空闲超时检测 + 硬超时保护 |
 | **OrchestratorAgent** | `orchestrator.py` | 接收用户输入，管理 Tape 记忆，调度子任务 |
-| **ResourceManager** | `resource.py` | 工具/MCP/技能的注册、发现与路由 |
+| **ResourceManager** | `resource.py` | 对外资源 facade；聚合工具/MCP/技能/子任务运行时 |
 | **SingleAgentExecutor** | `agent_kernel/executor.py` | model → tool_calls → tool_results 执行循环 |
 | **OpenAICompatibleGateway** | `model_gateway.py` | OpenAI 兼容 API 封装，支持图片 vision 格式 |
 | **Tape / TapeStore** | `context.py` | 长期记忆：SQLite 持久化 + LRU 缓存 + BM25 跨锚点召回 |
+
+### `resource.py` 内部拆分
+
+当前 `ResourceManager` 相关逻辑已拆分到以下模块：
+
+| 模块 | 职责 |
+|------|------|
+| `resource_models.py` | 资源/技能数据模型 |
+| `resource_python_runner.py` | 宿主 Python 选择、探测、fallback、外部技能脚本执行 |
+| `resource_workspace_tools.py` | workspace 文件读写、代码执行、shell 执行 |
+| `resource_skill_loader.py` | `SKILL.md`、脚本 AST/CLI 解析、技能工具注册 |
+| `resource_scope.py` | 资源 brief、scope 解析、lease 组装 |
+| `resource_tool_loader.py` | 自定义工具与 workspace tools 的注册/加载 |
+| `resource_subagent_runtime.py` | 子 agent 运行时 orchestration |
+| `resource_skill_runtime.py` | skill pack 选择、worker prompt 与技能目录格式化 |
 
 ## 运行模式
 
@@ -75,7 +98,15 @@ uv run gateway
 
 ## 配置说明
 
-主配置位于 `config.json`，定时任务位于工作区独立文件 `scheduled_tasks.json`。完整模板见 `config.json.example` 和 `scheduled_tasks.json.example`。
+主配置位于 `config.json`，定时任务位于工作区独立文件 `scheduled_tasks.json`。默认路径：
+
+- 主配置：`~/.babybot/config.json`（可由 `BABYBOT_CONFIG` 覆盖）
+- 工作区：`~/.babybot/workspace`（可由 `BABYBOT_WORKSPACE` 覆盖）
+- 定时任务：`~/.babybot/workspace/scheduled_tasks.json`
+- workspace 技能目录：`~/.babybot/workspace/skills`
+- workspace 自定义工具目录：`~/.babybot/workspace/tools`
+
+完整模板见 `config.json.example` 和 `scheduled_tasks.json.example`。
 
 ### 模型配置
 
@@ -133,6 +164,10 @@ uv run gateway
     "message_queue_maxsize": 1000,
     "max_per_chat": 1,
     "send_ack": true,
+    "python_executable": "",
+    "python_fallback_executables": [],
+    "worker_max_steps": 14,
+    "orchestrator_max_steps": 30,
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
     "context_max_chats": 500
@@ -149,6 +184,10 @@ uv run gateway
 | `message_queue_maxsize` | 1000 | MessageBus 单队列最大积压，超过后入队会背压等待 |
 | `max_per_chat` | 1 | 单个会话最大并行数 |
 | `send_ack` | true | 是否发送"收到，正在处理..."回执 |
+| `python_executable` | `""` | 技能脚本优先使用的宿主 Python |
+| `python_fallback_executables` | `[]` | 技能脚本执行失败时可回退的 Python 列表 |
+| `worker_max_steps` | 14 | 子 agent 最大执行轮数 |
+| `orchestrator_max_steps` | 30 | 主 orchestrator 最大执行轮数 |
 | `context_history_tokens` | 2000 | 历史上下文 token 预算 |
 | `context_compact_threshold` | 3000 | 触发锚点压缩的 token 阈值 |
 | `context_max_chats` | 500 | 内存中 LRU 缓存的最大会话数 |
@@ -226,6 +265,39 @@ uv run gateway
 
 技能目录需包含 `SKILL.md`（frontmatter 定义元数据 + 正文作为 system prompt），可选 `scripts/` 子目录放置技能专属工具脚本。
 
+技能脚本执行说明：
+
+- 技能脚本优先在“宿主 Python”环境执行，而不是项目当前 venv
+- Python 选择顺序支持：
+  1. 技能级 `python_executable`
+  2. 技能级 `python_fallback_executables`
+  3. 系统级 `system.python_executable`
+  4. 系统级 `system.python_fallback_executables`
+  5. 自动探测的本机 Python
+- 遇到环境类失败（如缺包、动态库缺失、解释器不可用）会自动尝试 fallback
+- 遇到业务类失败（脚本自身报错）不会盲目重试
+
+示例：
+
+```json
+{
+  "system": {
+    "python_executable": "/Users/you/miniconda3/bin/python3",
+    "python_fallback_executables": [
+      "/usr/bin/python3",
+      "/opt/homebrew/bin/python3"
+    ]
+  },
+  "agent_skills": {
+    "mlx_audio": {
+      "directory": "skills/mlx-audio",
+      "python_executable": "/Users/you/miniconda3/bin/python3",
+      "python_fallback_executables": ["/usr/bin/python3"]
+    }
+  }
+}
+```
+
 ### 定时任务
 
 工作区中的 `scheduled_tasks.json` 保存所有定时任务定义，不再和主配置混在一起。任务定义示例：
@@ -252,6 +324,20 @@ uv run gateway
 - 旧版 `config.json` 中的 `scheduled_tasks` 会在首次加载时自动迁移到工作区文件。
 - 通过自然语言创建任务时可以不提供 `name`；系统会根据 `prompt + target + schedule` 自动生成稳定名字，并尽量复用已有同类任务而不是重复创建。
 - 默认要求当前进程有活跃调度器（通常是 `uv run gateway`）；否则会提示“仅落盘、不保证执行”，避免误报创建成功。
+
+## 主 / 子 Agent 职责边界
+
+- 主 agent 负责：
+  - 接收用户输入
+  - 路由技能与工具
+  - 汇总子任务结果
+  - 最终向飞书等通道回复
+- 子 agent 负责：
+  - 在受限 `ToolLease` 下执行任务
+  - 返回文本结果和生成文件路径
+  - 不直接向用户发送消息
+
+这意味着即使某个技能能生成音频/图片，子 agent 也只返回产物路径，最终发送动作仍由主 agent 完成。
 
 ## 长期记忆 (TAPE)
 
@@ -284,7 +370,15 @@ babybot/
 │   ├── cli.py                   # CLI / Gateway 运行器
 │   ├── config.py                # 统一配置管理
 │   ├── orchestrator.py          # 编排 Agent
-│   ├── resource.py              # 资源管理器（工具/MCP/技能）
+│   ├── resource.py              # ResourceManager facade
+│   ├── resource_models.py       # 资源/技能数据模型
+│   ├── resource_python_runner.py # 宿主 Python 选择与技能脚本执行
+│   ├── resource_scope.py        # 资源 brief / scope / lease
+│   ├── resource_skill_loader.py # 技能发现、frontmatter、脚本解析
+│   ├── resource_skill_runtime.py # skill pack 选择与 worker prompt
+│   ├── resource_subagent_runtime.py # 子 agent 运行时 orchestration
+│   ├── resource_tool_loader.py  # 自定义工具 / workspace tools 加载
+│   ├── resource_workspace_tools.py # workspace 文件与代码工具
 │   ├── worker.py                # Worker 执行器工厂
 │   ├── model_gateway.py         # OpenAI 兼容网关
 │   ├── message_bus.py           # 异步消息总线
@@ -299,6 +393,7 @@ babybot/
 │   │   ├── types.py             # TaskContract / ExecutionContext
 │   │   ├── skills.py            # SkillPack 合并逻辑
 │   │   └── mcp.py               # MCP 工具适配器
+│   ├── cron.py                  # 定时任务调度
 │   └── channels/                # 通道集成
 │       ├── base.py              # BaseChannel / InboundMessage
 │       ├── manager.py           # ChannelManager（自动发现）
@@ -307,21 +402,26 @@ babybot/
 │       └── feishu.py            # 飞书通道实现
 ├── skills/                      # 技能目录
 ├── tools/                       # 自定义工具目录
-├── tests/                       # 测试
 ├── config.json                  # 配置文件
-└── config.json.example          # 配置模板
+├── config.json.example          # 配置模板
+├── scheduled_tasks.json.example # 定时任务模板
+├── docs/                        # 设计/实现计划文档
+└── tests/                       # 测试
 ```
 
 ## 特性
 
-- **统一 JSON 配置** — 所有配置集中在 `config.json`，支持 `${VAR}` 环境变量
+- **配置与工作区分离** — 主配置在 `config.json`，定时任务在 workspace 独立文件，支持 `${VAR}` 环境变量
 - **双运行模式** — CLI 交互调试 + Gateway 多通道生产部署
 - **轻量内核** — 无 AgentScope 依赖，最小抽象
 - **长期记忆** — Tape + SQLite + 自动锚点压缩 + BM25 跨锚点召回
 - **多模态** — 图片从通道到 LLM 全链路支持（延迟 base64 编码）
 - **MCP 支持** — stdio / HTTP 两种传输，动态注册工具
-- **技能路由** — 关键词匹配自动选择 SkillPack，注入专属 prompt 和工具
+- **技能路由** — 技能 prompt、工具脚本、lease 与 worker prompt 解耦
+- **宿主 Python fallback** — 技能脚本可在独立本地 Python 环境运行，并支持多级回退
 - **工具租约** — ToolLease 最小权限策略，技能间 UNION 语义合并
+- **主/子 Agent 边界清晰** — 只有主 agent 负责通道发送，子 agent 只返回结果与产物路径
+- **可配置执行轮数** — orchestrator / worker 的最大步数可配置
 - **并发控制** — 全局 + 单聊信号量，心跳空闲超时检测
 - **通道扩展** — 实现 `BaseChannel` 即可接入新平台
 
