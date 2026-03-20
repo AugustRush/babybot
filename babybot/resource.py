@@ -53,6 +53,7 @@ from .resource_models import (
     ToolGroup,
 )
 from .resource_python_runner import ExternalPythonRunner
+from .resource_scope import ResourceScopeHelper
 from .resource_workspace_tools import (
     WorkspaceToolSuite,
     check_shell_safety as _check_shell_safety,
@@ -435,6 +436,13 @@ class ResourceManager:
             self._skill_loader = loader
         return loader
 
+    def _resource_scope_view(self) -> ResourceScopeHelper:
+        helper = getattr(self, "_resource_scope", None)
+        if helper is None:
+            helper = ResourceScopeHelper(self)
+            self._resource_scope = helper
+        return helper
+
     @staticmethod
     def _callable_tool_cls() -> type[CallableTool]:
         return CallableTool
@@ -712,28 +720,20 @@ class ResourceManager:
 
     @staticmethod
     def _resource_slug(value: str) -> str:
-        slug = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
-        return slug or "resource"
+        return ResourceScopeHelper.resource_slug(value)
 
     def _skill_resource_id(self, skill: LoadedSkill) -> str:
-        return f"skill.{self._resource_slug(skill.name)}"
+        return self._resource_scope_view().skill_resource_id(skill)
 
     def _mcp_resource_id(self, server_name: str) -> str:
-        return f"mcp.{self._resource_slug(server_name)}"
+        return self._resource_scope_view().mcp_resource_id(server_name)
 
     def _group_resource_id(self, group_name: str) -> str:
-        return f"group.{self._resource_slug(group_name)}"
+        return self._resource_scope_view().group_resource_id(group_name)
 
     @staticmethod
     def _lease_to_dict(lease: ToolLease) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if lease.include_groups:
-            payload["include_groups"] = list(lease.include_groups)
-        if lease.include_tools:
-            payload["include_tools"] = list(lease.include_tools)
-        if lease.exclude_tools:
-            payload["exclude_tools"] = list(lease.exclude_tools)
-        return payload
+        return ResourceScopeHelper.lease_to_dict(lease)
 
     def _get_current_task_lease_var(self) -> contextvars.ContextVar[ToolLease | None]:
         current = getattr(self, "_current_task_lease", None)
@@ -755,85 +755,14 @@ class ResourceManager:
         return self._catalog_view().get_resource_briefs()
 
     def _get_resource_briefs(self) -> list[dict[str, Any]]:
-        """Build concise resource descriptors for top-level routing."""
-        briefs: list[ResourceBrief] = []
-        mcp_groups = set(self.mcp_server_groups.values())
-
-        for server_name, group_name in sorted(self.mcp_server_groups.items()):
-            group = self.groups.get(group_name)
-            tools = self.registry.list(ToolLease(include_groups=(group_name,)))
-            tool_count = len(tools)
-            briefs.append(
-                ResourceBrief(
-                    resource_id=self._mcp_resource_id(server_name),
-                    resource_type="mcp",
-                    name=server_name,
-                    purpose=(
-                        group.description if group else f"MCP tools from {server_name}"
-                    ),
-                    group=group_name,
-                    tool_count=tool_count,
-                    tools_preview=self._preview_tool_names(
-                        ToolLease(include_groups=(group_name,))
-                    ),
-                    active=(bool(group.active) if group else True) and tool_count > 0,
-                )
-            )
-
-        for skill in sorted(self.skills.values(), key=lambda s: s.name.lower()):
-            if not skill.active:
-                continue
-            skill_lease = skill.lease or ToolLease()
-            tools = (
-                self.registry.list(skill_lease)
-                if skill_lease.include_groups or skill_lease.include_tools
-                else []
-            )
-            tool_count = len(tools)
-            briefs.append(
-                ResourceBrief(
-                    resource_id=self._skill_resource_id(skill),
-                    resource_type="skill",
-                    name=skill.name,
-                    purpose=skill.description or f"Skill: {skill.name}",
-                    group=skill.tool_group,
-                    tool_count=tool_count,
-                    tools_preview=self._preview_tool_names(skill_lease),
-                    active=skill.active and tool_count > 0,
-                )
-            )
-
-        for group_name, group in sorted(self.groups.items()):
-            if group_name.startswith("skill_"):
-                continue
-            if group_name in mcp_groups:
-                continue
-            tools = self.registry.list(ToolLease(include_groups=(group_name,)))
-            tool_count = len(tools)
-            briefs.append(
-                ResourceBrief(
-                    resource_id=self._group_resource_id(group_name),
-                    resource_type="tool_group",
-                    name=group_name,
-                    purpose=group.description,
-                    group=group_name,
-                    tool_count=tool_count,
-                    tools_preview=self._preview_tool_names(
-                        ToolLease(include_groups=(group_name,))
-                    ),
-                    active=group.active and tool_count > 0,
-                )
-            )
-
-        return [brief.to_dict() for brief in briefs]
+        return self._resource_scope_view().get_resource_briefs()
 
     def _preview_tool_names(
         self,
         lease: ToolLease,
         limit: int = 6,
     ) -> tuple[str, ...]:
-        names = sorted(registered.tool.name for registered in self.registry.list(lease))
-        return tuple(names[:limit])
+        return self._resource_scope_view().preview_tool_names(lease, limit=limit)
 
     def resolve_resource_scope(
         self,
@@ -850,35 +779,10 @@ class ResourceManager:
         resource_id: str,
         require_tools: bool = False,
     ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
-        """Map resource id to a least-privilege lease and optional skill ids."""
-        normalized = (resource_id or "").strip().lower()
-        if not normalized:
-            return None
-
-        for skill in self.skills.values():
-            if not skill.active:
-                continue
-            if normalized == self._skill_resource_id(skill):
-                lease = skill.lease or ToolLease()
-                if require_tools and not self.registry.list(lease):
-                    return None
-                return self._lease_to_dict(lease), (skill.name.strip().lower(),)
-
-        for server_name, group_name in self.mcp_server_groups.items():
-            if normalized == self._mcp_resource_id(server_name):
-                lease = ToolLease(include_groups=(group_name,))
-                if require_tools and not self.registry.list(lease):
-                    return None
-                return self._lease_to_dict(lease), ()
-
-        for group_name in self.groups:
-            if normalized == self._group_resource_id(group_name):
-                lease = ToolLease(include_groups=(group_name,))
-                if require_tools and not self.registry.list(lease):
-                    return None
-                return self._lease_to_dict(lease), ()
-
-        return None
+        return self._resource_scope_view().resolve_resource_scope(
+            resource_id,
+            require_tools=require_tools,
+        )
 
     def set_scheduled_task_manager(
         self, manager: "ScheduledTaskManager | None"
@@ -1023,46 +927,7 @@ class ResourceManager:
         return self._catalog_view().search_resources(query)
 
     def _search_resources(self, query: str | None = None) -> dict[str, Any]:
-        keyword = (query or "").strip().lower()
-        groups = [
-            {
-                "name": g.name,
-                "active": g.active,
-                "description": g.description,
-            }
-            for g in self.groups.values()
-            if not keyword
-            or keyword in g.name.lower()
-            or keyword in g.description.lower()
-        ]
-        tools = []
-        for registered in self.registry.list():
-            if keyword and keyword not in registered.tool.name.lower():
-                continue
-            tools.append({"name": registered.tool.name, "group": registered.group})
-        skills = []
-        for skill in self.skills.values():
-            if (
-                keyword
-                and keyword not in skill.name.lower()
-                and keyword not in skill.description.lower()
-            ):
-                continue
-            skills.append(
-                {
-                    "name": skill.name,
-                    "description": skill.description,
-                    "source": skill.source,
-                    "active": skill.active,
-                }
-            )
-        return {
-            "query": query or "",
-            "groups": groups,
-            "tools": tools,
-            "mcp_servers": list(self.mcp_clients.keys()),
-            "skills": skills,
-        }
+        return self._resource_scope_view().search_resources(query)
 
     def get_channel_prompts(self) -> str:
         prompts: list[str] = []
@@ -1256,58 +1121,7 @@ class ResourceManager:
             self._active_write_root.reset(token)
 
     def _build_task_lease(self, lease: dict[str, Any]) -> ToolLease:
-        include_groups = lease.get("include_groups")
-        if include_groups is None:
-            # Fallback: all active groups EXCEPT channel tool groups.
-            # Sub-agents must not get channel send-message tools by default;
-            # those must be explicitly requested in the task lease.
-            include_groups = [
-                name
-                for name, group in self.groups.items()
-                if group.active and not name.startswith("channel_")
-            ]
-        else:
-            # Always include the "basic" group so fundamental tools
-            # (scheduled tasks, worker dispatch, etc.) are available.
-            # "basic" must never contain channel_* tools — channel groups use
-            # the "channel_{name}" naming convention and are registered
-            # separately via register_channel_tools().
-            explicit_channel_groups = {
-                g for g in include_groups if g.startswith("channel_")
-            }
-            include_groups = list(include_groups)
-            if "basic" not in include_groups:
-                include_groups.append("basic")
-            # Defensive: strip any channel_* groups that were not part of the
-            # original explicit request (guards against future misconfiguration
-            # where a non-channel group name starts with "channel_" by mistake).
-            include_groups = [
-                g
-                for g in include_groups
-                if not g.startswith("channel_") or g in explicit_channel_groups
-            ]
-
-        # Validate include_tools against registered tool names.
-        # The LLM planner may hallucinate tool names; drop any that don't exist
-        # so they don't accidentally filter out all real tools.
-        raw_include_tools = lease.get("include_tools") or ()
-        known_tools = set(self.registry._tools.keys())
-        valid_include_tools = [t for t in raw_include_tools if t in known_tools]
-        if raw_include_tools and not valid_include_tools:
-            logger.warning(
-                "Lease include_tools contained no valid names, ignoring: %s",
-                list(raw_include_tools),
-            )
-
-        exclude_tools = set(lease.get("exclude_tools") or ())
-        if not set(valid_include_tools) & self._orchestration_tools:
-            exclude_tools.update(self._orchestration_tools)
-
-        return ToolLease(
-            include_groups=tuple(include_groups or ()),
-            include_tools=tuple(valid_include_tools),
-            exclude_tools=tuple(sorted(exclude_tools)),
-        )
+        return self._resource_scope_view().build_task_lease(lease)
 
     def create_worker_tool(self) -> Any:
         async def create_worker(
