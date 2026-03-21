@@ -103,19 +103,28 @@ def test_validate_skill_accepts_generated_skill(tmp_path: Path) -> None:
         resources=[],
         include_examples=False,
     )
-    skill_md = skill_dir / "SKILL.md"
-    skill_md.write_text(
-        "---\n"
-        "name: validator-skill\n"
-        "description: Create and validate babybot skills.\n"
-        "---\n\n"
-        "# Validator Skill\n",
-        encoding="utf-8",
-    )
 
     valid, message = quick_validate.validate_skill(skill_dir)
 
     assert valid, message
+
+
+def test_init_skill_generates_guideline_aligned_skill_document(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "validator-skill",
+        path=tmp_path,
+        resources=[],
+        include_examples=False,
+    )
+
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "description: Use when " in content
+    assert "Use this skill when" not in content
+    assert "## When to Use" in content
+    assert "## Workflow" in content
+    assert "## Resources" in content
+    assert "## Constraints" in content
 
 
 def test_validate_skill_rejects_todo_description(tmp_path: Path) -> None:
@@ -136,13 +145,36 @@ def test_validate_skill_rejects_todo_description(tmp_path: Path) -> None:
     assert "TODO" in message
 
 
+def test_validate_skill_rejects_placeholder_skill_body(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "placeholder-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: placeholder-skill\n"
+        "description: Use when handling placeholder skill tasks.\n"
+        "---\n\n"
+        "# Placeholder Skill\n\n"
+        "## Overview\n\n"
+        "Describe what this skill enables and when it should be used.\n\n"
+        "## Workflow\n\n"
+        "1. Explain how the skill should be triggered.\n"
+        "2. List the core steps the agent should follow.\n",
+        encoding="utf-8",
+    )
+
+    valid, message = quick_validate.validate_skill(skill_dir)
+
+    assert not valid
+    assert "placeholder" in message.lower()
+
+
 def test_validate_skill_rejects_unexpected_root_file(tmp_path: Path) -> None:
     skill_dir = tmp_path / "bad-root-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
         "---\n"
         "name: bad-root-skill\n"
-        "description: Valid description.\n"
+        "description: Use when handling bad root skill requests.\n"
         "---\n\n"
         "# Skill\n",
         encoding="utf-8",

@@ -12,6 +12,11 @@ ALLOWED_ROOT_DIRS = {"scripts", "references", "assets"}
 PLACEHOLDER_MARKERS = ("[todo", "todo:")
 MAX_SKILL_NAME_LENGTH = 64
 SKIP_SCRIPT_FUNCTIONS = {"main", "parse_arguments", "create_client"}
+BODY_PLACEHOLDER_MARKERS = (
+    "describe what this skill enables",
+    "explain how the skill should be triggered",
+    "list the core steps the agent should follow",
+)
 
 
 def _extract_frontmatter(content: str) -> tuple[dict[str, str], str] | tuple[None, None]:
@@ -52,6 +57,23 @@ def _validate_description(description: str) -> str | None:
     lowered = trimmed.lower()
     if any(marker in lowered for marker in PLACEHOLDER_MARKERS):
         return "Description still contains TODO placeholder text"
+    if not lowered.startswith("use when "):
+        return "Description must start with 'Use when' and describe trigger conditions"
+    if "use this skill when" in lowered:
+        return "Description must describe trigger conditions directly, not say 'Use this skill when'"
+    return None
+
+
+def _validate_body(body: str) -> str | None:
+    lowered = body.strip().lower()
+    if not lowered:
+        return "Skill body cannot be empty"
+    for marker in PLACEHOLDER_MARKERS:
+        if marker in lowered:
+            return "Skill body still contains TODO placeholder text"
+    for marker in BODY_PLACEHOLDER_MARKERS:
+        if marker in lowered:
+            return "Skill body still contains placeholder guidance and must be rewritten"
     return None
 
 
@@ -96,7 +118,7 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
         return False, "SKILL.md not found"
 
     content = skill_md.read_text(encoding="utf-8")
-    meta, _body = _extract_frontmatter(content)
+    meta, body = _extract_frontmatter(content)
     if meta is None:
         return False, "Invalid frontmatter format"
     if "name" not in meta:
@@ -111,6 +133,9 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
     description_error = _validate_description(meta["description"])
     if description_error:
         return False, description_error
+    body_error = _validate_body(body)
+    if body_error:
+        return False, body_error
 
     for child in skill_dir.iterdir():
         if child.name == "SKILL.md":

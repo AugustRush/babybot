@@ -1,6 +1,6 @@
 ---
 name: auto-skill-creator
-description: Use this skill when creating or updating babybot, Codex, Claude, or AgentScope skills. It scaffolds builtin or workspace skills, guides resource planning, and validates the final structure before completion.
+description: Use when creating or updating babybot, Codex, or Claude skills that need deterministic scaffolding, resource planning, and final validation.
 ---
 
 # Auto Skill Creator

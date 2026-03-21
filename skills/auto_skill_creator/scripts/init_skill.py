@@ -37,15 +37,27 @@ description: {description}
 
 # {skill_title}
 
-## Overview
+## When to Use
 
-Describe what this skill enables and when it should be used.
+- Use when the request clearly matches {skill_title} work and benefits from specialized workflow guidance.
+- Do not use for unrelated general-purpose tasks.
 
 ## Workflow
 
-1. Explain how the skill should be triggered.
-2. List the core steps the agent should follow.
-3. Reference bundled resources when needed.
+1. Confirm the request matches this skill's trigger conditions.
+2. Read only the bundled resources needed for the current task.
+3. Execute the minimum necessary steps and return the result clearly.
+
+## Resources
+
+- `scripts/`: deterministic helpers for repeatable operations.
+- `references/`: detailed documentation to load only when needed.
+- `assets/`: templates or supporting files used in outputs.
+
+## Constraints
+
+- Keep instructions concise and task-focused.
+- Do not add extra files unless they are required by repeated real usage.
 """
 
 EXAMPLE_SCRIPT = """#!/usr/bin/env python3
@@ -131,7 +143,10 @@ def parse_resources(raw_resources: str | list[str] | tuple[str, ...] | None) -> 
 
 
 def _default_description(skill_name: str) -> str:
-    return f"Use this skill when working with {skill_name} tasks."
+    return (
+        f"Use when handling {skill_name} requests that need specialized workflow "
+        "guidance, references, or helper scripts."
+    )
 
 
 def _create_resource_dirs(
