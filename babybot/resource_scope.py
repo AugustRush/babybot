@@ -78,11 +78,10 @@ class ResourceScopeHelper:
             if not skill.active:
                 continue
             skill_lease = skill.lease or ToolLease()
-            tools = (
-                self._owner.registry.list(skill_lease)
-                if skill_lease.include_groups or skill_lease.include_tools
-                else []
+            has_explicit_scope = bool(
+                skill_lease.include_groups or skill_lease.include_tools
             )
+            tools = self._owner.registry.list(skill_lease) if has_explicit_scope else []
             tool_count = len(tools)
             briefs.append(
                 ResourceBrief(
@@ -92,8 +91,12 @@ class ResourceScopeHelper:
                     purpose=skill.description or f"Skill: {skill.name}",
                     group=skill.tool_group,
                     tool_count=tool_count,
-                    tools_preview=self.preview_tool_names(skill_lease),
-                    active=skill.active and tool_count > 0,
+                    tools_preview=(
+                        self.preview_tool_names(skill_lease)
+                        if has_explicit_scope
+                        else ()
+                    ),
+                    active=skill.active and (tool_count > 0 or not has_explicit_scope),
                 )
             )
 

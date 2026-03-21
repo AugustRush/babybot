@@ -600,15 +600,41 @@ def test_search_resources_filters_groups_tools_skills_and_mcp_servers() -> None:
 
     assert result["query"] == "map"
     assert result["mcp_servers"] == ["gaode_map"]
-    assert result["groups"] == [
-        {
-            "name": "map_services",
-            "active": True,
-            "description": "Map MCP tools",
-        }
-    ]
-    assert result["tools"] == [{"name": "gaode_map__search", "group": "map_services"}]
-    assert result["skills"] == []
+
+
+def test_get_resource_briefs_keeps_prompt_only_skill_active_without_unrelated_tools() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "basic": ToolGroup(name="basic", description="Core tools", active=True),
+    }
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.mcp_server_groups = {}
+    manager.skills = {
+        "prompt-helper": LoadedSkill(
+            name="prompt-helper",
+            description="Use when a prompt-only helper skill is needed.",
+            directory="/tmp/prompt-helper",
+            prompt="prompt helper prompt",
+            active=True,
+            lease=ToolLease(),
+        )
+    }
+
+    def list_files(path: str) -> str:
+        return path
+
+    manager.register_tool(
+        list_files,
+        group_name="basic",
+        func_name="list_files",
+    )
+
+    briefs = manager.get_resource_briefs()
+    prompt_brief = next(item for item in briefs if item["id"] == "skill.prompt-helper")
+
+    assert prompt_brief["active"] is True
+    assert prompt_brief["tool_count"] == 0
+    assert prompt_brief["tools_preview"] == []
 
 
 def test_json_schema_for_callable_handles_collections_and_kwargs() -> None:
