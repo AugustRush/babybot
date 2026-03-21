@@ -17,6 +17,7 @@ from .agent_kernel.dynamic_orchestrator import (
 )
 from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
+from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .model_gateway import OpenAICompatibleGateway
 from .resource import ResourceManager
@@ -60,6 +61,11 @@ class OrchestratorAgent:
             db_path=self.config.home_dir / "memory" / "context.db",
             max_chats=self.config.system.context_max_chats,
         )
+        self.memory_store = HybridMemoryStore(
+            db_path=self.config.home_dir / "memory" / "context.db",
+            memory_dir=self.config.home_dir / "memory",
+        )
+        self.memory_store.ensure_bootstrap()
         self._child_task_bus = InMemoryChildTaskBus()
         self._task_heartbeat_registry = TaskHeartbeatRegistry()
         self._handoff_locks: dict[str, asyncio.Lock] = {}
@@ -103,6 +109,7 @@ class OrchestratorAgent:
                 k: v for k, v in [
                     ("tape", tape),
                     ("tape_store", self.tape_store if tape else None),
+                    ("memory_store", self.memory_store if tape else None),
                     ("heartbeat", heartbeat),
                     ("media_paths", media_paths),
                     ("original_goal", user_input),
@@ -147,6 +154,8 @@ class OrchestratorAgent:
         tape: Tape | None = None
         if chat_key:
             tape = self.tape_store.get_or_create(chat_key)
+            if hasattr(self, "memory_store"):
+                self.memory_store.observe_user_message(chat_key, user_input)
             pending_entries = []
             # Ensure bootstrap anchor exists
             if tape.last_anchor() is None:
@@ -185,6 +194,8 @@ class OrchestratorAgent:
                     },
                 )
                 self.tape_store.save_entry(chat_key, entry)
+                if hasattr(self, "memory_store"):
+                    self.memory_store.observe_runtime_event(chat_key, payload)
                 if runtime_event_callback is not None:
                     maybe = runtime_event_callback(event)
                     if inspect.isawaitable(maybe):
@@ -206,6 +217,8 @@ class OrchestratorAgent:
             if tape and chat_key:
                 asst_entry = tape.append("message", {"role": "assistant", "content": text})
                 self.tape_store.save_entry(chat_key, asst_entry)
+                if hasattr(self, "memory_store"):
+                    self.memory_store.observe_assistant_message(chat_key, text)
                 # Fire-and-forget async handoff check
                 asyncio.create_task(self._maybe_handoff(tape, chat_key))
 
@@ -313,6 +326,12 @@ class OrchestratorAgent:
                     },
                 })
                 self.tape_store.save_entry(chat_key, anchor)
+                if hasattr(self, "memory_store"):
+                    self.memory_store.observe_anchor_state(
+                        chat_key,
+                        anchor.payload.get("state") or {},
+                        source_ids=source_ids,
+                    )
                 tape.compact_entries()
                 logger.info(
                     "Handoff created anchor chat_key=%s entry_id=%d summarized=%d entries",

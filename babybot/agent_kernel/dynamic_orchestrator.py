@@ -806,7 +806,8 @@ class DynamicOrchestrator:
     ) -> list[ModelMessage]:
         briefs = self._rm.get_resource_briefs()
         tape = context.state.get("tape")
-        history = build_history_summary(tape)
+        memory_store = context.state.get("memory_store")
+        history = build_history_summary(tape, memory_store=memory_store, query=goal)
         media_paths = context.state.get("media_paths") or ()
 
         system_parts = [_SYSTEM_PROMPT_ROLE, _build_resource_catalog(briefs)]

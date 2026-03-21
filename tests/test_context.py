@@ -583,3 +583,120 @@ class TestBuildHistoryMessages:
         assert "generate_image" in system_texts
         assert "已生成白色小猪图片" in system_texts
         assert "发送语音" in system_texts
+
+    def test_history_view_includes_hot_warm_cold_memory_layers(self, tmp_path):
+        from babybot.agent_kernel.executor import _build_history_messages
+        from babybot.memory_store import HybridMemoryStore
+
+        tape = Tape("chat1")
+        tape.append("anchor", {"name": "compact/1", "state": {"summary": "用户正在改图"}})
+        tape.append("message", {"role": "user", "content": "以后默认中文，而且回答简洁一点"})
+        tape.append("message", {"role": "assistant", "content": "好的"})
+        tape.append("message", {"role": "user", "content": "继续处理那张小猪图"})
+
+        store = TapeStore(db_path=tmp_path / "context.db")
+        memory_store = HybridMemoryStore(
+            db_path=tmp_path / "context.db",
+            memory_dir=tmp_path / "memory",
+        )
+        memory_store.ensure_bootstrap()
+        memory_store.observe_user_message("chat1", "以后默认中文，而且回答简洁一点")
+        memory_store.observe_anchor_state(
+            "chat1",
+            {
+                "pending": "等待确认颜色",
+                "next_steps": ["把小猪改成白色"],
+                "artifacts": ["pig.png"],
+            },
+            source_ids=[1, 2],
+        )
+
+        msgs = _build_history_messages(
+            tape,
+            2000,
+            query="继续处理小猪图",
+            tape_store=store,
+            memory_store=memory_store,
+        )
+        system_texts = "\n".join(m.content for m in msgs if m.role == "system")
+
+        assert "[Hot Context]" in system_texts
+        assert "[Warm Context]" in system_texts
+        assert "等待确认颜色" in system_texts
+        assert "pig.png" in system_texts
+        assert "默认中文" in system_texts
+        assert "简洁" in system_texts
+
+    def test_history_view_uses_query_to_promote_relevant_memory(self, tmp_path):
+        from babybot.agent_kernel.executor import _build_history_messages
+        from babybot.memory_store import HybridMemoryStore
+
+        tape = Tape("chat1")
+        tape.append("anchor", {"name": "compact/1", "state": {"summary": "用户在并行处理图片和语音"}})
+
+        memory_store = HybridMemoryStore(
+            db_path=tmp_path / "context.db",
+            memory_dir=tmp_path / "memory",
+        )
+        memory_store.ensure_bootstrap()
+        memory_store.observe_user_message("chat1", "我是独立开发者，你现在是我的代码架构助手")
+        memory_store.observe_anchor_state(
+            "chat1",
+            {
+                "pending": "继续处理语音生成失败",
+                "artifacts": ["speech.wav", "pig.png"],
+                "decisions": ["语音失败优先回退宿主 Python"],
+            },
+            source_ids=[1, 2],
+        )
+        memory_store.observe_runtime_event(
+            "chat1",
+            {
+                "event": "failed",
+                "payload": {
+                    "description": "生成语音",
+                    "error": "tts timeout",
+                },
+            },
+        )
+
+        msgs = _build_history_messages(
+            tape,
+            2000,
+            query="继续修复语音 tts 问题",
+            memory_store=memory_store,
+        )
+        system_messages = [m.content for m in msgs if m.role == "system"]
+        hot_text = "\n".join(text for text in system_messages if text.startswith("[Hot Context]"))
+        warm_text = "\n".join(text for text in system_messages if text.startswith("[Warm Context]"))
+
+        assert "tts timeout" in hot_text
+        assert "继续处理语音生成失败" in hot_text
+        assert "独立开发者" in warm_text
+        assert "代码架构助手" in warm_text
+
+    def test_context_view_demotes_decaying_soft_memory(self, tmp_path):
+        from babybot.context_views import build_context_view
+        from babybot.memory_store import HybridMemoryStore
+
+        memory_store = HybridMemoryStore(
+            db_path=tmp_path / "context.db",
+            memory_dir=tmp_path / "memory",
+        )
+        memory_store.ensure_bootstrap()
+
+        memory_store.observe_user_message("chat1", "以后默认用中文")
+        memory_store.observe_user_message("chat1", "以后默认用中文")
+        memory_store.observe_user_message("chat1", "我是独立开发者")
+        memory_store.run_maintenance(now=time.time() + 8 * 24 * 3600)
+
+        view = build_context_view(
+            memory_store=memory_store,
+            chat_id="chat1",
+            query="继续聊天",
+        )
+
+        warm_text = "\n".join(view.warm)
+        cold_text = "\n".join(view.cold)
+        assert "默认中文" in warm_text
+        assert "独立开发者" in cold_text

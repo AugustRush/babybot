@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,7 @@ from .types import (
     TaskResult,
     ToolLease,
 )
+from ..context_views import summarize_context_view
 
 if TYPE_CHECKING:
     from ..context import Tape
@@ -25,7 +27,11 @@ logger = logging.getLogger(__name__)
 # ── Shared utilities ─────────────────────────────────────────────────────
 
 
-def build_history_summary(tape: "Tape | None") -> str:
+def build_history_summary(
+    tape: "Tape | None",
+    memory_store: Any | None = None,
+    query: str = "",
+) -> str:
     """Build context summary from tape for orchestration prompts.
 
     Includes both the anchor summary (compacted history) AND recent
@@ -36,6 +42,15 @@ def build_history_summary(tape: "Tape | None") -> str:
         return ""
 
     parts: list[str] = []
+    chat_id = getattr(tape, "chat_id", "")
+    if memory_store is not None and chat_id:
+        memory_summary = summarize_context_view(
+            memory_store=memory_store,
+            chat_id=chat_id,
+            query=query,
+        )
+        if memory_summary:
+            parts.append(memory_summary)
 
     # 1. Anchor summary (compacted older history)
     anchor = tape.last_anchor()
@@ -72,6 +87,19 @@ def build_history_summary(tape: "Tape | None") -> str:
             parts.append("近期对话:\n" + "\n".join(trimmed))
 
     return "\n".join(parts)
+
+
+def _supports_kwarg(callable_obj: Any, name: str) -> bool:
+    try:
+        params = inspect.signature(callable_obj).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    for param in params:
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == name:
+            return True
+    return False
 
 
 # ── ResourceBridgeExecutor ───────────────────────────────────────────────
@@ -112,6 +140,7 @@ class ResourceBridgeExecutor:
             stream_callback = context.state.get("stream_callback")
             tape = context.state.get("tape")
             tape_store = context.state.get("tape_store")
+            memory_store = context.state.get("memory_store")
             history_budget = context.state.get("context_history_tokens", 2000)
 
             base_prompt = "你是高效助手。简洁准确地回答用户问题。不虚构工具执行结果。如需外部信息必须明确指出。"
@@ -126,7 +155,7 @@ class ResourceBridgeExecutor:
             # Reuse executor.py's 3-section context builder
             if tape is not None:
                 messages.extend(_build_history_messages(
-                    tape, history_budget, query=goal, tape_store=tape_store,
+                    tape, history_budget, query=goal, tape_store=tape_store, memory_store=memory_store,
                 ))
 
             messages.append(ModelMessage(
@@ -172,20 +201,26 @@ class ResourceBridgeExecutor:
 
         tape = context.state.get("tape")
         tape_store = context.state.get("tape_store")
+        memory_store = context.state.get("memory_store")
         heartbeat = context.state.get("heartbeat")
         media_paths = context.state.get("media_paths")
 
+        run_subagent_task = self._rm.run_subagent_task
+        kwargs: dict[str, Any] = {
+            "task_description": enriched,
+            "lease": lease_dict,
+            "agent_name": f"DAG-{task.task_id}",
+            "tape": tape,
+            "tape_store": tape_store,
+            "heartbeat": heartbeat,
+            "media_paths": media_paths,
+            "skill_ids": list(skill_ids),
+        }
+        if memory_store is not None and _supports_kwarg(run_subagent_task, "memory_store"):
+            kwargs["memory_store"] = memory_store
+
         try:
-            output, media = await self._rm.run_subagent_task(
-                task_description=enriched,
-                lease=lease_dict,
-                agent_name=f"DAG-{task.task_id}",
-                tape=tape,
-                tape_store=tape_store,
-                heartbeat=heartbeat,
-                media_paths=media_paths,
-                skill_ids=list(skill_ids),
-            )
+            output, media = await run_subagent_task(**kwargs)
         except Exception as exc:
             return TaskResult(
                 task_id=task.task_id,

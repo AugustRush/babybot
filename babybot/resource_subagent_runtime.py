@@ -57,6 +57,7 @@ class ResourceSubagentRuntime:
         heartbeat: Any = None,
         tape: Any = None,
         tape_store: Any = None,
+        memory_store: Any = None,
         media_paths: list[str] | None = None,
         channel_context: Any = None,
     ) -> ExecutionContext:
@@ -68,6 +69,7 @@ class ResourceSubagentRuntime:
                     ("heartbeat", heartbeat),
                     ("tape", tape),
                     ("tape_store", tape_store),
+                    ("memory_store", memory_store),
                     (
                         "context_history_tokens",
                         self._owner.config.system.context_history_tokens,
@@ -86,6 +88,7 @@ class ResourceSubagentRuntime:
         agent_name: str = "Worker",
         tape: Any = None,
         tape_store: Any = None,
+        memory_store: Any = None,
         heartbeat: Any = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
@@ -146,6 +149,7 @@ class ResourceSubagentRuntime:
                 heartbeat=heartbeat,
                 tape=tape,
                 tape_store=tape_store,
+                memory_store=memory_store,
                 media_paths=media_paths,
                 channel_context=ChannelToolContext.get_current(),
             )

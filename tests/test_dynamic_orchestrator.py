@@ -542,7 +542,7 @@ def test_build_initial_messages_includes_media_paths() -> None:
     assert messages[-1].images == ("/tmp/a.png", "/tmp/b.jpg")
 
 
-def test_call_model_passes_stream_callback_and_resource_tools_to_router() -> None:
+def test_call_model_passes_stream_callback_and_resource_catalog_to_router() -> None:
     class RecordingGateway(DummyGateway):
         def __init__(self) -> None:
             super().__init__([ModelResponse(text="直接回复")])
@@ -567,7 +567,10 @@ def test_call_model_passes_stream_callback_and_resource_tools_to_router() -> Non
     ))
 
     assert gateway.stream_callback is stream_callback
-    assert "get_weather" in gateway.messages[0].content
+    assert "skill.weather: weather" in gateway.messages[0].content
+    assert "天气查询" in gateway.messages[0].content
+    assert "create_scheduled_task" in gateway.messages[0].content
+    assert "get_weather" not in gateway.messages[0].content
 
 
 def test_build_resource_catalog_includes_tool_previews() -> None:

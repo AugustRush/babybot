@@ -13,6 +13,7 @@ from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, Mod
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import ExecutionContext, TaskContract, TaskResult, ToolLease
+from ..context_views import build_context_view_messages
 from ..context import Entry, _extract_keywords
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,12 @@ class SingleAgentExecutor:
         if tape is not None:
             history_budget = context.state.get("context_history_tokens", 2000)
             tape_store = context.state.get("tape_store")
+            memory_store = context.state.get("memory_store")
             messages.extend(_build_history_messages(
                 tape, history_budget,
                 query=task.description,
                 tape_store=tape_store,
+                memory_store=memory_store,
             ))
 
         media_paths = context.state.get("media_paths") or ()
@@ -656,6 +659,7 @@ def _build_history_messages(
     token_budget: int,
     query: str = "",
     tape_store: object | None = None,
+    memory_store: object | None = None,
 ) -> list[ModelMessage]:
     """Build history context messages from a Tape.
 
@@ -670,6 +674,21 @@ def _build_history_messages(
     if last_anchor is None:
         return messages
     anchor = last_anchor()
+    budget_remaining = max(0, int(token_budget))
+
+    chat_id = getattr(tape, "chat_id", "")
+    if memory_store is not None and chat_id:
+        memory_messages = build_context_view_messages(
+            memory_store=memory_store,
+            chat_id=chat_id,
+            query=query,
+        )
+        for message in memory_messages:
+            cost = max(1, len(message.content) // 3)
+            if budget_remaining < cost:
+                continue
+            messages.append(message)
+            budget_remaining -= cost
 
     # 1. Anchor summary → system message (with structured fields if available)
     if anchor is not None:
@@ -700,12 +719,9 @@ def _build_history_messages(
                 parts.append(f"产物: {', '.join(str(item) for item in artifacts)}")
             anchor_text = "\n".join(parts)
             anchor_cost = len(anchor_text) // 3
-            messages.append(ModelMessage(role="system", content=anchor_text))
-            budget_remaining = max(0, int(token_budget) - anchor_cost)
-        else:
-            budget_remaining = max(0, int(token_budget))
-    else:
-        budget_remaining = max(0, int(token_budget))
+            if budget_remaining >= anchor_cost:
+                messages.append(ModelMessage(role="system", content=anchor_text))
+                budget_remaining -= anchor_cost
 
     # Collect recent entries (for both section 2 exclusion and section 3)
     entries_since = getattr(tape, "entries_since_anchor", None)

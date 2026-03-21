@@ -16,6 +16,7 @@ from babybot.agent_kernel import (
 )
 from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
 from babybot.context import TapeStore
+from babybot.memory_store import HybridMemoryStore
 from babybot.orchestrator import OrchestratorAgent
 
 
@@ -489,6 +490,74 @@ def test_process_task_persists_runtime_events_to_tape(tmp_path: Path) -> None:
     assert len(event_entries) == 1
     assert event_entries[0].payload["event"] == "started"
     assert event_entries[0].payload["payload"]["resource_id"] == "skill.weather"
+
+
+def test_process_task_updates_memory_from_assistant_reply_and_success_events(tmp_path: Path) -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._initialized = True
+    agent._init_lock = asyncio.Lock()
+    agent.resource_manager = object()
+    agent.gateway = object()
+    agent.tape_store = TapeStore(db_path=tmp_path / "context.db")
+    agent.memory_store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    agent.memory_store.ensure_bootstrap()
+    agent._handoff_locks = {}
+
+    class _Config:
+        system = type(
+            "S",
+            (),
+            {
+                "context_history_tokens": 2000,
+                "context_compact_threshold": 999999,
+                "context_max_chats": 100,
+                "idle_timeout": 30,
+            },
+        )()
+
+    agent.config = _Config()
+
+    async def _answer_with_dag(
+        user_input: str,
+        tape=None,
+        heartbeat=None,
+        media_paths=None,
+        stream_callback=None,
+        runtime_event_callback=None,
+    ):
+        del user_input, tape, heartbeat, media_paths, stream_callback
+        if runtime_event_callback is not None:
+            await runtime_event_callback(
+                {
+                    "flow_id": "flow-1",
+                    "task_id": "task-1",
+                    "event": "succeeded",
+                    "payload": {
+                        "resource_id": "skill.audio",
+                        "description": "生成语音",
+                        "output": "已生成 speech.wav",
+                    },
+                }
+            )
+        return "好的，后续默认中文并保持简洁，我会继续作为你的代码架构助手协助你。", []
+
+    agent._answer_with_dag = _answer_with_dag
+
+    response = asyncio.run(agent.process_task("继续修复语音", chat_key="feishu:chat-1"))
+
+    assert response.text.startswith("好的，后续默认中文")
+    records = agent.memory_store.list_memories(chat_id="feishu:chat-1")
+    summaries = "\n".join(record.summary for record in records)
+    keys = {(record.memory_type, record.key, str(record.value)) for record in records}
+
+    assert ("relationship_policy", "default_language", "zh-CN") in keys
+    assert ("relationship_policy", "response_style", "concise") in keys
+    assert ("relationship_policy", "assistant_role", "代码架构助手") in keys
+    assert "生成语音" in summaries
+    assert "speech.wav" in summaries
 
 
 def test_maybe_handoff_writes_extended_anchor_state(tmp_path: Path) -> None:
