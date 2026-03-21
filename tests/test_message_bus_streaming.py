@@ -87,6 +87,17 @@ class _ProgressEventOrchestrator:
             await runtime_event_callback({
                 "flow_id": "flow-1",
                 "task_id": "task-1",
+                "event": "progress",
+                "payload": {
+                    "resource_id": "skill.weather",
+                    "description": "先查询杭州天气",
+                    "status": "查询天气",
+                    "progress": 0.5,
+                },
+            })
+            await runtime_event_callback({
+                "flow_id": "flow-1",
+                "task_id": "task-1",
                 "event": "succeeded",
                 "payload": {
                     "resource_id": "skill.weather",
@@ -112,6 +123,17 @@ class _StreamingProgressEventOrchestrator:
             await stream_callback("处理中")
             await stream_callback("处理中，请稍候")
         if runtime_event_callback is not None:
+            await runtime_event_callback({
+                "flow_id": "flow-1",
+                "task_id": "task-1",
+                "event": "progress",
+                "payload": {
+                    "resource_id": "skill.weather",
+                    "description": "先查询杭州天气",
+                    "status": "查询天气",
+                    "progress": 0.5,
+                },
+            })
             await runtime_event_callback({
                 "flow_id": "flow-1",
                 "task_id": "task-1",
@@ -275,9 +297,11 @@ def test_message_bus_sends_progress_reply_when_runtime_stage_completes() -> None
     response = asyncio.run(_run())
 
     assert response.text == "最终结果"
-    assert len(channel.sent) == 2
-    assert "杭州多云 26℃" in channel.sent[0].text
-    assert channel.sent[1].text == "最终结果"
+    assert len(channel.sent) == 3
+    assert "处理中" in channel.sent[0].text
+    assert "50%" in channel.sent[0].text
+    assert channel.sent[1].text == "阶段完成：先查询杭州天气"
+    assert channel.sent[2].text == "最终结果"
 
 
 def test_message_bus_adds_request_received_at_metadata_for_downstream_tools() -> None:
@@ -360,6 +384,64 @@ def test_message_bus_sends_final_reply_as_new_message_after_runtime_progress() -
     assert response.text == "最终结果"
     assert channel.created == ["处理中"]
     assert channel.patched == ["处理中，请稍候"]
+    assert len(channel.sent) == 3
+    assert "处理中" in channel.sent[0].text
+    assert "50%" in channel.sent[0].text
+    assert channel.sent[1].text == "阶段完成：先查询杭州天气"
+    assert channel.sent[2].text == "最终结果"
+
+
+def test_message_bus_dedupes_repeated_runtime_progress_messages() -> None:
+    class _DuplicateProgressOrchestrator:
+        async def process_task(
+            self,
+            user_input: str,
+            chat_key: str = "",
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            stream_callback: Any = None,
+            runtime_event_callback: Any = None,
+        ) -> TaskResponse:
+            del user_input, chat_key, heartbeat, media_paths, stream_callback
+            if runtime_event_callback is not None:
+                payload = {
+                    "flow_id": "flow-1",
+                    "task_id": "task-1",
+                    "event": "progress",
+                    "payload": {
+                        "resource_id": "skill.weather",
+                        "description": "下载模型",
+                        "status": "下载模型",
+                        "progress": 0.3,
+                    },
+                }
+                await runtime_event_callback(payload)
+                await runtime_event_callback(payload)
+            return TaskResponse(text="done")
+
+    channel = _FakeFeishuChannel(stream_reply=False)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_DuplicateProgressOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> TaskResponse:
+        await bus.start()
+        try:
+            return await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    asyncio.run(_run())
+
     assert len(channel.sent) == 2
-    assert "杭州多云 26℃" in channel.sent[0].text
-    assert channel.sent[1].text == "最终结果"
+    assert "30%" in channel.sent[0].text
+    assert channel.sent[1].text == "done"

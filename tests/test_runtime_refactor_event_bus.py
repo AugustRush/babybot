@@ -235,3 +235,46 @@ def test_runtime_dead_letters_after_retry_budget_exhausted() -> None:
         "started",
         "dead_lettered",
     ]
+
+
+def test_runtime_emits_progress_events_from_child_heartbeat() -> None:
+    bus = InMemoryChildTaskBus()
+
+    class _ProgressBridge:
+        async def execute(self, task, context) -> TaskResult:  # type: ignore[no-untyped-def]
+            del task
+            heartbeat = context.state["heartbeat"]
+            heartbeat.beat(status="下载模型", progress=0.25)
+            await asyncio.sleep(0.08)
+            heartbeat.beat(status="下载模型", progress=0.75)
+            await asyncio.sleep(0.08)
+            return TaskResult(task_id="ignored", status="succeeded", output="done")
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-progress",
+        resource_manager=_DummyResourceManager(),  # type: ignore[arg-type]
+        bridge=_ProgressBridge(),  # type: ignore[arg-type]
+        child_task_bus=bus,
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+    )
+
+    async def _run() -> None:
+        task_id = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "查询天气"},
+            task_counter=0,
+            context=ExecutionContext(session_id="flow-progress"),
+        )
+        await runtime.wait_for_tasks([task_id])
+
+    asyncio.run(_run())
+
+    progress_events = [
+        event for event in bus.events_for("flow-progress")
+        if event.event == "progress"
+    ]
+    assert len(progress_events) >= 2
+    assert progress_events[0].payload["status"] == "下载模型"
+    assert progress_events[0].payload["progress"] == 0.25
+    assert progress_events[-1].payload["progress"] == 0.75

@@ -17,6 +17,7 @@ from .agent_kernel.dynamic_orchestrator import (
 )
 from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
+from .context_views import build_context_view
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .model_gateway import OpenAICompatibleGateway
@@ -66,11 +67,14 @@ class OrchestratorAgent:
             memory_dir=self.config.home_dir / "memory",
         )
         self.memory_store.ensure_bootstrap()
+        self.resource_manager.memory_store = self.memory_store
+        self.resource_manager.set_observability_provider(self)
         self._child_task_bus = InMemoryChildTaskBus()
         self._task_heartbeat_registry = TaskHeartbeatRegistry()
         self._handoff_locks: dict[str, asyncio.Lock] = {}
         self._init_lock = asyncio.Lock()
         self._initialized = False
+        self._recent_flow_ids_by_chat: dict[str, str] = {}
 
     async def _answer_with_dag(
         self,
@@ -102,6 +106,9 @@ class OrchestratorAgent:
 
         orchestrator = DynamicOrchestrator(**orchestrator_kwargs)
         flow_id = f"orchestrator:{uuid.uuid4().hex[:12]}"
+        chat_key = getattr(tape, "chat_id", "") if tape is not None else ""
+        if chat_key:
+            self._recent_flow_ids_by_chat[chat_key] = flow_id
 
         context = ExecutionContext(
             session_id=flow_id,
@@ -132,6 +139,73 @@ class OrchestratorAgent:
         dedup_media = sorted(set(collected_media))
 
         return text, dedup_media
+
+    def inspect_runtime_flow(self, flow_id: str = "", chat_key: str = "") -> str:
+        resolved_flow_id = flow_id.strip()
+        resolved_chat_key = chat_key.strip()
+        if not resolved_flow_id and resolved_chat_key:
+            resolved_flow_id = self._recent_flow_ids_by_chat.get(resolved_chat_key, "")
+        if not resolved_flow_id:
+            return "暂无可观测的 flow。"
+        snapshot = self._task_heartbeat_registry.snapshot(resolved_flow_id)
+        events = self._child_task_bus.events_for(resolved_flow_id)
+        parts = [f"flow_id={resolved_flow_id}"]
+        if resolved_chat_key:
+            parts.append(f"chat_key={resolved_chat_key}")
+        if snapshot:
+            lines = []
+            for task_id, state in snapshot.items():
+                lines.append(
+                    f"- {task_id}: status={state.get('status', '')} progress={state.get('progress', None)}"
+                )
+            parts.append("[Tasks]\n" + "\n".join(lines))
+        if events:
+            lines = []
+            for event in events[-12:]:
+                payload = dict(event.payload or {})
+                status = str(payload.get("status", "") or "")
+                progress = payload.get("progress")
+                desc = str(payload.get("description", "") or "")
+                suffix = []
+                if desc:
+                    suffix.append(desc)
+                if status:
+                    suffix.append(f"status={status}")
+                if progress is not None:
+                    suffix.append(f"progress={progress}")
+                lines.append(f"- {event.task_id}: {event.event}" + (f" ({', '.join(suffix)})" if suffix else ""))
+            parts.append("[Events]\n" + "\n".join(lines))
+        if len(parts) == 1:
+            parts.append("暂无 task/event 快照。")
+        return "\n".join(parts)
+
+    def inspect_chat_context(self, chat_key: str, query: str = "") -> str:
+        if not chat_key:
+            return "缺少 chat_key。"
+        view = build_context_view(memory_store=self.memory_store, chat_id=chat_key, query=query)
+        records = self.memory_store.list_memories(chat_id=chat_key)
+        parts = [f"chat_key={chat_key}"]
+        if query:
+            parts.append(f"query={query}")
+        if view.hot:
+            parts.append("[Hot]\n- " + "\n- ".join(view.hot))
+        if view.warm:
+            parts.append("[Warm]\n- " + "\n- ".join(view.warm))
+        if view.cold:
+            parts.append("[Cold]\n- " + "\n- ".join(view.cold))
+        if records:
+            lines = [
+                f"- {record.memory_type}/{record.key} tier={record.tier} status={record.status} confidence={record.confidence:.2f} summary={record.summary}"
+                for record in records[:12]
+            ]
+            parts.append("[Memories]\n" + "\n".join(lines))
+        tape = self.tape_store.get_or_create(chat_key)
+        anchor = tape.last_anchor()
+        if anchor is not None:
+            summary = str((anchor.payload.get("state") or {}).get("summary", "") or "")
+            if summary:
+                parts.append(f"[Tape Summary]\n{summary}")
+        return "\n".join(parts)
 
     async def process_task(
         self, user_input: str, chat_key: str = "",

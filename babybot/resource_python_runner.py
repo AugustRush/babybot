@@ -221,6 +221,64 @@ class ExternalPythonRunner:
             return True
         return False
 
+    @staticmethod
+    def parse_progress_line(line: str) -> tuple[str, float | None]:
+        text = (line or "").strip()
+        if not text:
+            return "", None
+        if text.startswith("__BABYBOT_RESULT__"):
+            return "", None
+        progress_match = re.search(r"(\d{1,3})%", text)
+        progress = None
+        if progress_match is not None:
+            progress = max(0.0, min(1.0, int(progress_match.group(1)) / 100.0))
+            text = re.sub(r"\s*\(?\d{1,3}%\)?", "", text).strip(" -:")
+        return text[:80], progress
+
+    @staticmethod
+    async def _collect_process_output(
+        proc: Any,
+        *,
+        timeout_s: float,
+        on_output: Any = None,
+    ) -> tuple[bytes, bytes]:
+        stdout_stream = getattr(proc, "stdout", None)
+        stderr_stream = getattr(proc, "stderr", None)
+        if not callable(getattr(stdout_stream, "readline", None)) or not callable(
+            getattr(stderr_stream, "readline", None)
+        ):
+            return await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        async def _drain(stream: Any, chunks: list[bytes], stream_name: str) -> None:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                chunks.append(line)
+                if on_output is not None:
+                    text = line.decode("utf-8", errors="ignore").strip()
+                    if text:
+                        on_output(text, stream=stream_name)
+
+        drain_task = asyncio.gather(
+            _drain(stdout_stream, stdout_chunks, "stdout"),
+            _drain(stderr_stream, stderr_chunks, "stderr"),
+        )
+        try:
+            await asyncio.wait_for(drain_task, timeout=timeout_s)
+            wait = getattr(proc, "wait", None)
+            if callable(wait):
+                await asyncio.wait_for(wait(), timeout=max(0.1, timeout_s))
+        except asyncio.TimeoutError:
+            drain_task.cancel()
+            with contextlib.suppress(Exception):
+                await drain_task
+            raise
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
     def build_external_cli_script_callable(
         self,
         owner: Any,
@@ -271,8 +329,10 @@ class ExternalPythonRunner:
                     attempts.append(f"{candidate['executable']}: {detail}")
                     continue
                 try:
-                    stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=timeout_s
+                    stdout, stderr = await self._collect_process_output(
+                        proc,
+                        timeout_s=timeout_s,
+                        on_output=owner._report_external_process_output,
                     )
                 except asyncio.TimeoutError:
                     proc.kill()
@@ -390,14 +450,19 @@ class ExternalPythonRunner:
                 last_tool_error = f"Tool error: {detail}"
                 continue
 
-            communicate_coro = proc.communicate()
             try:
                 if timeout_s and timeout_s > 0:
-                    stdout, stderr = await asyncio.wait_for(
-                        communicate_coro, timeout=timeout_s
+                    stdout, stderr = await self._collect_process_output(
+                        proc,
+                        timeout_s=timeout_s,
+                        on_output=owner._report_external_process_output,
                     )
                 else:
-                    stdout, stderr = await communicate_coro
+                    stdout, stderr = await self._collect_process_output(
+                        proc,
+                        timeout_s=24 * 3600,
+                        on_output=owner._report_external_process_output,
+                    )
             except asyncio.TimeoutError:
                 proc.kill()
                 try:
@@ -406,10 +471,6 @@ class ExternalPythonRunner:
                     pass
                 return f"Tool error: execution timeout after {timeout_s}s."
             except Exception:
-                try:
-                    communicate_coro.close()
-                except Exception:
-                    pass
                 raise
 
             out_text = (stdout or b"").decode("utf-8", errors="ignore")

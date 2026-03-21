@@ -1338,3 +1338,127 @@ def test_invoke_external_skill_function_does_not_retry_business_failure(
 
     assert result == "Tool error: text is empty"
     assert calls == ["/primary/python"]
+
+
+def test_invoke_external_skill_function_beats_heartbeat_from_process_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "system": SimpleNamespace(
+                shell_command_timeout=300,
+                python_executable="",
+                python_fallback_executables=[],
+            ),
+            "workspace_dir": tmp_path,
+        },
+    )()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_external_skill_progress",
+        default=str(tmp_path),
+    )
+
+    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
+        {"executable": "/primary/python", "required_modules": (), "source": "auto"},
+    ])
+    monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
+
+    beats: list[tuple[str | None, float | None]] = []
+
+    class _Heartbeat:
+        def beat(self, *, progress: float | None = None, status: str | None = None) -> None:
+            beats.append((status, progress))
+
+    monkeypatch.setattr(manager, "_get_current_task_heartbeat", lambda: _Heartbeat())
+
+    class _FakeStream:
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = list(lines)
+
+        async def readline(self) -> bytes:
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = _FakeStream(
+                [
+                    b"Downloading model 25%\n",
+                    b"Downloading model 75%\n",
+                    b'__BABYBOT_RESULT__{"ok": true, "result": "audio.wav"}\n',
+                ]
+            )
+            self.stderr = _FakeStream([])
+
+        async def wait(self) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            return None
+
+    async def _fake_exec(program, *args, **kwargs):
+        del program, args, kwargs
+        return _Proc()
+
+    monkeypatch.setattr("babybot.resource.asyncio.create_subprocess_exec", _fake_exec)
+
+    result = asyncio.run(
+        manager._invoke_external_skill_function(
+            script_path=str(tmp_path / "tool.py"),
+            function_name="generate_speech",
+            arguments={"text": "hello"},
+        )
+    )
+
+    assert result == "audio.wav"
+    assert any(progress == 0.25 for _, progress in beats)
+    assert any(progress == 0.75 for _, progress in beats)
+
+
+def test_inspect_chat_context_uses_channel_context_default_chat_key(tmp_path: Path) -> None:
+    from babybot.channels.tools import ChannelToolContext
+
+    manager = object.__new__(ResourceManager)
+    manager._observability_provider = type(
+        "Provider",
+        (),
+        {
+            "inspect_chat_context": staticmethod(
+                lambda chat_key, query="": f"chat={chat_key};query={query}"
+            )
+        },
+    )()
+
+    ChannelToolContext.set_current(
+        ChannelToolContext(channel_name="feishu", chat_id="oc_test", sender_id="u1")
+    )
+    try:
+        result = manager._inspect_chat_context(query="继续语音任务")
+    finally:
+        ChannelToolContext.set_current(None)
+
+    assert "chat=feishu:oc_test" in result
+    assert "query=继续语音任务" in result
+
+
+def test_inspect_runtime_flow_uses_provider_snapshot(tmp_path: Path) -> None:
+    manager = object.__new__(ResourceManager)
+    manager._observability_provider = type(
+        "Provider",
+        (),
+        {
+            "inspect_runtime_flow": staticmethod(
+                lambda flow_id="", chat_key="": f"flow={flow_id};chat={chat_key}"
+            )
+        },
+    )()
+
+    result = manager._inspect_runtime_flow(flow_id="orchestrator:abc123")
+
+    assert result == "flow=orchestrator:abc123;chat="

@@ -63,6 +63,7 @@ from .resource_workspace_tools import (
 )
 from .resource_skill_loader import SkillLoader
 from .worker import create_worker_executor
+from .context_views import build_context_view
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +107,13 @@ class CallableTool:
         return self._schema
 
     async def invoke(self, args: dict[str, Any], context: Any) -> ToolResult:
+        tool_context_token: contextvars.Token[Any | None] | None = None
         try:
             kwargs = dict(self._preset_kwargs)
             kwargs.update(args or {})
             artifact_base = self._current_write_root()
+            if self._resource_manager is not None:
+                tool_context_token = self._resource_manager._get_current_tool_context_var().set(context)
             if inspect.iscoroutinefunction(self._func):
                 value = await self._func(**kwargs)
             else:
@@ -143,6 +147,9 @@ class CallableTool:
             )
         except Exception as exc:
             return ToolResult(ok=False, error=str(exc))
+        finally:
+            if tool_context_token is not None and self._resource_manager is not None:
+                self._resource_manager._get_current_tool_context_var().reset(tool_context_token)
 
     @staticmethod
     def _normalize_result(value: Any) -> str:
@@ -382,7 +389,12 @@ class ResourceManager:
                 default=None,
             )
         )
+        self._current_tool_context: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+            "current_tool_context",
+            default=None,
+        )
         self._python_probe_cache: dict[tuple[str, tuple[str, ...], str], str | None] = {}
+        self._observability_provider: Any = None
         self.catalog = ResourceCatalog(self)
         self.runtime = WorkerRuntime(self)
 
@@ -760,6 +772,34 @@ class ResourceManager:
             self._current_skill_ids = current
         return current
 
+    def _get_current_tool_context_var(self) -> contextvars.ContextVar[Any | None]:
+        current = getattr(self, "_current_tool_context", None)
+        if current is None:
+            current = contextvars.ContextVar("current_tool_context", default=None)
+            self._current_tool_context = current
+        return current
+
+    def _get_current_task_heartbeat(self) -> Any:
+        ctx = self._get_current_tool_context_var().get()
+        state = getattr(ctx, "state", None)
+        if isinstance(state, dict):
+            return state.get("heartbeat")
+        return None
+
+    def _report_external_process_output(self, line: str, *, stream: str = "stdout") -> None:
+        heartbeat = self._get_current_task_heartbeat()
+        if heartbeat is None:
+            return
+        status, progress = ExternalPythonRunner.parse_progress_line(line)
+        payload: dict[str, Any] = {}
+        if progress is not None:
+            payload["progress"] = progress
+        if status:
+            payload["status"] = status
+        elif stream:
+            payload["status"] = f"running:{stream}"
+        heartbeat.beat(**payload)
+
     def get_resource_briefs(self) -> list[dict[str, Any]]:
         return self._catalog_view().get_resource_briefs()
 
@@ -823,6 +863,9 @@ class ResourceManager:
             func_name=func_name,
         )
 
+    def set_observability_provider(self, provider: Any) -> None:
+        self._observability_provider = provider
+
     def _discover_workspace_tools(self) -> None:
         self._tool_loader_view().discover_workspace_tools()
 
@@ -865,6 +908,58 @@ class ResourceManager:
             if prompt:
                 prompts.append(prompt)
         return "\n\n".join(prompts)
+
+    def _default_chat_key(self) -> str:
+        from .channels.tools import ChannelToolContext
+
+        ctx = ChannelToolContext.get_current()
+        if ctx is None or not ctx.chat_id:
+            return ""
+        channel_name = (ctx.channel_name or "").strip()
+        if channel_name:
+            return f"{channel_name}:{ctx.chat_id}"
+        return str(ctx.chat_id)
+
+    def _inspect_runtime_flow(self, flow_id: str = "", chat_key: str = "") -> str:
+        provider = getattr(self, "_observability_provider", None)
+        resolved_chat_key = chat_key.strip() or self._default_chat_key()
+        if provider is not None and hasattr(provider, "inspect_runtime_flow"):
+            return str(provider.inspect_runtime_flow(flow_id=flow_id.strip(), chat_key=resolved_chat_key))
+        if not flow_id and not resolved_chat_key:
+            return "暂无可观测的运行中 flow。"
+        return f"flow={flow_id.strip()};chat={resolved_chat_key}"
+
+    def _inspect_chat_context(self, chat_key: str = "", query: str = "") -> str:
+        provider = getattr(self, "_observability_provider", None)
+        resolved_chat_key = chat_key.strip() or self._default_chat_key()
+        if provider is not None and hasattr(provider, "inspect_chat_context"):
+            return str(provider.inspect_chat_context(chat_key=resolved_chat_key, query=query.strip()))
+        if not resolved_chat_key:
+            return "缺少 chat_key，且当前上下文没有可推断的会话。"
+        return self._fallback_inspect_chat_context(resolved_chat_key, query=query.strip())
+
+    def _fallback_inspect_chat_context(self, chat_key: str, query: str = "") -> str:
+        memory_store = getattr(self, "memory_store", None)
+        if memory_store is None:
+            return f"chat={chat_key}\n暂无 memory store。"
+        view = build_context_view(memory_store=memory_store, chat_id=chat_key, query=query)
+        records = memory_store.list_memories(chat_id=chat_key)
+        parts = [f"chat={chat_key}"]
+        if query:
+            parts.append(f"query={query}")
+        if view.hot:
+            parts.append("[Hot]\n- " + "\n- ".join(view.hot))
+        if view.warm:
+            parts.append("[Warm]\n- " + "\n- ".join(view.warm))
+        if view.cold:
+            parts.append("[Cold]\n- " + "\n- ".join(view.cold))
+        if records:
+            lines = [
+                f"- {record.memory_type}/{record.key} tier={record.tier} status={record.status} summary={record.summary}"
+                for record in records[:12]
+            ]
+            parts.append("[Memories]\n" + "\n".join(lines))
+        return "\n".join(parts)
 
     def register_channel_tools(self, channel_tools: "ChannelTools") -> None:
         group_name = channel_tools.get_tool_group_name()

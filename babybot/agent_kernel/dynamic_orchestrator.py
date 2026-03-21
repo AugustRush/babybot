@@ -254,6 +254,7 @@ class InProcessChildTaskRuntime:
         max_retries: int = 0,
         retry_delay_seconds: Callable[[int], float] = default_retry_delay_seconds,
         stale_after_s: float | None = None,
+        progress_poll_interval_s: float = 0.05,
     ) -> None:
         self._flow_id = flow_id
         self._rm = resource_manager
@@ -264,6 +265,7 @@ class InProcessChildTaskRuntime:
         self._max_retries = max(0, int(max_retries))
         self._retry_delay_seconds = retry_delay_seconds
         self._stale_after_s = stale_after_s
+        self._progress_poll_interval_s = max(0.02, float(progress_poll_interval_s))
         self._semaphore = asyncio.Semaphore(max_parallel)
         self._in_flight: dict[str, asyncio.Task] = {}
         self._results: dict[str, TaskResult] = {}
@@ -470,6 +472,13 @@ class InProcessChildTaskRuntime:
         )
 
         async def _run_with_deps() -> None:
+            progress_monitor = asyncio.create_task(
+                self._monitor_task_progress(
+                    task_id=task_id,
+                    resource_id=primary_resource_id,
+                    description=description,
+                )
+            )
             if deps:
                 dep_tasks = [self._in_flight[d] for d in deps if d in self._in_flight]
                 if dep_tasks:
@@ -608,10 +617,56 @@ class InProcessChildTaskRuntime:
                     )
                     break
             finally:
+                progress_monitor.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await progress_monitor
                 self._in_flight.pop(task_id, None)
 
         self._in_flight[task_id] = asyncio.create_task(_run_with_deps())
         return task_id
+
+    async def _monitor_task_progress(
+        self,
+        *,
+        task_id: str,
+        resource_id: str,
+        description: str,
+    ) -> None:
+        last_status = ""
+        last_progress: float | None = None
+        while task_id not in self._results:
+            await asyncio.sleep(self._progress_poll_interval_s)
+            snapshot = self._task_heartbeat_registry.snapshot(self._flow_id).get(task_id)
+            if not snapshot:
+                continue
+            status = str(snapshot.get("status", "") or "").strip()
+            progress_raw = snapshot.get("progress")
+            progress = None
+            if isinstance(progress_raw, (int, float)):
+                progress = max(0.0, min(1.0, float(progress_raw)))
+            rounded_progress = None if progress is None else round(progress, 2)
+            if status in {"", "idle", "queued", "started", "retrying"} and rounded_progress is None:
+                continue
+            if status == last_status and rounded_progress == last_progress:
+                continue
+            last_status = status
+            last_progress = rounded_progress
+            payload: dict[str, Any] = {
+                "resource_id": resource_id,
+                "description": description,
+            }
+            if status:
+                payload["status"] = status
+            if rounded_progress is not None:
+                payload["progress"] = rounded_progress
+            await self._child_task_bus.publish(
+                ChildTaskEvent(
+                    flow_id=self._flow_id,
+                    task_id=task_id,
+                    event="progress",
+                    payload=payload,
+                )
+            )
 
     async def wait_for_tasks(self, task_ids: list[str]) -> str:
         if self._stale_after_s is None:

@@ -127,11 +127,25 @@ class MessageBus:
         description = str(payload.get("description", "") or "").strip()
         output = str(payload.get("output", "") or "").strip()
         error = str(payload.get("error", "") or "").strip()
+        status = str(payload.get("status", "") or "").strip()
+        progress_raw = payload.get("progress")
+        progress_pct = ""
+        if isinstance(progress_raw, (int, float)):
+            progress_pct = f" ({int(max(0.0, min(1.0, float(progress_raw))) * 100)}%)"
 
-        if event == "succeeded" and output:
+        if event == "progress":
+            label = status or description
+            if label:
+                return f"处理中：{label}{progress_pct}"
+            if progress_pct:
+                return f"处理中{progress_pct}"
+            return ""
+        if event == "succeeded":
             if description:
-                return f"阶段完成：{description}\n结果：{output}"
-            return f"阶段完成：{output}"
+                return f"阶段完成：{description}"
+            if output:
+                return "阶段完成"
+            return ""
         if event in {"failed", "dead_lettered", "stalled"} and error:
             if description:
                 return f"阶段异常：{description}\n原因：{error}"
@@ -318,9 +332,10 @@ class MessageBus:
             "media_paths": msg.media_paths,
         }
         runtime_events: list[dict[str, Any]] = []
+        last_runtime_progress_text = ""
 
         async def _runtime_event_callback(event: Any) -> None:
-            nonlocal stream_detached
+            nonlocal stream_detached, last_runtime_progress_text
             if dataclasses.is_dataclass(event):
                 payload = dataclasses.asdict(event)
             elif isinstance(event, dict):
@@ -333,7 +348,6 @@ class MessageBus:
                     "payload": dict(getattr(event, "payload", {}) or {}),
                 }
             runtime_events.append(payload)
-            stream_detached = True
             if isinstance(msg.metadata, dict):
                 msg.metadata["_runtime_events"] = list(runtime_events)
             logger.info(
@@ -347,6 +361,17 @@ class MessageBus:
             progress_text = self._format_runtime_progress_text(payload)
             if not progress_text or channel is None:
                 return
+            if progress_text == last_runtime_progress_text:
+                return
+            last_runtime_progress_text = progress_text
+            if str(payload.get("event", "") or "").strip().lower() in {
+                "progress",
+                "succeeded",
+                "failed",
+                "dead_lettered",
+                "stalled",
+            }:
+                stream_detached = True
             try:
                 await channel.send_response(
                     msg.chat_id,

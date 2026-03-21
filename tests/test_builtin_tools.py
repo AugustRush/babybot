@@ -64,6 +64,12 @@ class _DummyOwner:
     ) -> str:
         return f"{file_path}:{line_number}:{content}"
 
+    def _inspect_runtime_flow(self, flow_id: str = "", chat_key: str = "") -> str:
+        return flow_id or chat_key or "runtime"
+
+    def _inspect_chat_context(self, chat_key: str = "", query: str = "") -> str:
+        return chat_key or query or "context"
+
 
 def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> None:
     items = list(iter_builtin_tool_registrations(_DummyOwner()))
@@ -76,6 +82,8 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("basic", "create_scheduled_task"),
         ("basic", "update_scheduled_task"),
         ("basic", "delete_scheduled_task"),
+        ("basic", "inspect_runtime_flow"),
+        ("basic", "inspect_chat_context"),
         ("code", "_workspace_execute_python_code"),
         ("code", "_workspace_execute_shell_command"),
         ("code", "_workspace_view_text_file"),
