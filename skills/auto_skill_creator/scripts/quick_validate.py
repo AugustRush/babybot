@@ -74,6 +74,10 @@ def _validate_body(body: str) -> str | None:
     for marker in BODY_PLACEHOLDER_MARKERS:
         if marker in lowered:
             return "Skill body still contains placeholder guidance and must be rewritten"
+    if "## example requests" not in lowered:
+        return "Skill body must include an 'Example Requests' section with realistic trigger examples"
+    if not re.search(r"## example requests\s+[-*]\s+\S", lowered):
+        return "Example Requests must include at least one bullet example"
     return None
 
 

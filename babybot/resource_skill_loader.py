@@ -45,6 +45,9 @@ class SkillLoader:
                     runtime=runtime,
                     callable_tool_cls=self._owner._callable_tool_cls(),
                 )
+                meta_include_groups = self._parse_frontmatter_list(meta.get("include_groups"))
+                meta_include_tools = self._parse_frontmatter_list(meta.get("include_tools"))
+                meta_exclude_tools = self._parse_frontmatter_list(meta.get("exclude_tools"))
                 description = conf.get("description") or meta.get("description", "")
                 keywords = self.normalize_keywords(
                     conf.get("keywords"),
@@ -64,11 +67,26 @@ class SkillLoader:
                         phrases=phrases,
                         lease=ToolLease(
                             include_groups=tuple(
-                                set(conf.get("include_groups") or ())
+                                set(self._parse_frontmatter_list(conf.get("include_groups")))
+                                | set(meta_include_groups)
                                 | ({tool_group} if tool_group else set())
                             ),
-                            include_tools=tuple(conf.get("include_tools") or ()),
-                            exclude_tools=tuple(conf.get("exclude_tools") or ()),
+                            include_tools=tuple(
+                                dict.fromkeys(
+                                    [
+                                        *meta_include_tools,
+                                        *self._parse_frontmatter_list(conf.get("include_tools")),
+                                    ]
+                                )
+                            ),
+                            exclude_tools=tuple(
+                                dict.fromkeys(
+                                    [
+                                        *meta_exclude_tools,
+                                        *self._parse_frontmatter_list(conf.get("exclude_tools")),
+                                    ]
+                                )
+                            ),
                         ),
                         source="config",
                         active=bool(conf.get("active", True)),
@@ -98,6 +116,9 @@ class SkillLoader:
                         runtime=runtime,
                         callable_tool_cls=self._owner._callable_tool_cls(),
                     )
+                    meta_include_groups = self._parse_frontmatter_list(meta.get("include_groups"))
+                    meta_include_tools = self._parse_frontmatter_list(meta.get("include_tools"))
+                    meta_exclude_tools = self._parse_frontmatter_list(meta.get("exclude_tools"))
                     key = name.strip().lower()
                     if key in self._owner.skills:
                         continue
@@ -121,7 +142,16 @@ class SkillLoader:
                             source="auto",
                             active=True,
                             lease=ToolLease(
-                                include_groups=(tool_group,) if tool_group else (),
+                                include_groups=tuple(
+                                    dict.fromkeys(
+                                        [
+                                            *meta_include_groups,
+                                            *(([tool_group] if tool_group else [])),
+                                        ]
+                                    )
+                                ),
+                                include_tools=tuple(meta_include_tools),
+                                exclude_tools=tuple(meta_exclude_tools),
                             ),
                             tool_group=tool_group,
                             tools=tool_names,
@@ -241,6 +271,16 @@ class SkillLoader:
             key, value = line.split(":", 1)
             meta[key.strip()] = value.strip().strip("'\"")
         return meta, body
+
+    @staticmethod
+    def _parse_frontmatter_list(raw_value: Any) -> tuple[str, ...]:
+        if raw_value is None:
+            return ()
+        if isinstance(raw_value, (list, tuple, set)):
+            items = [str(item).strip() for item in raw_value if str(item).strip()]
+        else:
+            items = [part.strip() for part in re.split(r"[,\n]+", str(raw_value)) if part.strip()]
+        return tuple(dict.fromkeys(items))
 
     @classmethod
     def read_skill_document(cls, skill_dir: Path) -> tuple[dict[str, str], str]:

@@ -45,7 +45,7 @@ def test_init_skill_creates_builtin_skill_at_default_root(tmp_path: Path) -> Non
 
 def test_parse_resources_rejects_unknown_resource_types() -> None:
     try:
-        init_skill.parse_resources("scripts,unknown")
+        init_skill._parse_resources("scripts,unknown")
     except SystemExit as exc:
         assert exc.code == 1
     else:
@@ -53,19 +53,19 @@ def test_parse_resources_rejects_unknown_resource_types() -> None:
 
 
 def test_parse_resources_ignores_examples_alias() -> None:
-    resources = init_skill.parse_resources("scripts,examples,references")
+    resources = init_skill._parse_resources("scripts,examples,references")
 
     assert resources == ["scripts", "references"]
 
 
 def test_parse_resources_accepts_json_stringified_array_items() -> None:
-    resources = init_skill.parse_resources(['["scripts"]', "references"])
+    resources = init_skill._parse_resources(['["scripts"]', "references"])
 
     assert resources == ["scripts", "references"]
 
 
 def test_parse_resources_accepts_common_resource_aliases() -> None:
-    resources = init_skill.parse_resources(["code", "docs", "template"])
+    resources = init_skill._parse_resources(["code", "docs", "template"])
 
     assert resources == ["scripts", "references", "assets"]
 
@@ -122,9 +122,46 @@ def test_init_skill_generates_guideline_aligned_skill_document(tmp_path: Path) -
     assert "description: Use when " in content
     assert "Use this skill when" not in content
     assert "## When to Use" in content
+    assert "## Example Requests" in content
     assert "## Workflow" in content
     assert "## Resources" in content
     assert "## Constraints" in content
+    assert "- " in content
+
+
+def test_init_skill_supports_summary_examples_and_tool_kind_defaults(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "receipt parser",
+        path=tmp_path,
+        resources=[],
+        include_examples=False,
+        summary="extracting structured fields from receipt photos and scanned invoices",
+        example_requests=[
+            "帮我提取这张小票里的商家、金额和日期",
+            "Parse this receipt image into JSON",
+        ],
+        tool_kind="scripts",
+    )
+
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "extracting structured fields from receipt photos and scanned invoices" in content
+    assert "帮我提取这张小票里的商家、金额和日期" in content
+    assert "Parse this receipt image into JSON" in content
+    assert (skill_dir / "scripts").is_dir()
+
+
+def test_init_skill_hybrid_kind_creates_scripts_and_references_by_default(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "finance helper",
+        path=tmp_path,
+        resources=[],
+        include_examples=False,
+        tool_kind="hybrid",
+    )
+
+    assert (skill_dir / "scripts").is_dir()
+    assert (skill_dir / "references").is_dir()
 
 
 def test_validate_skill_rejects_todo_description(tmp_path: Path) -> None:
@@ -168,6 +205,33 @@ def test_validate_skill_rejects_placeholder_skill_body(tmp_path: Path) -> None:
     assert "placeholder" in message.lower()
 
 
+def test_validate_skill_rejects_missing_example_requests_section(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "missing-examples-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: missing-examples-skill\n"
+        "description: Use when handling receipt extraction and invoice parsing requests.\n"
+        "---\n\n"
+        "# Missing Examples Skill\n\n"
+        "## When to Use\n\n"
+        "- Use when a user asks to extract receipt data.\n\n"
+        "## Workflow\n\n"
+        "1. Inspect the input files.\n"
+        "2. Extract the requested fields.\n\n"
+        "## Resources\n\n"
+        "- `scripts/`: OCR helpers.\n\n"
+        "## Constraints\n\n"
+        "- Return structured data.\n",
+        encoding="utf-8",
+    )
+
+    valid, message = quick_validate.validate_skill(skill_dir)
+
+    assert not valid
+    assert "Example Requests" in message
+
+
 def test_validate_skill_rejects_unexpected_root_file(tmp_path: Path) -> None:
     skill_dir = tmp_path / "bad-root-skill"
     skill_dir.mkdir()
@@ -176,7 +240,18 @@ def test_validate_skill_rejects_unexpected_root_file(tmp_path: Path) -> None:
         "name: bad-root-skill\n"
         "description: Use when handling bad root skill requests.\n"
         "---\n\n"
-        "# Skill\n",
+        "# Skill\n\n"
+        "## When to Use\n\n"
+        "- Use when a bad root skill request needs handling.\n\n"
+        "## Example Requests\n\n"
+        "- Help me validate this bad root skill.\n\n"
+        "## Workflow\n\n"
+        "1. Check the files.\n"
+        "2. Return the result.\n\n"
+        "## Resources\n\n"
+        "- `references/`: Optional supporting docs.\n\n"
+        "## Constraints\n\n"
+        "- Keep the root clean.\n",
         encoding="utf-8",
     )
     (skill_dir / "README.md").write_text("extra\n", encoding="utf-8")

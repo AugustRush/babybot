@@ -5,10 +5,18 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+import importlib
 
 from babybot.agent_kernel import SkillPack, TaskResult, ToolLease
 from babybot.agent_kernel.tools import ToolContext
 from babybot.resource import CallableTool, LoadedSkill, ResourceManager, ToolGroup
+from babybot.config import Config
+
+
+_AUTO_SKILL_CREATOR_SCRIPTS = Path("skills/auto_skill_creator/scripts").resolve()
+if str(_AUTO_SKILL_CREATOR_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_AUTO_SKILL_CREATOR_SCRIPTS))
+auto_init_skill = importlib.import_module("init_skill")
 
 
 def test_resource_manager_exposes_expected_registration_and_runtime_entrypoints() -> None:
@@ -163,6 +171,105 @@ def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
     group, tools = manager._register_skill_tools("text-to-image", skill_dir)
     assert group == "skill_text_to_image"
     assert any(name.endswith("__generate_image") for name in tools)
+
+
+def test_register_skill_tools_for_auto_skill_creator_exposes_only_agent_facing_tools() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {"resolve_workspace_path": staticmethod(lambda value: str(value))},
+    )()
+
+    skill_dir = Path("skills/auto_skill_creator").resolve()
+
+    group, tools = manager._register_skill_tools("auto-skill-creator", skill_dir)
+
+    assert group == "skill_auto_skill_creator"
+    assert tools == (
+        "auto_skill_creator__init_skill",
+        "auto_skill_creator__validate_skill",
+    )
+
+
+def test_discovered_generated_skill_uses_example_requests_for_keywords(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    workspace_skills_dir = workspace_dir / "skills"
+    builtin_skills_dir = tmp_path / "builtin" / "skills"
+    workspace_skills_dir.mkdir(parents=True, exist_ok=True)
+    builtin_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    auto_init_skill.init_skill(
+        "receipt parser",
+        target="workspace",
+        workspace_skills_dir=workspace_skills_dir,
+        builtin_skills_dir=builtin_skills_dir,
+        resources=[],
+        include_examples=False,
+        summary="extracting fields from receipts and invoices",
+        example_requests=[
+            "帮我提取这张小票里的金额和日期",
+            "parse this invoice photo into json",
+        ],
+        tool_kind="prompt",
+    )
+
+    cfg = Config()
+    cfg.workspace_dir = workspace_dir
+    cfg.workspace_skills_dir = workspace_skills_dir
+    cfg.builtin_skills_dir = builtin_skills_dir
+    cfg.workspace_tools_dir = workspace_dir / "tools"
+    cfg.scheduled_tasks_file = workspace_dir / "scheduled_tasks.json"
+
+    manager = ResourceManager(cfg)
+    skill = manager.skills["receipt-parser"]
+
+    assert "receipt" in skill.keywords
+    assert "invoice" in skill.keywords
+    assert "小票" in skill.keywords or "金额" in skill.keywords
+
+
+def test_discovered_skill_frontmatter_can_extend_include_groups(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    workspace_skills_dir = workspace_dir / "skills"
+    builtin_skills_dir = tmp_path / "builtin" / "skills"
+    skill_dir = workspace_skills_dir / "creator-helper"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    builtin_skills_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: creator-helper\n"
+        "description: Use when creating helper skills that also need code tools.\n"
+        "include_groups: code\n"
+        "---\n\n"
+        "# Creator Helper\n\n"
+        "## When to Use\n\n"
+        "- Use when creating helper skills that also need code tools.\n\n"
+        "## Example Requests\n\n"
+        "- Create a helper skill from this GitHub code sample.\n\n"
+        "## Workflow\n\n"
+        "1. Read the references.\n"
+        "2. Write the needed files.\n\n"
+        "## Resources\n\n"
+        "- `scripts/`: optional helper tools.\n\n"
+        "## Constraints\n\n"
+        "- Keep the skill focused.\n",
+        encoding="utf-8",
+    )
+
+    cfg = Config()
+    cfg.workspace_dir = workspace_dir
+    cfg.workspace_skills_dir = workspace_skills_dir
+    cfg.builtin_skills_dir = builtin_skills_dir
+    cfg.workspace_tools_dir = workspace_dir / "tools"
+    cfg.scheduled_tasks_file = workspace_dir / "scheduled_tasks.json"
+
+    manager = ResourceManager(cfg)
+    skill = manager.skills["creator-helper"]
+
+    assert skill.lease.include_groups == ("code",)
 
 
 def test_register_skill_tools_avoids_import_side_effects_for_function_scripts(
