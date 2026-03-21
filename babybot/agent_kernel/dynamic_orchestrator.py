@@ -161,10 +161,15 @@ def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
     for b in briefs:
         if b.get("active"):
             rid = b.get("id", "?")
+            resource_type = b.get("type", "")
             name = b.get("name", "?")
             purpose = b.get("purpose", "")
             tc = b.get("tool_count", 0)
-            preview = ", ".join(b.get("tools_preview") or [])
+            preview = (
+                ""
+                if resource_type in {"mcp", "skill"}
+                else ", ".join(b.get("tools_preview") or [])
+            )
             preview_text = f"; 示例工具: {preview}" if preview else ""
             lines.append(f"- {rid}: {name} — {purpose} (工具数: {tc}{preview_text})")
     if not lines:

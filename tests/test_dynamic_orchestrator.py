@@ -574,6 +574,7 @@ def test_build_resource_catalog_includes_tool_previews() -> None:
     catalog = _build_resource_catalog([
         {
             "id": "group.channel-feishu",
+            "type": "tool_group",
             "name": "channel_feishu",
             "purpose": "飞书渠道工具",
             "tool_count": 3,
@@ -582,6 +583,38 @@ def test_build_resource_catalog_includes_tool_previews() -> None:
         },
     ])
     assert "send_image" in catalog
+
+
+def test_build_resource_catalog_hides_mcp_tool_previews() -> None:
+    catalog = _build_resource_catalog([
+        {
+            "id": "mcp.gaode-map",
+            "type": "mcp",
+            "name": "gaode_map",
+            "purpose": "地图查询",
+            "tool_count": 8,
+            "tools_preview": ["poi_search", "route_plan", "geocode"],
+            "active": True,
+        },
+    ])
+    assert "工具数: 8" in catalog
+    assert "poi_search" not in catalog
+
+
+def test_build_resource_catalog_hides_skill_tool_previews() -> None:
+    catalog = _build_resource_catalog([
+        {
+            "id": "skill.weather",
+            "type": "skill",
+            "name": "weather",
+            "purpose": "天气查询",
+            "tool_count": 3,
+            "tools_preview": ["get_weather", "resolve_city", "format_report"],
+            "active": True,
+        },
+    ])
+    assert "工具数: 3" in catalog
+    assert "get_weather" not in catalog
 
 
 def test_runtime_event_callback_receives_child_task_lifecycle_events() -> None:
