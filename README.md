@@ -1,6 +1,6 @@
 # BabyBot
 
-轻量级多通道对话 Agent 框架，无 AgentScope 依赖。支持工具调用、MCP 服务、技能路由、长期记忆、多模态图片，以及飞书等即时通讯平台接入。
+轻量级多通道对话 Agent 框架，无 AgentScope 依赖。支持工具调用、MCP 服务、技能路由、分层长期记忆、多模态图片，以及飞书等即时通讯平台接入。
 
 当前实现已经形成比较清晰的分层：
 
@@ -57,11 +57,13 @@ uv run gateway
 |------|------|------|
 | **MessageBus** | `message_bus.py` | 异步消息队列，全局 + 单聊并发信号量 |
 | **Heartbeat** | `heartbeat.py` | 空闲超时检测 + 硬超时保护 |
-| **OrchestratorAgent** | `orchestrator.py` | 接收用户输入，管理 Tape 记忆，调度子任务 |
+| **OrchestratorAgent** | `orchestrator.py` | 接收用户输入，管理 Tape + Hybrid Memory，调度子任务 |
 | **ResourceManager** | `resource.py` | 对外资源 facade；聚合工具/MCP/技能/子任务运行时 |
 | **SingleAgentExecutor** | `agent_kernel/executor.py` | model → tool_calls → tool_results 执行循环 |
 | **OpenAICompatibleGateway** | `model_gateway.py` | OpenAI 兼容 API 封装，支持图片 vision 格式 |
 | **Tape / TapeStore** | `context.py` | 长期记忆：SQLite 持久化 + LRU 缓存 + BM25 跨锚点召回 |
+| **HybridMemoryStore** | `memory_store.py` | 软/硬/临时记忆、纠正覆盖、衰减与过期维护 |
+| **ContextView** | `context_views.py` | Hot / Warm / Cold 三层上下文视图与相关性排序 |
 
 ### `resource.py` 内部拆分
 
@@ -77,7 +79,7 @@ uv run gateway
 | `resource_tool_loader.py` | workspace tools 的注册/加载 |
 | `resource_subagent_runtime.py` | 子 agent 运行时 orchestration |
 | `resource_skill_runtime.py` | skill pack 选择、worker prompt 与技能目录格式化 |
-| `builtin_tools/` | 内置 basic/code 工具定义与注册清单 |
+| `builtin_tools/` | 内置 basic/code/observability 工具定义与注册清单 |
 
 ## 运行模式
 
@@ -105,7 +107,6 @@ uv run gateway
 - 工作区：`~/.babybot/workspace`（可由 `BABYBOT_WORKSPACE` 覆盖）
 - 定时任务：`~/.babybot/workspace/scheduled_tasks.json`
 - workspace 技能目录：`~/.babybot/workspace/skills`
-- workspace 工具目录：`~/.babybot/workspace/tools`
 
 完整模板见 `config.json.example` 和 `scheduled_tasks.json.example`。
 
@@ -232,17 +233,18 @@ uv run gateway
 }
 ```
 
-### Workspace tools
+### 内置工具
 
-将 Python 函数放到 `~/.babybot/workspace/tools` 下即可自动发现并注册为工具。按子目录划分工具组，例如：
+当前项目中的工具入口以 `builtin_tools/` 为主，主要分为：
 
-```text
-~/.babybot/workspace/tools/
-  search/web.py
-  analysis/summary.py
-```
+- `basic`：worker 调度、定时任务、观测工具
+- `code`：workspace 文件读写、Python / shell 执行
+- `channel_*`：由通道在运行时注册的发送类工具
 
-其中 `search/web.py` 中的公开函数会进入 `search` 组；根目录下的公开函数默认进入 `basic` 组。
+其中新的只读观测工具包括：
+
+- `inspect_runtime_flow`：查看当前 flow 的子任务状态、最近 runtime events、progress
+- `inspect_chat_context`：查看当前 chat 的 Hot / Warm / Cold 视图、memory records、tape 摘要
 
 ### Agent 技能
 
@@ -333,14 +335,53 @@ uv run gateway
 
 这意味着即使某个技能能生成音频/图片，子 agent 也只返回产物路径，最终发送动作仍由主 agent 完成。
 
-## 长期记忆 (TAPE)
+## 记忆与上下文
 
-基于 **Tape** 模式的长期记忆系统，SQLite 持久化：
+当前上下文系统由 **Tape + Hybrid Memory + Context View** 组成：
 
-1. **Tape** — 单个会话的 append-only 时间线，记录消息、工具调用、锚点等
-2. **Anchor（锚点）** — 当累积 token 超过阈值时，LLM 自动生成结构化摘要（summary / entities / user_intent / pending），创建新锚点并压缩旧条目
-3. **跨锚点召回** — 基于关键词提取（CJK bigram + Latin word）和 BM25 排序，从历史锚点前的条目中召回相关上下文
-4. **话题漂移检测** — 对比当前段与前一锚点的关键词重叠度，低于 15% 标记为 topic_shift
+1. **Tape** — 单个会话的 append-only 时间线，记录消息、工具调用、runtime event、锚点等
+2. **Anchor（锚点）** — 当累积 token 超过阈值时，LLM 自动生成结构化摘要（summary / entities / user_intent / pending / next_steps / artifacts / decisions），创建新锚点并压缩旧条目
+3. **Hybrid Memory** — 额外维护硬记忆、软记忆、临时记忆：
+   - 硬记忆：文件保存的稳定规则，如主/子 agent 边界
+   - 软记忆：用户偏好、用户画像、助手角色、任务决策
+   - 临时记忆：最近失败、最近成功、当前待办、当前产物
+4. **Hot / Warm / Cold 视图** — query-aware 的三层上下文整理：
+   - Hot：当前任务强相关的临时状态 + 硬约束
+   - Warm：活跃的偏好/画像/决策
+   - Cold：已衰减但仍可参考的较旧记忆
+5. **纠正与衰减** — 新证据会覆盖旧偏好；单次软记忆会经历 `candidate -> decaying -> expired`
+6. **跨锚点召回** — 基于关键词提取（CJK bigram + Latin word）和 BM25 排序，从历史锚点前的条目中召回相关上下文
+7. **话题漂移检测** — 对比当前段与前一锚点的关键词重叠度，低于 15% 标记为 `topic_shift`
+
+### 可观测性与调试
+
+当前推荐使用以下只读工具进行排障：
+
+- `inspect_runtime_flow(flow_id?, chat_key?)`
+  - 查看子任务 heartbeat 快照
+  - 查看最近 runtime events
+  - 用于判断任务是否真的卡住，还是仍在持续产生日志/进度
+- `inspect_chat_context(chat_key?, query?)`
+  - 查看 Hot / Warm / Cold 上下文分层
+  - 查看 memory records 的 `tier/status/confidence`
+  - 查看当前 tape anchor 摘要
+
+输出采用稳定分段文本格式，固定包含如 `[Runtime Flow]`、`[Tasks]`、`[Recent Events]`、`[Chat Context]`、`[Memory Records]` 等 section，方便人读，也方便 agent 后续消费。
+
+### 运行时进度反馈
+
+当前阶段反馈比之前更轻量：
+
+- `progress` 事件会显示为 `处理中：... (xx%)`
+- `succeeded` 事件会显示为 `阶段完成：...`
+- MessageBus 会去重重复进度文案，减少刷屏
+- 不再在阶段完成时把完整结果提前重复发一次，避免和最终回复重复
+
+对于较慢的宿主 Python 技能脚本：
+
+- 系统会流式读取 stdout / stderr
+- 只要脚本仍持续输出，就会持续 heartbeat，不再单纯依赖“长时间无响应 -> 超时”
+- 如果日志中包含百分比（如 `25%` / `75%`），会自动转成 progress
 
 ## 多模态图片
 
@@ -364,6 +405,9 @@ babybot/
 │   ├── cli.py                   # CLI / Gateway 运行器
 │   ├── config.py                # 统一配置管理
 │   ├── orchestrator.py          # 编排 Agent
+│   ├── memory_models.py         # 记忆数据模型
+│   ├── memory_store.py          # Hybrid Memory 存储 / 衰减 / 覆盖
+│   ├── context_views.py         # Hot / Warm / Cold 视图构建
 │   ├── resource.py              # ResourceManager facade
 │   ├── resource_models.py       # 资源/技能数据模型
 │   ├── resource_python_runner.py # 宿主 Python 选择与技能脚本执行
@@ -371,9 +415,9 @@ babybot/
 │   ├── resource_skill_loader.py # 技能发现、frontmatter、脚本解析
 │   ├── resource_skill_runtime.py # skill pack 选择与 worker prompt
 │   ├── resource_subagent_runtime.py # 子 agent 运行时 orchestration
-│   ├── resource_tool_loader.py  # workspace tools 加载
+│   ├── resource_tool_loader.py  # 内置 / 通道工具注册加载
 │   ├── resource_workspace_tools.py # workspace 文件与代码工具
-│   ├── builtin_tools/           # 内置工具定义（worker/scheduler/code）
+│   ├── builtin_tools/           # 内置工具定义（worker/scheduler/code/observability）
 │   ├── worker.py                # Worker 执行器工厂
 │   ├── model_gateway.py         # OpenAI 兼容网关
 │   ├── message_bus.py           # 异步消息总线
@@ -408,11 +452,13 @@ babybot/
 - **配置与工作区分离** — 主配置在 `config.json`，定时任务在 workspace 独立文件，支持 `${VAR}` 环境变量
 - **双运行模式** — CLI 交互调试 + Gateway 多通道生产部署
 - **轻量内核** — 无 AgentScope 依赖，最小抽象
-- **长期记忆** — Tape + SQLite + 自动锚点压缩 + BM25 跨锚点召回
+- **分层记忆** — Tape + Hybrid Memory + Hot/Warm/Cold 三层上下文
 - **多模态** — 图片从通道到 LLM 全链路支持（延迟 base64 编码）
 - **MCP 支持** — stdio / HTTP 两种传输，动态注册工具
 - **技能路由** — 技能 prompt、工具脚本、lease 与 worker prompt 解耦
 - **宿主 Python fallback** — 技能脚本可在独立本地 Python 环境运行，并支持多级回退
+- **运行时可观测性** — flow / chat context 只读观测工具，稳定分段输出
+- **更轻量阶段反馈** — progress 去重、阶段完成摘要、stdout/stderr 驱动 heartbeat
 - **工具租约** — ToolLease 最小权限策略，技能间 UNION 语义合并
 - **主/子 Agent 边界清晰** — 只有主 agent 负责通道发送，子 agent 只返回结果与产物路径
 - **可配置执行轮数** — orchestrator / worker 的最大步数可配置
