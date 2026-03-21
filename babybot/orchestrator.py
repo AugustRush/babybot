@@ -149,14 +149,14 @@ class OrchestratorAgent:
             return "暂无可观测的 flow。"
         snapshot = self._task_heartbeat_registry.snapshot(resolved_flow_id)
         events = self._child_task_bus.events_for(resolved_flow_id)
-        parts = [f"flow_id={resolved_flow_id}"]
+        parts = ["[Runtime Flow]", f"flow_id={resolved_flow_id}"]
         if resolved_chat_key:
             parts.append(f"chat_key={resolved_chat_key}")
         if snapshot:
             lines = []
-            for task_id, state in snapshot.items():
+            for task_id, state in sorted(snapshot.items()):
                 lines.append(
-                    f"- {task_id}: status={state.get('status', '')} progress={state.get('progress', None)}"
+                    f"- task_id={task_id} status={state.get('status', '')} progress={state.get('progress', None)}"
                 )
             parts.append("[Tasks]\n" + "\n".join(lines))
         if events:
@@ -173,9 +173,12 @@ class OrchestratorAgent:
                     suffix.append(f"status={status}")
                 if progress is not None:
                     suffix.append(f"progress={progress}")
-                lines.append(f"- {event.task_id}: {event.event}" + (f" ({', '.join(suffix)})" if suffix else ""))
-            parts.append("[Events]\n" + "\n".join(lines))
-        if len(parts) == 1:
+                lines.append(
+                    f"- task_id={event.task_id} event={event.event}"
+                    + (f" ({', '.join(suffix)})" if suffix else "")
+                )
+            parts.append("[Recent Events]\n" + "\n".join(lines))
+        if len(parts) == 2:
             parts.append("暂无 task/event 快照。")
         return "\n".join(parts)
 
@@ -184,21 +187,21 @@ class OrchestratorAgent:
             return "缺少 chat_key。"
         view = build_context_view(memory_store=self.memory_store, chat_id=chat_key, query=query)
         records = self.memory_store.list_memories(chat_id=chat_key)
-        parts = [f"chat_key={chat_key}"]
+        parts = ["[Chat Context]", f"chat_key={chat_key}"]
         if query:
             parts.append(f"query={query}")
         if view.hot:
-            parts.append("[Hot]\n- " + "\n- ".join(view.hot))
+            parts.append("[Hot Context]\n- " + "\n- ".join(view.hot))
         if view.warm:
-            parts.append("[Warm]\n- " + "\n- ".join(view.warm))
+            parts.append("[Warm Context]\n- " + "\n- ".join(view.warm))
         if view.cold:
-            parts.append("[Cold]\n- " + "\n- ".join(view.cold))
+            parts.append("[Cold Context]\n- " + "\n- ".join(view.cold))
         if records:
             lines = [
-                f"- {record.memory_type}/{record.key} tier={record.tier} status={record.status} confidence={record.confidence:.2f} summary={record.summary}"
+                f"- memory_type={record.memory_type} key={record.key} tier={record.tier} status={record.status} confidence={record.confidence:.2f} summary={record.summary}"
                 for record in records[:12]
             ]
-            parts.append("[Memories]\n" + "\n".join(lines))
+            parts.append("[Memory Records]\n" + "\n".join(lines))
         tape = self.tape_store.get_or_create(chat_key)
         anchor = tape.last_anchor()
         if anchor is not None:

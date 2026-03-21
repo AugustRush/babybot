@@ -944,21 +944,21 @@ class ResourceManager:
             return f"chat={chat_key}\n暂无 memory store。"
         view = build_context_view(memory_store=memory_store, chat_id=chat_key, query=query)
         records = memory_store.list_memories(chat_id=chat_key)
-        parts = [f"chat={chat_key}"]
+        parts = ["[Chat Context]", f"chat_key={chat_key}"]
         if query:
             parts.append(f"query={query}")
         if view.hot:
-            parts.append("[Hot]\n- " + "\n- ".join(view.hot))
+            parts.append("[Hot Context]\n- " + "\n- ".join(view.hot))
         if view.warm:
-            parts.append("[Warm]\n- " + "\n- ".join(view.warm))
+            parts.append("[Warm Context]\n- " + "\n- ".join(view.warm))
         if view.cold:
-            parts.append("[Cold]\n- " + "\n- ".join(view.cold))
+            parts.append("[Cold Context]\n- " + "\n- ".join(view.cold))
         if records:
             lines = [
-                f"- {record.memory_type}/{record.key} tier={record.tier} status={record.status} summary={record.summary}"
+                f"- memory_type={record.memory_type} key={record.key} tier={record.tier} status={record.status} summary={record.summary}"
                 for record in records[:12]
             ]
-            parts.append("[Memories]\n" + "\n".join(lines))
+            parts.append("[Memory Records]\n" + "\n".join(lines))
         return "\n".join(parts)
 
     def register_channel_tools(self, channel_tools: "ChannelTools") -> None:

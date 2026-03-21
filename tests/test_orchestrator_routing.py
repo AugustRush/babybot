@@ -604,3 +604,71 @@ def test_maybe_handoff_writes_extended_anchor_state(tmp_path: Path) -> None:
     assert state["artifacts"] == ["pig.png"]
     assert state["open_questions"] == ["是否保留蓝色背景"]
     assert state["decisions"] == ["继续沿用之前生成的图片"]
+
+
+def test_inspect_runtime_flow_uses_stable_sectioned_format() -> None:
+    from babybot.agent_kernel.dynamic_orchestrator import ChildTaskEvent, InMemoryChildTaskBus
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    agent = object.__new__(OrchestratorAgent)
+    agent._recent_flow_ids_by_chat = {"feishu:chat-1": "orchestrator:flow-1"}
+    agent._task_heartbeat_registry = TaskHeartbeatRegistry()
+    agent._child_task_bus = InMemoryChildTaskBus()
+
+    agent._task_heartbeat_registry.beat(
+        "orchestrator:flow-1",
+        "task_1",
+        status="下载模型",
+        progress=0.5,
+    )
+    asyncio.run(
+        agent._child_task_bus.publish(
+            ChildTaskEvent(
+                flow_id="orchestrator:flow-1",
+                task_id="task_1",
+                event="progress",
+                payload={"description": "下载模型", "status": "下载模型", "progress": 0.5},
+            )
+        )
+    )
+
+    text = agent.inspect_runtime_flow(chat_key="feishu:chat-1")
+
+    assert text.startswith("[Runtime Flow]")
+    assert "flow_id=orchestrator:flow-1" in text
+    assert "chat_key=feishu:chat-1" in text
+    assert "[Tasks]" in text
+    assert "[Recent Events]" in text
+    assert "task_id=task_1" in text
+    assert "event=progress" in text
+
+
+def test_inspect_chat_context_uses_stable_sectioned_format(tmp_path: Path) -> None:
+    from babybot.memory_store import HybridMemoryStore
+
+    agent = object.__new__(OrchestratorAgent)
+    agent.memory_store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    agent.memory_store.ensure_bootstrap()
+    agent.tape_store = TapeStore(db_path=tmp_path / "context.db")
+
+    tape = agent.tape_store.get_or_create("feishu:chat-1")
+    tape.append("anchor", {"name": "compact/1", "state": {"summary": "用户在处理语音问题"}})
+    agent.memory_store.observe_user_message("feishu:chat-1", "以后默认中文，回答简洁")
+    agent.memory_store.observe_anchor_state(
+        "feishu:chat-1",
+        {"pending": "继续处理语音失败"},
+        source_ids=[1],
+    )
+
+    text = agent.inspect_chat_context("feishu:chat-1", query="继续语音任务")
+
+    assert text.startswith("[Chat Context]")
+    assert "chat_key=feishu:chat-1" in text
+    assert "query=继续语音任务" in text
+    assert "[Hot Context]" in text
+    assert "[Warm Context]" in text
+    assert "[Memory Records]" in text
+    assert "[Tape Summary]" in text
