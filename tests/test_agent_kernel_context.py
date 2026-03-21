@@ -1,4 +1,5 @@
 from babybot.agent_kernel import ContextManager, ExecutionContext
+from babybot.memory_store import HybridMemoryStore
 
 
 def test_context_snapshot_and_restore() -> None:
@@ -32,3 +33,15 @@ def test_context_fork_copies_state_and_isolates_events() -> None:
     assert child.session_id == "child"
     assert child.state["count"] == 2
     assert len(child.events) == 1
+
+
+def test_context_fork_shares_memory_store_without_deepcopy(tmp_path) -> None:
+    store = HybridMemoryStore(tmp_path / "memory.db", tmp_path / "memory")
+    store.ensure_bootstrap()
+
+    manager = ContextManager(ExecutionContext(session_id="root"))
+    manager.set("memory_store", store)
+
+    child = manager.fork(session_id="child")
+
+    assert child.state["memory_store"] is store
