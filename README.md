@@ -368,6 +368,47 @@ uv run gateway
 
 输出采用稳定分段文本格式，固定包含如 `[Runtime Flow]`、`[Tasks]`、`[Recent Events]`、`[Chat Context]`、`[Memory Records]` 等 section，方便人读，也方便 agent 后续消费。
 
+#### 排障示例
+
+当用户反馈“语音生成很慢、而且阶段消息重复”时，推荐按下面顺序看：
+
+1. 先调用 `inspect_runtime_flow(chat_key="feishu:oc_xxx")`
+   - 看 `[Tasks]` 里是否还有 task 处于进行中
+   - 看 `[Recent Events]` 里是否持续出现 `event=progress`
+   - 如果 `status=下载模型`、`progress=0.25/0.75` 持续推进，说明不是卡死，而是在慢任务中
+2. 再调用 `inspect_chat_context(chat_key="feishu:oc_xxx", query="继续语音任务")`
+   - 看 Hot 是否还保留“最近失败 / 当前待办 / 当前产物”
+   - 看 Warm 是否存在“默认中文 / 简洁回答 / 助手角色”之类的活跃偏好
+   - 看 Cold 是否堆积了已经衰减的旧记忆，帮助判断上下文是否变脏
+
+一个典型的 `inspect_runtime_flow` 片段会像这样：
+
+```text
+[Runtime Flow]
+flow_id=orchestrator:abc123
+chat_key=feishu:oc_xxx
+[Tasks]
+- task_id=task_1 status=下载模型 progress=0.75
+[Recent Events]
+- task_id=task_1 event=progress (下载模型, status=下载模型, progress=0.75)
+```
+
+一个典型的 `inspect_chat_context` 片段会像这样：
+
+```text
+[Chat Context]
+chat_key=feishu:oc_xxx
+query=继续语音任务
+[Hot Context]
+- 当前待办：继续处理语音失败
+- 最近失败：生成语音（tts timeout）
+[Warm Context]
+- 用户偏好默认中文回复。
+- 用户偏好简洁回答。
+[Memory Records]
+- memory_type=task_state key=last_failure tier=ephemeral status=active ...
+```
+
 ### 运行时进度反馈
 
 当前阶段反馈比之前更轻量：
