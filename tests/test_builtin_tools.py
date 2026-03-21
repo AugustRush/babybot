@@ -1,4 +1,7 @@
+import datetime
+
 from babybot.builtin_tools import iter_builtin_tool_registrations
+from babybot.builtin_tools.time import build_get_current_time_tool
 
 
 class _DummyOwner:
@@ -84,9 +87,58 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("basic", "delete_scheduled_task"),
         ("basic", "inspect_runtime_flow"),
         ("basic", "inspect_chat_context"),
+        ("basic", "get_current_time"),
         ("code", "_workspace_execute_python_code"),
         ("code", "_workspace_execute_shell_command"),
         ("code", "_workspace_view_text_file"),
         ("code", "_workspace_write_text_file"),
         ("code", "_workspace_insert_text_file"),
     ]
+
+
+def test_get_current_time_supports_common_formats(monkeypatch) -> None:
+    fixed_now = datetime.datetime(
+        2026,
+        3,
+        21,
+        19,
+        30,
+        45,
+        tzinfo=datetime.timezone(datetime.timedelta(hours=8), name="CST"),
+    )
+    monkeypatch.setattr(
+        "babybot.builtin_tools.time._now_local",
+        lambda: fixed_now,
+    )
+
+    tool = build_get_current_time_tool(_DummyOwner())
+
+    assert tool() == "2026-03-21 19:30:45 CST (UTC+08:00)"
+    assert tool(format="iso") == "2026-03-21T19:30:45+08:00"
+    assert tool(format="date") == "2026-03-21"
+    assert tool(format="time") == "19:30:45"
+    assert tool(format="datetime") == "2026-03-21 19:30:45"
+    assert tool(format="timestamp") == str(int(fixed_now.timestamp()))
+    assert tool(format="timestamp_ms") == str(int(fixed_now.timestamp() * 1000))
+
+
+def test_get_current_time_rejects_unknown_format(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "babybot.builtin_tools.time._now_local",
+        lambda: datetime.datetime(
+            2026,
+            3,
+            21,
+            19,
+            30,
+            45,
+            tzinfo=datetime.timezone.utc,
+        ),
+    )
+
+    tool = build_get_current_time_tool(_DummyOwner())
+
+    assert tool(format="weird") == (
+        "Unsupported format 'weird'. "
+        "Supported formats: default, iso, date, time, datetime, timestamp, timestamp_ms."
+    )
