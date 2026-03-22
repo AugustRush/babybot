@@ -596,6 +596,120 @@ def test_unknown_task_id_in_wait() -> None:
     assert result.conclusion == "任务不存在"
 
 
+def test_wait_for_tasks_reports_collected_media_ready_for_final_reply() -> None:
+    from babybot.agent_kernel import TaskResult
+    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    class _DummyRM(DummyResourceManager):
+        def resolve_resource_scope(self, resource_id: str, require_tools: bool = False):
+            del require_tools
+            if resource_id == "skill.weather":
+                return {"include_groups": ["skill_weather"]}, ("weather",)
+            return None
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="ignored",
+                status="succeeded",
+                output="语音已生成",
+                metadata={"media_paths": ["/tmp/demo.wav"]},
+            )
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-media-note",
+        resource_manager=_DummyRM(),  # type: ignore[arg-type]
+        bridge=_Bridge(),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+    )
+
+    async def _run() -> str:
+        task_id = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "生成语音"},
+            task_counter=0,
+            context=ExecutionContext(session_id="flow-media-note"),
+        )
+        return await runtime.wait_for_tasks([task_id])
+
+    payload = json.loads(asyncio.run(_run()))
+    only_value = next(iter(payload.values()))
+
+    assert only_value["status"] == "succeeded"
+    assert only_value["output"] == "语音已生成"
+    assert only_value["reply_artifacts_ready"] is True
+    assert only_value["reply_artifacts_count"] == 1
+
+
+def test_get_task_result_reports_collected_media_ready_for_final_reply() -> None:
+    from babybot.agent_kernel import TaskResult
+    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    class _DummyRM(DummyResourceManager):
+        def resolve_resource_scope(self, resource_id: str, require_tools: bool = False):
+            del require_tools
+            if resource_id == "skill.weather":
+                return {"include_groups": ["skill_weather"]}, ("weather",)
+            return None
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="ignored",
+                status="succeeded",
+                output="语音已生成",
+                metadata={"media_paths": ["/tmp/demo.wav"]},
+            )
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-media-status",
+        resource_manager=_DummyRM(),  # type: ignore[arg-type]
+        bridge=_Bridge(),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+    )
+
+    async def _run() -> str:
+        task_id = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "生成语音"},
+            task_counter=0,
+            context=ExecutionContext(session_id="flow-media-status"),
+        )
+        await runtime.wait_for_tasks([task_id])
+        return runtime.get_task_result(task_id)
+
+    payload = json.loads(asyncio.run(_run()))
+
+    assert payload["status"] == "succeeded"
+    assert payload["output"] == "语音已生成"
+    assert payload["reply_artifacts_ready"] is True
+    assert payload["reply_artifacts_count"] == 1
+
+
+def test_system_prompt_explains_reply_artifacts_are_auto_attached() -> None:
+    gateway = DummyGateway([])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+
+    messages = orch._build_initial_messages(
+        "写一首诗并生成语音发给我",
+        ExecutionContext(),
+    )
+
+    system_prompt = messages[0].content
+    assert "reply_to_user" in system_prompt
+    assert "自动附带" in system_prompt
+    assert "不要再创建专门的发送子任务" in system_prompt
+
+
 def test_build_initial_messages_includes_media_paths() -> None:
     gateway = DummyGateway([])
     rm = DummyResourceManager()

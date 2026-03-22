@@ -57,7 +57,7 @@ def test_patch_stream_message_uses_interactive_card_payload() -> None:
     assert "hello world" in patched[0][1]
 
 
-def test_send_response_treats_wav_as_audio_media(tmp_path: Path) -> None:
+def test_send_response_falls_back_to_file_for_wav_attachment(tmp_path: Path) -> None:
     channel = FeishuChannel(FeishuConfig(enabled=False, stream_reply=True), manager=None)
     wav_path = tmp_path / "sample.wav"
     wav_path.write_bytes(b"RIFFdemo")
@@ -86,4 +86,36 @@ def test_send_response_treats_wav_as_audio_media(tmp_path: Path) -> None:
         )
     )
 
-    assert sent == [("media", '{"file_key": "file_key_1"}')]
+    assert sent == [("file", '{"file_key": "file_key_1"}')]
+
+
+def test_send_response_keeps_opus_as_audio_media(tmp_path: Path) -> None:
+    channel = FeishuChannel(FeishuConfig(enabled=False, stream_reply=True), manager=None)
+    opus_path = tmp_path / "sample.opus"
+    opus_path.write_bytes(b"OggSdemo")
+
+    sent: list[tuple[str, str]] = []
+
+    channel._upload_file_sync = lambda file_path: "file_key_2"  # type: ignore[method-assign]
+
+    def _fake_send(
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+    ) -> bool:
+        del receive_id_type, receive_id
+        sent.append((msg_type, content))
+        return True
+
+    channel._send_message_sync = _fake_send  # type: ignore[method-assign]
+
+    asyncio.run(
+        channel.send_response(
+            "oc_mock_chat",
+            TaskResponse(text="", media_paths=[str(opus_path)]),
+            sender_id="ou_user_1",
+        )
+    )
+
+    assert sent == [("media", '{"file_key": "file_key_2"}')]

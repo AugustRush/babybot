@@ -100,4 +100,5 @@ def test_wait_for_tasks_uses_per_task_heartbeat_to_surface_stalled_child() -> No
     stalled_id, payload = asyncio.run(_run())
     results = json.loads(payload)
 
-    assert results[stalled_id] == "recoverable: child task heartbeat stalled"
+    assert results[stalled_id]["status"] == "recoverable"
+    assert results[stalled_id]["error"] == "child task heartbeat stalled"

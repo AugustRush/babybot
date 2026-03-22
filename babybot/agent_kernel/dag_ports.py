@@ -236,6 +236,7 @@ class ResourceBridgeExecutor:
             task_id=task.task_id,
             status="succeeded",
             output=output,
+            artifacts=tuple(media or ()),
         )
 
     @staticmethod

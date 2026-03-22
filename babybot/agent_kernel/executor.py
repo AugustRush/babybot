@@ -25,6 +25,7 @@ class ExecutorPolicy:
 
     max_steps: int = 8
     max_continuations: int = 2
+    max_tool_result_chars: int = 12000
     loop_guard: LoopGuardConfig = field(default_factory=LoopGuardConfig)
 
 
@@ -40,6 +41,23 @@ class SingleAgentExecutor:
     tools: ToolRegistry
     skill_resolver: Callable[[TaskContract, ExecutionContext], SkillPack | Iterable[SkillPack] | None] | None = None
     policy: ExecutorPolicy = field(default_factory=ExecutorPolicy)
+
+    @staticmethod
+    def _truncate_tool_output_for_model(output: str, max_chars: int) -> str:
+        if max_chars <= 0 or len(output) <= max_chars:
+            return output
+        note = (
+            f"\n...[truncated {len(output) - max_chars} chars; "
+            "narrow the command, file range, or query if more detail is needed]..."
+        )
+        if len(note) >= max_chars:
+            return note[:max_chars]
+        keep_budget = max_chars - len(note)
+        head = max(1, int(keep_budget * 0.75))
+        tail = max(0, keep_budget - head)
+        if tail == 0:
+            return output[:keep_budget] + note
+        return output[:head] + note + output[-tail:]
 
     async def execute(self, task: TaskContract, context: ExecutionContext) -> TaskResult:
         skills = self._resolve_skills(task, context)
@@ -327,7 +345,10 @@ class SingleAgentExecutor:
                         tool_result_map[tc.call_id] = ModelMessage(
                             role="tool",
                             name=tc.name,
-                            content=output,
+                            content=self._truncate_tool_output_for_model(
+                                output,
+                                self.policy.max_tool_result_chars,
+                            ),
                             tool_call_id=tc.call_id,
                         )
 

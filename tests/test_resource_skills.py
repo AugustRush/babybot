@@ -974,6 +974,82 @@ def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_
     assert all(pack.tool_lease == ToolLease() for pack in executor_skill_packs)
 
 
+def test_run_subagent_task_includes_current_channel_scope_for_live_delivery(monkeypatch, tmp_path: Path) -> None:
+    from babybot.agent_kernel import ToolRegistry
+    from babybot.channels.tools import ChannelToolContext
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = ToolRegistry()
+    manager.groups = {
+        "basic": ToolGroup("basic", "core", active=True),
+        "code": ToolGroup("code", "code", active=True),
+        "channel_feishu": ToolGroup("channel_feishu", "feishu", active=True),
+    }
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_strip_channel",
+        default=str(tmp_path),
+    )
+    manager._get_output_dir = lambda: tmp_path
+    manager._build_task_lease = lambda lease: ToolLease(
+        include_groups=("basic", "code"),
+        include_tools=("inspect_chat_context",),
+    )
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    def _tool_ok() -> str:
+        return "ok"
+
+    manager.register_tool(_tool_ok, group_name="basic", func_name="inspect_chat_context")
+    manager.register_tool(_tool_ok, group_name="code", func_name="_workspace_execute_shell_command")
+    manager.register_tool(_tool_ok, group_name="channel_feishu", func_name="send_audio")
+    manager.register_tool(_tool_ok, group_name="channel_feishu", func_name="send_file")
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+    captured: dict[str, object] = {}
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            captured["lease"] = task.lease
+            captured["channel_context"] = context.state.get("channel_context")
+            return TaskResult(task_id="worker", status="succeeded", output="done")
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    parent_ctx = ChannelToolContext(
+        channel_name="feishu",
+        chat_id="oc_test",
+        sender_id="u1",
+    )
+    ChannelToolContext.set_current(parent_ctx)
+    try:
+        text, media = asyncio.run(manager.run_subagent_task("send audio carefully"))
+    finally:
+        ChannelToolContext.set_current(None)
+
+    assert text == "done"
+    assert media == []
+    stripped = captured["lease"]
+    assert isinstance(stripped, ToolLease)
+    assert stripped.include_groups == ("basic", "code", "channel_feishu")
+    assert stripped.include_tools == ("inspect_chat_context",)
+    assert stripped.exclude_tools == ()
+    assert captured["channel_context"] is parent_ctx
+
+
 def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
     manager = object.__new__(ResourceManager)
     captured: dict[str, object] = {}
@@ -1016,7 +1092,7 @@ def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
     assert captured["skill_ids"] == ["auto-skill-creator"]
 
 
-def test_build_worker_prompt_tells_subagents_to_return_artifacts_to_parent() -> None:
+def test_build_worker_prompt_allows_live_subagents_to_send_final_delivery() -> None:
     manager = object.__new__(ResourceManager)
     manager.skills = {}
     prompt = manager._build_worker_sys_prompt(
@@ -1026,8 +1102,8 @@ def test_build_worker_prompt_tells_subagents_to_return_artifacts_to_parent() -> 
         selected_skill_packs=[],
     )
 
-    assert "子Agent禁止直接向用户发送消息" in prompt
-    assert "由主Agent统一回复用户" in prompt
+    assert "可直接发送最终内容" in prompt
+    assert "避免发送中间状态" in prompt
 
 
 def test_build_task_lease_excludes_nested_orchestration_tools_by_default() -> None:
@@ -1244,6 +1320,28 @@ def test_callable_tool_does_not_treat_long_json_text_as_artifact_path() -> None:
 
     assert result.ok is True
     assert '"_action": "created"' in result.content
+    assert result.artifacts == []
+
+
+def test_callable_tool_can_disable_implicit_artifact_collection(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.png"
+    image_path.write_bytes(b"png")
+
+    def return_shell_like_output() -> str:
+        return f"found artifact: {image_path}"
+
+    tool = CallableTool(
+        func=return_shell_like_output,
+        name="_workspace_execute_shell_command",
+        description="shell",
+        schema={"type": "object", "properties": {}},
+        collect_artifacts=False,
+    )
+
+    result = asyncio.run(tool.invoke({}, ToolContext(session_id="s1", state={})))
+
+    assert result.ok is True
+    assert str(image_path) in result.content
     assert result.artifacts == []
 
 

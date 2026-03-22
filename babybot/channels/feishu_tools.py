@@ -174,8 +174,14 @@ class FeishuChannelTools(ChannelTools):
             return "音频上传失败"
 
         content = json.dumps({"file_key": key}, ensure_ascii=False)
-        result = self._send_message("media", content)
-        return f"{result}: {os.path.basename(file_path)}"
+        msg_type = self._channel._message_type_for_file(file_path)
+        result = self._send_message(msg_type, content)
+        if msg_type == "media":
+            return f"{result}: {os.path.basename(file_path)}"
+        return (
+            f"{result}: {os.path.basename(file_path)}"
+            " (当前格式不支持飞书语音消息，已按普通文件发送)"
+        )
 
     def send_card(self, content: str, title: str = "") -> str:
         """发送交互卡片到飞书，适合展示结构化信息。

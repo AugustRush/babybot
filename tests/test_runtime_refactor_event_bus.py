@@ -185,7 +185,8 @@ def test_runtime_retries_retryable_failures_before_succeeding() -> None:
     task_id, wait_payload = asyncio.run(_run())
     payload = json.loads(wait_payload)
 
-    assert payload[task_id] == "succeeded: done after retry"
+    assert payload[task_id]["status"] == "succeeded"
+    assert payload[task_id]["output"] == "done after retry"
     assert runtime.results[task_id].attempts == 2
     assert [event.event for event in bus.events_for("flow-retry-success")] == [
         "queued",
@@ -226,7 +227,8 @@ def test_runtime_dead_letters_after_retry_budget_exhausted() -> None:
     task_id, wait_payload = asyncio.run(_run())
     payload = json.loads(wait_payload)
 
-    assert payload[task_id] == "failed: timeout while calling worker"
+    assert payload[task_id]["status"] == "failed"
+    assert payload[task_id]["error"] == "timeout while calling worker"
     assert runtime.results[task_id].attempts == 2
     assert [event.event for event in bus.events_for("flow-dead-letter")] == [
         "queued",

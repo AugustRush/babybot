@@ -68,7 +68,10 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "type": "function",
         "function": {
             "name": "wait_for_tasks",
-            "description": "等待指定任务完成并返回结果（阻塞直到全部完成）。",
+            "description": (
+                "等待指定任务完成并返回 JSON 结果映射（阻塞直到全部完成）。"
+                "每个任务结果都包含 status/output/error，以及 reply_artifacts_ready 等字段。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -86,7 +89,10 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "type": "function",
         "function": {
             "name": "get_task_result",
-            "description": "查询任务当前状态和结果（非阻塞）。",
+            "description": (
+                "查询任务当前状态和结果（非阻塞，返回 JSON 对象）。"
+                "结果包含 status/output/error，以及 reply_artifacts_ready 等字段。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -106,6 +112,7 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
             "description": (
                 "向用户发送最终回复。调用后编排循环结束。"
                 "此工具应作为最后一个工具调用单独使用，不与其他工具混用。"
+                "宿主会自动附带当前已收集的产物/附件到最终回复，无需再创建专门的发送子任务。"
             ),
             "parameters": {
                 "type": "object",
@@ -135,6 +142,10 @@ _SYSTEM_PROMPT_ROLE = (
     "6. 禁止虚构执行结果；需要外部信息必须通过 dispatch_task 获取\n"
     "7. 如果单个子任务同时需要多种能力，可在一次 dispatch_task 中使用 resource_ids 组合多个资源。\n"
     "8. 对于需要查看网页/仓库说明再创建或更新技能的任务，优先在同一个子任务里组合相关技能、browser、必要的 code 资源；不要靠 create_worker 套娃补能力。"
+    "\n\n任务结果协议：\n"
+    "- wait_for_tasks / get_task_result 返回 JSON，不是自由文本。\n"
+    "- 当结果中的 reply_artifacts_ready=true 时，表示子任务已经产出可随最终回复自动附带给用户的附件/媒体。\n"
+    "- 出现 reply_artifacts_ready=true 后，不要再创建专门的发送子任务；直接调用 reply_to_user 收尾。"
 )
 
 _DEFERRED_TASK_PATTERNS = (
@@ -330,9 +341,33 @@ class InProcessChildTaskRuntime:
             status=result.status,
             output=result.output,
             error=result.error,
+            artifacts=tuple(result.artifacts or ()),
             attempts=attempts,
             metadata=dict(result.metadata),
         )
+
+    @staticmethod
+    def _result_artifacts(result: TaskResult) -> tuple[str, ...]:
+        if result.artifacts:
+            return tuple(result.artifacts)
+        legacy = result.metadata.get("media_paths")
+        if isinstance(legacy, (list, tuple)):
+            return tuple(str(item) for item in legacy if str(item).strip())
+        return ()
+
+    @classmethod
+    def _result_payload(cls, result: TaskResult) -> dict[str, Any]:
+        artifacts = cls._result_artifacts(result)
+        payload: dict[str, Any] = {
+            "status": result.status,
+            "output": result.output,
+            "error": result.error,
+            "reply_artifacts_ready": bool(artifacts),
+            "reply_artifacts_count": len(artifacts),
+        }
+        if artifacts:
+            payload["reply_artifacts_preview"] = list(artifacts[:3])
+        return payload
 
     def _record_dead_letter(
         self,
@@ -355,6 +390,7 @@ class InProcessChildTaskRuntime:
             status="failed",
             output=result.output,
             error=result.error,
+            artifacts=tuple(result.artifacts or ()),
             attempts=result.attempts,
             metadata=metadata,
         )
@@ -555,8 +591,13 @@ class InProcessChildTaskRuntime:
                             )
                         )
                         child_media = child_context.state.get("media_paths_collected", [])
-                        if child_media:
-                            context.state.setdefault("media_paths_collected", []).extend(child_media)
+                        all_media = list(
+                            dict.fromkeys(
+                                list(self._result_artifacts(result)) + list(child_media or ())
+                            )
+                        )
+                        if all_media:
+                            context.state.setdefault("media_paths_collected", []).extend(all_media)
                         break
 
                     decision = classify_error(result.error)
@@ -696,40 +737,77 @@ class InProcessChildTaskRuntime:
                 )
                 del done, pending
 
-        out: dict[str, str] = {}
+        out: dict[str, dict[str, Any]] = {}
         for task_id in task_ids:
             if task_id in self._results:
                 result = self._results[task_id]
-                if result.status == "succeeded":
-                    out[task_id] = f"succeeded: {result.output}"
-                else:
-                    out[task_id] = f"failed: {result.error}"
+                out[task_id] = self._result_payload(result)
             elif self._task_state.get(task_id, {}).get("status") == "recoverable":
-                out[task_id] = "recoverable: child task heartbeat stalled"
+                out[task_id] = {
+                    "status": "recoverable",
+                    "output": "",
+                    "error": "child task heartbeat stalled",
+                    "reply_artifacts_ready": False,
+                    "reply_artifacts_count": 0,
+                }
             else:
-                out[task_id] = f"not_found: {task_id}"
+                out[task_id] = {
+                    "status": "not_found",
+                    "output": "",
+                    "error": f"task not found: {task_id}",
+                    "reply_artifacts_ready": False,
+                    "reply_artifacts_count": 0,
+                }
         return json.dumps(out, ensure_ascii=False)
 
     def get_task_result(self, task_id: str) -> str:
         if task_id in self._in_flight and task_id in self._stale_task_ids([task_id]):
-            return "recoverable: child task heartbeat stalled"
+            return json.dumps({
+                "status": "recoverable",
+                "output": "",
+                "error": "child task heartbeat stalled",
+                "reply_artifacts_ready": False,
+                "reply_artifacts_count": 0,
+            }, ensure_ascii=False)
         if task_id in self._results:
             result = self._results[task_id]
-            if result.status == "succeeded":
-                return f"succeeded: {result.output}"
-            return f"failed: {result.error}"
+            return json.dumps(self._result_payload(result), ensure_ascii=False)
         if task_id in self._in_flight:
-            return "pending"
+            return json.dumps({
+                "status": "pending",
+                "output": "",
+                "error": "",
+                "reply_artifacts_ready": False,
+                "reply_artifacts_count": 0,
+            }, ensure_ascii=False)
         if task_id in self._task_state:
             status = str(self._task_state[task_id].get("status", "") or "")
             if status in {"queued", "started", "retrying"}:
-                return "pending"
+                return json.dumps({
+                    "status": "pending",
+                    "output": "",
+                    "error": "",
+                    "reply_artifacts_ready": False,
+                    "reply_artifacts_count": 0,
+                }, ensure_ascii=False)
             if status == "recoverable":
                 error = str(
                     self._task_state[task_id].get("error", "") or "previous run interrupted before completion"
                 )
-                return f"recoverable: {error}"
-        return f"not_found: {task_id}"
+                return json.dumps({
+                    "status": "recoverable",
+                    "output": "",
+                    "error": error,
+                    "reply_artifacts_ready": False,
+                    "reply_artifacts_count": 0,
+                }, ensure_ascii=False)
+        return json.dumps({
+            "status": "not_found",
+            "output": "",
+            "error": f"task not found: {task_id}",
+            "reply_artifacts_ready": False,
+            "reply_artifacts_count": 0,
+        }, ensure_ascii=False)
 
     def cancel_all(self) -> None:
         for task in self._in_flight.values():

@@ -47,6 +47,7 @@ class TaskResult:
     status: TaskStatus
     output: str = ""
     error: str = ""
+    artifacts: tuple[str, ...] = ()
     attempts: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
 

@@ -86,6 +86,7 @@ class CallableTool:
         schema: dict[str, Any],
         preset_kwargs: dict[str, Any] | None = None,
         resource_manager: ResourceManager | None = None,
+        collect_artifacts: bool = True,
     ):
         self._func = func
         self._name = name
@@ -93,6 +94,7 @@ class CallableTool:
         self._schema = schema
         self._preset_kwargs = dict(preset_kwargs or {})
         self._resource_manager = resource_manager
+        self._collect_artifacts_enabled = collect_artifacts
 
     @property
     def name(self) -> str:
@@ -143,7 +145,11 @@ class CallableTool:
             return ToolResult(
                 ok=True,
                 content=self._normalize_result(value),
-                artifacts=self._collect_artifacts(value, base_dir=artifact_base),
+                artifacts=(
+                    self._collect_artifacts(value, base_dir=artifact_base)
+                    if self._collect_artifacts_enabled
+                    else []
+                ),
             )
         except Exception as exc:
             return ToolResult(ok=False, error=str(exc))
@@ -737,7 +743,15 @@ class ResourceManager:
 
     def _register_builtin_tools(self) -> None:
         for func, group_name in iter_builtin_tool_registrations(self):
-            self.register_tool(func, group_name=group_name)
+            collect_artifacts = func.__name__ not in {
+                "_workspace_execute_python_code",
+                "_workspace_execute_shell_command",
+            }
+            self.register_tool(
+                func,
+                group_name=group_name,
+                collect_artifacts=collect_artifacts,
+            )
 
     @staticmethod
     def _resource_slug(value: str) -> str:
@@ -855,12 +869,14 @@ class ResourceManager:
         group_name: str = "basic",
         preset_kwargs: dict[str, Any] | None = None,
         func_name: str | None = None,
+        collect_artifacts: bool = True,
     ) -> None:
         self._tool_loader_view().register_tool(
             func=func,
             group_name=group_name,
             preset_kwargs=preset_kwargs,
             func_name=func_name,
+            collect_artifacts=collect_artifacts,
         )
 
     def set_observability_provider(self, provider: Any) -> None:

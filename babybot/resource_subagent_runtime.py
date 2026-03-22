@@ -14,6 +14,26 @@ class ResourceSubagentRuntime:
     def __init__(self, owner: Any) -> None:
         self._owner = owner
 
+    def extend_lease_with_current_channel(
+        self,
+        lease: ToolLease,
+        channel_context: Any = None,
+    ) -> ToolLease:
+        channel_name = str(getattr(channel_context, "channel_name", "") or "").strip()
+        if not channel_name:
+            return lease
+        group_name = f"channel_{channel_name}"
+        if group_name not in self._owner.groups:
+            return lease
+        include_groups = list(lease.include_groups)
+        if group_name not in include_groups:
+            include_groups.append(group_name)
+        return ToolLease(
+            include_groups=tuple(include_groups),
+            include_tools=lease.include_tools,
+            exclude_tools=lease.exclude_tools,
+        )
+
     @staticmethod
     def merge_skill_leases(
         base_lease: ToolLease,
@@ -95,6 +115,7 @@ class ResourceSubagentRuntime:
     ) -> tuple[str, list[str]]:
         from .channels.tools import ChannelToolContext
 
+        channel_context = ChannelToolContext.get_current()
         write_root = self._owner._get_output_dir()
         token = self._owner._active_write_root.set(str(write_root))
         started = time.perf_counter()
@@ -107,6 +128,10 @@ class ResourceSubagentRuntime:
                 skill_ids=skill_ids,
             )
             merged_lease = self.merge_skill_leases(merged_lease, skill_packs)
+            merged_lease = self.extend_lease_with_current_channel(
+                merged_lease,
+                channel_context=channel_context,
+            )
             scope_token = self._owner._get_current_task_lease_var().set(merged_lease)
             skill_ids_token = self._owner._get_current_skill_ids_var().set(
                 tuple(skill_ids) if skill_ids is not None else None
@@ -151,7 +176,7 @@ class ResourceSubagentRuntime:
                 tape_store=tape_store,
                 memory_store=memory_store,
                 media_paths=media_paths,
-                channel_context=ChannelToolContext.get_current(),
+                channel_context=channel_context,
             )
             result = await executor.execute(
                 TaskContract(

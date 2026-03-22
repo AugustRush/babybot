@@ -24,6 +24,7 @@ class ResourceToolLoader:
         group_name: str = "basic",
         preset_kwargs: dict[str, Any] | None = None,
         func_name: str | None = None,
+        collect_artifacts: bool = True,
     ) -> None:
         if group_name not in self._owner.groups:
             self._owner.groups[group_name] = ToolGroup(
@@ -42,6 +43,7 @@ class ResourceToolLoader:
                 schema=self.json_schema_for_callable(func),
                 preset_kwargs=preset_kwargs,
                 resource_manager=self._owner,
+                collect_artifacts=collect_artifacts,
             ),
             group=group_name,
         )

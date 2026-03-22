@@ -277,6 +277,14 @@ class FeishuChannel(BaseChannel):
         ".pptx": "ppt",
     }
 
+    @classmethod
+    def _message_type_for_file(cls, file_path: str) -> str:
+        ext = os.path.splitext(file_path)[1].lower()
+        file_type = cls._FILE_TYPE_MAP.get(ext, "stream")
+        if file_type in {"opus", "mp4"}:
+            return "media"
+        return "file"
+
     # Regex patterns for smart format detection and card building
     _TABLE_RE = re.compile(
         r"((?:^[ \t]*\|.+\|[ \t]*\n)(?:^[ \t]*\|[-:\s|]+\|[ \t]*\n)(?:^[ \t]*\|.+\|[ \t]*\n?)+)",
@@ -1028,10 +1036,7 @@ class FeishuChannel(BaseChannel):
                         None, self._upload_file_sync, file_path
                     )
                     if key:
-                        if ext in self._AUDIO_EXTS or ext in self._VIDEO_EXTS:
-                            media_type = "media"
-                        else:
-                            media_type = "file"
+                        media_type = self._message_type_for_file(file_path)
                         await loop.run_in_executor(
                             None,
                             self._send_message_sync,

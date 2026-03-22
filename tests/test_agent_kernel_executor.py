@@ -335,3 +335,56 @@ def test_single_agent_executor_enforces_token_budget() -> None:
 
     assert result.status == "failed"
     assert "token budget exceeded" in result.error.lower()
+
+
+def test_single_agent_executor_truncates_huge_tool_outputs_before_next_model_call() -> None:
+    huge = "A" * 50000
+
+    class HugeTool(Tool):
+        @property
+        def name(self) -> str:
+            return "huge"
+
+        @property
+        def description(self) -> str:
+            return "Return huge output."
+
+        @property
+        def schema(self) -> dict:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+            del args, context
+            return ToolResult(ok=True, content=huge)
+
+    class InspectingModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_tool_content = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            del context
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    tool_calls=(ModelToolCall(call_id="c1", name="huge", arguments={}),)
+                )
+            tool_messages = [msg for msg in request.messages if msg.role == "tool"]
+            self.last_tool_content = tool_messages[-1].content
+            return ModelResponse(text="done")
+
+    registry = ToolRegistry()
+    registry.register(HugeTool(), group="misc")
+    model = InspectingModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="huge output"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert len(model.last_tool_content) < len(huge)
+    assert "truncated" in model.last_tool_content.lower()
