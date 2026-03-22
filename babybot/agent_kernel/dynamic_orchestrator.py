@@ -793,6 +793,7 @@ class DynamicOrchestrator:
                 if heartbeat is not None:
                     heartbeat.beat()
 
+                messages = self._prune_stale_wait_history(messages)
                 response = await self._call_model(messages, context)
 
                 # Model responded with plain text (no tool calls)
@@ -879,6 +880,57 @@ class DynamicOrchestrator:
                 images=tuple(media_paths),
             ),
         ]
+
+    @staticmethod
+    def _prune_stale_wait_history(messages: list[ModelMessage]) -> list[ModelMessage]:
+        wait_call_ids: list[str] = []
+        for message in messages:
+            if message.role != "assistant" or not message.tool_calls:
+                continue
+            for tool_call in message.tool_calls:
+                if tool_call.name == "wait_for_tasks" and tool_call.call_id:
+                    wait_call_ids.append(tool_call.call_id)
+
+        if len(wait_call_ids) <= 1:
+            return messages
+
+        keep_wait_call_id = wait_call_ids[-1]
+        stale_wait_call_ids = set(wait_call_ids[:-1])
+        pruned: list[ModelMessage] = []
+
+        for message in messages:
+            if message.role == "tool" and message.tool_call_id in stale_wait_call_ids:
+                continue
+            if message.role == "assistant" and message.tool_calls:
+                filtered_tool_calls = tuple(
+                    tool_call
+                    for tool_call in message.tool_calls
+                    if tool_call.call_id not in stale_wait_call_ids
+                )
+                if filtered_tool_calls != message.tool_calls:
+                    if not filtered_tool_calls and not message.content.strip():
+                        continue
+                    pruned.append(
+                        ModelMessage(
+                            role=message.role,
+                            content=message.content,
+                            name=message.name,
+                            tool_call_id=message.tool_call_id,
+                            tool_calls=filtered_tool_calls,
+                            images=message.images,
+                        )
+                    )
+                    continue
+            pruned.append(message)
+
+        tool_ids_present = {
+            message.tool_call_id
+            for message in pruned
+            if message.role == "tool" and message.tool_call_id
+        }
+        if keep_wait_call_id not in tool_ids_present:
+            return messages
+        return pruned
 
     async def _call_model(
         self,

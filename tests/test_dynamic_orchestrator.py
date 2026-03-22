@@ -319,6 +319,75 @@ def test_dependent_tasks() -> None:
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
     result = asyncio.run(orch.run("依赖任务", ExecutionContext()))
     assert result.conclusion == "依赖任务完成"
+
+
+def test_sequential_waits_do_not_leak_previous_wait_results_into_later_rounds() -> None:
+    class SequentialGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_a_id = ""
+            self._task_b_id = ""
+            self._wait_a_payload = ""
+            self.final_messages: tuple[ModelMessage, ...] = ()
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_dispatch_tool_call("skill.weather", "任务A", call_id="c1"),),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_a_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_a_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 2:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c2":
+                        self._wait_a_payload = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_dispatch_tool_call("skill.weather", "任务B", call_id="c3"),),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 3:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c3":
+                        self._task_b_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_b_id], call_id="c4"),),
+                    finish_reason="tool_calls",
+                )
+            self.final_messages = request.messages
+            self._call_idx += 1
+            return _reply_tool_call("顺序任务完成", call_id="c5")
+
+    gw = SequentialGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+
+    result = asyncio.run(orch.run("顺序执行两个任务", ExecutionContext()))
+
+    assert result.conclusion == "顺序任务完成"
+    assert gw._wait_a_payload
+    final_tool_payloads = [
+        msg.content
+        for msg in gw.final_messages
+        if msg.role == "tool"
+    ]
+    assert gw._wait_a_payload not in final_tool_payloads
+    assert any("任务B" in payload for payload in final_tool_payloads)
     assert len(rm.calls) == 2
 
 
