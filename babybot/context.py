@@ -360,11 +360,14 @@ class TapeStore:
         except sqlite3.OperationalError:
             db.execute("ALTER TABLE entries ADD COLUMN content TEXT DEFAULT ''")
         # Backfill empty content in batches to avoid OOM on large DBs.
+        # Only target NULL rows (from the ALTER migration).  Rows with
+        # content = '' are legitimate — _payload_search_text may return ''
+        # for some entry kinds, and re-selecting them would loop forever.
         _BATCH = 500
         while True:
             rows = db.execute(
                 "SELECT entry_id, chat_id, kind, payload FROM entries "
-                "WHERE content IS NULL OR content = '' "
+                "WHERE content IS NULL "
                 "LIMIT ?",
                 (_BATCH,),
             ).fetchall()
