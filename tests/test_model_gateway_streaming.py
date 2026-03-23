@@ -123,7 +123,9 @@ def test_generate_streams_reply_to_user_tool_arguments() -> None:
                             SimpleNamespace(
                                 index=0,
                                 id="call_1",
-                                function=SimpleNamespace(name="reply_to_user", arguments='{"text":"你'),
+                                function=SimpleNamespace(
+                                    name="reply_to_user", arguments='{"text":"你'
+                                ),
                             ),
                         ],
                     ),
@@ -182,3 +184,10 @@ def test_generate_streams_reply_to_user_tool_arguments() -> None:
     assert response.tool_calls[0].name == "reply_to_user"
     assert response.tool_calls[0].arguments == {"text": "你好"}
     assert completions.calls[0]["stream"] is True
+
+
+def test_decode_partial_json_string_keeps_valid_prefix_before_trailing_escape() -> None:
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+
+    assert gateway._decode_partial_json_string('\\u4f60\\') == '你'
+    assert gateway._decode_partial_json_string('abc\\u4f60\\') == 'abc你'
