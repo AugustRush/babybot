@@ -18,6 +18,20 @@ _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"chmod\s+-R\s+777\s+/", "recursive permission change on root"),
     (r"curl[^|]*\|\s*(sudo\s+)?bash", "pipe to shell"),
     (r"wget[^|]*\|\s*(sudo\s+)?bash", "pipe to shell"),
+    (r"curl[^|]*\|\s*(sudo\s+)?sh\b", "pipe to shell"),
+    (r"wget[^|]*\|\s*(sudo\s+)?sh\b", "pipe to shell"),
+    # Encoded command bypass attempts
+    (r"base64\s+.*\|\s*(ba)?sh", "encoded pipe to shell"),
+    (r"\bsudo\s+rm\b", "sudo delete"),
+    (r"\bsudo\s+dd\b", "sudo disk write"),
+    (r"\bsudo\s+mkfs\b", "sudo filesystem format"),
+    # Python / Perl / Ruby one-liners for destructive ops
+    (r"python[23]?\s+-c\s+.*shutil\.rmtree", "python recursive delete"),
+    (r"python[23]?\s+-c\s+.*os\.remove", "python file delete"),
+    (r"perl\s+-e\s+.*unlink", "perl file delete"),
+    # Prevent overwriting critical system files
+    (r">\s*/etc/", "write to /etc"),
+    (r"tee\s+/etc/", "write to /etc via tee"),
 ]
 
 

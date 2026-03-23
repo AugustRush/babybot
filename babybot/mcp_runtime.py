@@ -61,9 +61,19 @@ class StdioMCPRuntimeClient(BaseMCPRuntimeClient):
     async def connect(self) -> None:
         self._stdio_cm = stdio_client(self._params)
         read_stream, write_stream = await self._stdio_cm.__aenter__()
-        self._session = ClientSession(read_stream, write_stream)
-        await self._session.__aenter__()
-        await self._session.initialize()
+        try:
+            self._session = ClientSession(read_stream, write_stream)
+            await self._session.__aenter__()
+            await self._session.initialize()
+        except Exception:
+            # Clean up the stdio context manager on partial init failure.
+            try:
+                await self._stdio_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._stdio_cm = None
+            self._session = None
+            raise
 
     async def list_tools(self) -> list[MCPToolDescriptor]:
         if not self._session:
@@ -75,7 +85,8 @@ class StdioMCPRuntimeClient(BaseMCPRuntimeClient):
                 MCPToolDescriptor(
                     name=tool.name,
                     description=tool.description or tool.title or tool.name,
-                    input_schema=tool.inputSchema or {"type": "object", "properties": {}},
+                    input_schema=tool.inputSchema
+                    or {"type": "object", "properties": {}},
                 )
             )
         return tools
@@ -120,9 +131,19 @@ class HttpMCPRuntimeClient(BaseMCPRuntimeClient):
     async def connect(self) -> None:
         self._http_cm = streamable_http_client(self._url)
         read_stream, write_stream, _get_session_id = await self._http_cm.__aenter__()
-        self._session = ClientSession(read_stream, write_stream)
-        await self._session.__aenter__()
-        await self._session.initialize()
+        try:
+            self._session = ClientSession(read_stream, write_stream)
+            await self._session.__aenter__()
+            await self._session.initialize()
+        except Exception:
+            # Clean up the HTTP context manager on partial init failure.
+            try:
+                await self._http_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._http_cm = None
+            self._session = None
+            raise
 
     async def list_tools(self) -> list[MCPToolDescriptor]:
         if not self._session:
@@ -167,6 +188,7 @@ class HttpMCPRuntimeClient(BaseMCPRuntimeClient):
 
 def close_clients_best_effort(clients: dict[str, BaseMCPRuntimeClient]) -> None:
     """Close MCP clients from sync context without failing callers."""
+
     async def _close_all() -> None:
         for client in clients.values():
             try:

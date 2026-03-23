@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import time
+
 from .context import _extract_keywords
 from .memory_models import MemoryRecord
 
@@ -72,15 +74,26 @@ def build_context_view_messages(
     messages: list[ModelMessage] = []
     if view.hot:
         messages.append(
-            ModelMessage(role="system", content="[Hot Context]\n" + "\n".join(f"- {line}" for line in view.hot))
+            ModelMessage(
+                role="system",
+                content="[Hot Context]\n" + "\n".join(f"- {line}" for line in view.hot),
+            )
         )
     if view.warm:
         messages.append(
-            ModelMessage(role="system", content="[Warm Context]\n" + "\n".join(f"- {line}" for line in view.warm))
+            ModelMessage(
+                role="system",
+                content="[Warm Context]\n"
+                + "\n".join(f"- {line}" for line in view.warm),
+            )
         )
     if view.cold:
         messages.append(
-            ModelMessage(role="system", content="[Cold Context]\n" + "\n".join(f"- {line}" for line in view.cold))
+            ModelMessage(
+                role="system",
+                content="[Cold Context]\n"
+                + "\n".join(f"- {line}" for line in view.cold),
+            )
         )
     return messages
 
@@ -115,7 +128,9 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def _sorted_summaries(items: list[tuple[float, str]]) -> list[str]:
-    return [summary for _, summary in sorted(items, key=lambda item: item[0], reverse=True)]
+    return [
+        summary for _, summary in sorted(items, key=lambda item: item[0], reverse=True)
+    ]
 
 
 def _memory_score(record: MemoryRecord, query_keywords: list[str]) -> float:
@@ -136,7 +151,10 @@ def _memory_score(record: MemoryRecord, query_keywords: list[str]) -> float:
         "decaying": -8.0,
     }.get(record.status, 0.0)
     hits = _memory_keyword_hits(record, query_keywords)
-    recency = min(10.0, max(0.0, record.updated_at / 1_000_000_000))
+    # Decay recency over hours: a record updated just now scores 10, one
+    # updated >10 hours ago scores 0.
+    age_hours = max(0.0, (time.time() - record.updated_at)) / 3600.0
+    recency = max(0.0, 10.0 - age_hours)
     confidence = max(0.0, min(1.0, float(record.confidence))) * 5.0
     return base + hits * 20.0 + confidence + recency
 

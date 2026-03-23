@@ -61,7 +61,8 @@ class MemoryRecord:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MemoryRecord":
         return cls(
-            memory_id=str(payload.get("memory_id", "")) or f"mem_{uuid.uuid4().hex[:16]}",
+            memory_id=str(payload.get("memory_id", ""))
+            or f"mem_{uuid.uuid4().hex[:16]}",
             memory_type=str(payload.get("memory_type", "")),
             key=str(payload.get("key", "")),
             value=payload.get("value"),
@@ -73,9 +74,17 @@ class MemoryRecord:
             confidence=float(payload.get("confidence", 1.0) or 0.0),
             evidence_count=int(payload.get("evidence_count", 1) or 1),
             contradiction_count=int(payload.get("contradiction_count", 0) or 0),
-            source_ids=tuple(int(item) for item in (payload.get("source_ids") or ()) if str(item).strip()),
-            last_observed_at=float(payload.get("last_observed_at", time.time()) or time.time()),
-            last_used_at=float(payload.get("last_used_at", 0.0) or 0.0),
+            source_ids=tuple(
+                int(item)
+                for item in (payload.get("source_ids") or ())
+                if str(item).strip()
+            ),
+            last_observed_at=float(payload["last_observed_at"])
+            if payload.get("last_observed_at") is not None
+            else time.time(),
+            last_used_at=float(payload["last_used_at"])
+            if payload.get("last_used_at") is not None
+            else 0.0,
             expires_at=(
                 float(payload.get("expires_at"))
                 if payload.get("expires_at") not in (None, "")
@@ -83,10 +92,16 @@ class MemoryRecord:
             ),
             supersedes=payload.get("supersedes"),
             superseded_by=payload.get("superseded_by"),
-            tags=tuple(str(item) for item in (payload.get("tags") or ()) if str(item).strip()),
+            tags=tuple(
+                str(item) for item in (payload.get("tags") or ()) if str(item).strip()
+            ),
             meta=dict(payload.get("meta") or {}),
-            created_at=float(payload.get("created_at", time.time()) or time.time()),
-            updated_at=float(payload.get("updated_at", time.time()) or time.time()),
+            created_at=float(payload["created_at"])
+            if payload.get("created_at") is not None
+            else time.time(),
+            updated_at=float(payload["updated_at"])
+            if payload.get("updated_at") is not None
+            else time.time(),
         )
 
     @classmethod

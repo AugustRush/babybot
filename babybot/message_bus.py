@@ -73,11 +73,16 @@ class MessageBus:
             self._scheduled_workers = 0
             self._user_workers = 1
         else:
-            self._scheduled_workers = min(max(1, requested_scheduled), max_concurrency - 1)
+            self._scheduled_workers = min(
+                max(1, requested_scheduled), max_concurrency - 1
+            )
             self._user_workers = max_concurrency - self._scheduled_workers
         self._worker_tasks: list[asyncio.Task[Any]] = []
         self._running = False
         self._accepting = False
+        # Cache inspect.signature results to avoid per-message overhead.
+        self._supports_stream_callback: bool | None = None
+        self._supports_runtime_event_callback: bool | None = None
 
     def _get_chat_sem(self, key: str) -> asyncio.Semaphore:
         if not isinstance(self._chat_sems, OrderedDict):
@@ -88,7 +93,19 @@ class MessageBus:
             return sem
 
         while len(self._chat_sems) >= 2000:
-            self._chat_sems.popitem(last=False)
+            # Only evict semaphores that are not currently acquired.
+            evicted = False
+            for evict_key in list(self._chat_sems.keys()):
+                candidate = self._chat_sems[evict_key]
+                # A semaphore at its initial value is idle (not acquired).
+                if candidate._value >= self._config.system.max_per_chat:  # noqa: SLF001
+                    del self._chat_sems[evict_key]
+                    evicted = True
+                    break
+            if not evicted:
+                # All semaphores are in use; exceed the soft limit rather
+                # than evicting an active semaphore.
+                break
         sem = asyncio.Semaphore(self._config.system.max_per_chat)
         self._chat_sems[key] = sem
         return sem
@@ -99,7 +116,11 @@ class MessageBus:
             raise RuntimeError("MessageBus is not accepting new messages")
         hb = Heartbeat(idle_timeout=float(self._config.system.idle_timeout))
         envelope = MessageEnvelope(message=msg, heartbeat=hb)
-        queue = self._scheduled_queue if self._is_scheduled(msg) and self._scheduled_workers > 0 else self._user_queue
+        queue = (
+            self._scheduled_queue
+            if self._is_scheduled(msg) and self._scheduled_workers > 0
+            else self._user_queue
+        )
         await queue.put(envelope)
 
     async def enqueue_and_wait(
@@ -114,7 +135,11 @@ class MessageBus:
         hb = Heartbeat(idle_timeout=float(self._config.system.idle_timeout))
         completion: asyncio.Future["TaskResponse"] = loop.create_future()
         envelope = MessageEnvelope(message=msg, heartbeat=hb, completion=completion)
-        queue = self._scheduled_queue if self._is_scheduled(msg) and self._scheduled_workers > 0 else self._user_queue
+        queue = (
+            self._scheduled_queue
+            if self._is_scheduled(msg) and self._scheduled_workers > 0
+            else self._user_queue
+        )
         await queue.put(envelope)
         if timeout is not None:
             return await asyncio.wait_for(completion, timeout=timeout)
@@ -165,12 +190,14 @@ class MessageBus:
         self._worker_tasks = []
         for idx in range(self._user_workers):
             self._worker_tasks.append(
-                asyncio.create_task(self._worker_loop(self._user_queue, f"user-{idx+1}"))
+                asyncio.create_task(
+                    self._worker_loop(self._user_queue, f"user-{idx + 1}")
+                )
             )
         for idx in range(self._scheduled_workers):
             self._worker_tasks.append(
                 asyncio.create_task(
-                    self._worker_loop(self._scheduled_queue, f"scheduled-{idx+1}")
+                    self._worker_loop(self._scheduled_queue, f"scheduled-{idx + 1}")
                 )
             )
         logger.info(
@@ -220,7 +247,9 @@ class MessageBus:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("MessageBus worker %s failed to dispatch envelope", label)
+                logger.exception(
+                    "MessageBus worker %s failed to dispatch envelope", label
+                )
             finally:
                 queue.task_done()
 
@@ -270,7 +299,9 @@ class MessageBus:
                     metadata=msg.metadata,
                 )
             except Exception:
-                logger.warning("Failed to send ack for chat_id=%s", msg.chat_id, exc_info=True)
+                logger.warning(
+                    "Failed to send ack for chat_id=%s", msg.chat_id, exc_info=True
+                )
 
         # Set channel context for this message (contextvars — concurrency safe).
         ctx = ChannelToolContext(
@@ -279,9 +310,9 @@ class MessageBus:
             sender_id=msg.sender_id,
             metadata={
                 **(msg.metadata or {}),
-                "request_received_at": datetime.datetime.now().astimezone().isoformat(
-                    timespec="seconds"
-                ),
+                "request_received_at": datetime.datetime.now()
+                .astimezone()
+                .isoformat(timespec="seconds"),
             },
         )
         ChannelToolContext.set_current(ctx)
@@ -393,21 +424,25 @@ class MessageBus:
                 )
 
         if stream_enabled:
-            try:
-                supports_stream_callback = "stream_callback" in inspect.signature(
-                    self._orchestrator.process_task
-                ).parameters
-            except (TypeError, ValueError):
-                supports_stream_callback = False
-            if supports_stream_callback:
+            if self._supports_stream_callback is None:
+                try:
+                    self._supports_stream_callback = (
+                        "stream_callback"
+                        in inspect.signature(self._orchestrator.process_task).parameters
+                    )
+                except (TypeError, ValueError):
+                    self._supports_stream_callback = False
+            if self._supports_stream_callback:
                 process_kwargs["stream_callback"] = _stream_callback
-        try:
-            supports_runtime_event_callback = "runtime_event_callback" in inspect.signature(
-                self._orchestrator.process_task
-            ).parameters
-        except (TypeError, ValueError):
-            supports_runtime_event_callback = False
-        if supports_runtime_event_callback:
+        if self._supports_runtime_event_callback is None:
+            try:
+                self._supports_runtime_event_callback = (
+                    "runtime_event_callback"
+                    in inspect.signature(self._orchestrator.process_task).parameters
+                )
+            except (TypeError, ValueError):
+                self._supports_runtime_event_callback = False
+        if self._supports_runtime_event_callback:
             process_kwargs["runtime_event_callback"] = _runtime_event_callback
         try:
             response = await heartbeat.watch(

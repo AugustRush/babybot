@@ -604,6 +604,8 @@ class FeishuChannel(BaseChannel):
                     filename = f"{filename}.opus"
 
         if data and filename:
+            # Sanitize filename to prevent path traversal attacks
+            filename = Path(filename).name
             file_path = self._media_dir / filename
             file_path.write_bytes(data)
             return str(file_path), f"[{msg_type}: {filename}]"
@@ -744,7 +746,9 @@ class FeishuChannel(BaseChannel):
             request = (
                 PatchMessageRequest.builder()
                 .message_id(message_id)
-                .request_body(PatchMessageRequestBody.builder().content(content).build())
+                .request_body(
+                    PatchMessageRequestBody.builder().content(content).build()
+                )
                 .build()
             )
             response = self._client.im.v1.message.patch(request)

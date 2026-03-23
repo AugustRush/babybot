@@ -353,6 +353,7 @@ class TestRemoveCancelsRunning:
         sched._running_tasks["t1"] = fake_task
 
         sched.remove_task("t1")
+        await asyncio.sleep(0)
         assert fake_task.cancelled()
 
     @pytest.mark.asyncio

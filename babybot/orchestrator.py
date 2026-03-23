@@ -136,20 +136,26 @@ class OrchestratorAgent:
         context = ExecutionContext(
             session_id=flow_id,
             state={
-                k: v for k, v in [
+                k: v
+                for k, v in [
                     ("tape", tape),
                     ("tape_store", self.tape_store if tape else None),
                     ("memory_store", self.memory_store if tape else None),
                     ("heartbeat", heartbeat),
                     ("media_paths", media_paths),
                     ("original_goal", user_input),
-                    ("context_history_tokens", self.config.system.context_history_tokens),
+                    (
+                        "context_history_tokens",
+                        self.config.system.context_history_tokens,
+                    ),
                     ("stream_callback", stream_callback),
                     ("runtime_event_callback", runtime_event_callback),
-                ] if v is not None
+                ]
+                if v is not None
             },
         )
 
+        logger.info("DynamicOrchestrator created, starting run flow_id=%s", flow_id)
         if heartbeat is not None:
             result = await heartbeat.watch(
                 orchestrator.run(goal=user_input, context=context),
@@ -208,7 +214,9 @@ class OrchestratorAgent:
     def inspect_chat_context(self, chat_key: str, query: str = "") -> str:
         if not chat_key:
             return "缺少 chat_key。"
-        view = build_context_view(memory_store=self.memory_store, chat_id=chat_key, query=query)
+        view = build_context_view(
+            memory_store=self.memory_store, chat_id=chat_key, query=query
+        )
         records = self.memory_store.list_memories(chat_id=chat_key)
         parts = ["[Chat Context]", f"chat_key={chat_key}"]
         if query:
@@ -234,7 +242,9 @@ class OrchestratorAgent:
         return "\n".join(parts)
 
     async def process_task(
-        self, user_input: str, chat_key: str = "",
+        self,
+        user_input: str,
+        chat_key: str = "",
         heartbeat: Heartbeat | None = None,
         media_paths: list[str] | None = None,
         stream_callback: StreamTextCallback | None = None,
@@ -253,7 +263,9 @@ class OrchestratorAgent:
         # --- Tape context ---
         tape: Tape | None = None
         if chat_key:
+            logger.info("Loading tape for chat_key=%s", chat_key)
             tape = self.tape_store.get_or_create(chat_key)
+            logger.info("Tape loaded, observing user message...")
             if hasattr(self, "memory_store"):
                 self.memory_store.observe_user_message(chat_key, user_input)
             pending_entries = []
@@ -265,12 +277,16 @@ class OrchestratorAgent:
             content_for_tape = user_input
             if media_paths:
                 content_for_tape = f"{user_input}\n[附带 {len(media_paths)} 张图片]"
-            user_entry = tape.append("message", {"role": "user", "content": content_for_tape})
+            user_entry = tape.append(
+                "message", {"role": "user", "content": content_for_tape}
+            )
             pending_entries.append(user_entry)
             self.tape_store.save_entries(chat_key, pending_entries)
+            logger.info("Tape entries saved, proceeding to _answer_with_dag")
 
         wrapped_runtime_event_callback = runtime_event_callback
         if tape is not None and chat_key:
+
             async def _record_runtime_event(event: Any) -> None:
                 payload: dict[str, Any]
                 if isinstance(event, dict):
@@ -304,8 +320,11 @@ class OrchestratorAgent:
             wrapped_runtime_event_callback = _record_runtime_event
 
         try:
+            logger.info("Starting _answer_with_dag")
             text, collected_media = await self._answer_with_dag(
-                user_input, tape=tape, heartbeat=heartbeat,
+                user_input,
+                tape=tape,
+                heartbeat=heartbeat,
                 media_paths=media_paths,
                 stream_callback=stream_callback,
                 runtime_event_callback=wrapped_runtime_event_callback,
@@ -315,7 +334,9 @@ class OrchestratorAgent:
 
             # Append assistant response
             if tape and chat_key:
-                asst_entry = tape.append("message", {"role": "assistant", "content": text})
+                asst_entry = tape.append(
+                    "message", {"role": "assistant", "content": text}
+                )
                 self.tape_store.save_entry(chat_key, asst_entry)
                 if hasattr(self, "memory_store"):
                     self.memory_store.observe_assistant_message(chat_key, text)
@@ -391,7 +412,9 @@ class OrchestratorAgent:
                 phase = "continuation"
                 prev_anchor = tape.last_anchor()
                 if prev_anchor:
-                    prev_summary = (prev_anchor.payload.get("state") or {}).get("summary", "")
+                    prev_summary = (prev_anchor.payload.get("state") or {}).get(
+                        "summary", ""
+                    )
                     prev_kws = set(_extract_keywords(prev_summary, max_keywords=12))
                     # Collect recent user messages for keyword comparison
                     recent_user_text = " ".join(
@@ -401,30 +424,38 @@ class OrchestratorAgent:
                     )
                     curr_kws = set(_extract_keywords(recent_user_text, max_keywords=12))
                     if prev_kws and curr_kws:
-                        overlap = len(prev_kws & curr_kws) / max(len(prev_kws), len(curr_kws))
+                        overlap = len(prev_kws & curr_kws) / max(
+                            len(prev_kws), len(curr_kws)
+                        )
                         if overlap < 0.15:
                             phase = "topic_shift"
                             logger.info(
                                 "Topic shift detected chat_key=%s overlap=%.2f",
-                                chat_key, overlap,
+                                chat_key,
+                                overlap,
                             )
 
-                anchor = tape.append("anchor", {
-                    "name": f"compact/{tape.turn_count()}",
-                    "state": {
-                        "summary": summary_text,
-                        "entities": entities,
-                        "user_intent": structured.get("user_intent", ""),
-                        "pending": structured.get("pending", ""),
-                        "next_steps": [str(item) for item in next_steps[:3]],
-                        "artifacts": [str(item) for item in artifacts[:5]],
-                        "open_questions": [str(item) for item in open_questions[:3]],
-                        "decisions": [str(item) for item in decisions[:3]],
-                        "phase": phase,
-                        "source_ids": source_ids,
-                        "turn_count": tape.turn_count(),
+                anchor = tape.append(
+                    "anchor",
+                    {
+                        "name": f"compact/{tape.turn_count()}",
+                        "state": {
+                            "summary": summary_text,
+                            "entities": entities,
+                            "user_intent": structured.get("user_intent", ""),
+                            "pending": structured.get("pending", ""),
+                            "next_steps": [str(item) for item in next_steps[:3]],
+                            "artifacts": [str(item) for item in artifacts[:5]],
+                            "open_questions": [
+                                str(item) for item in open_questions[:3]
+                            ],
+                            "decisions": [str(item) for item in decisions[:3]],
+                            "phase": phase,
+                            "source_ids": source_ids,
+                            "turn_count": tape.turn_count(),
+                        },
                     },
-                })
+                )
                 self.tape_store.save_entry(chat_key, anchor)
                 if hasattr(self, "memory_store"):
                     self.memory_store.observe_anchor_state(
@@ -435,7 +466,9 @@ class OrchestratorAgent:
                 tape.compact_entries()
                 logger.info(
                     "Handoff created anchor chat_key=%s entry_id=%d summarized=%d entries",
-                    chat_key, anchor.entry_id, len(source_ids),
+                    chat_key,
+                    anchor.entry_id,
+                    len(source_ids),
                 )
         except Exception:
             logger.exception("Error in _maybe_handoff for chat_key=%s", chat_key)

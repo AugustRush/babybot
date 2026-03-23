@@ -21,15 +21,67 @@ _LATIN_WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
 
 # High-frequency CJK bigrams that carry little semantic value
 _CJK_STOPWORDS: set[str] = {
-    "的是", "是的", "了吗", "吗？", "怎么", "什么", "这个", "那个",
-    "一个", "不是", "没有", "可以", "我们", "他们", "她们", "你们",
-    "已经", "就是", "还是", "但是", "因为", "所以", "如果", "虽然",
-    "而且", "或者", "以及", "不过", "然后", "这样", "那样", "现在",
-    "知道", "觉得", "应该", "需要", "能够", "可能", "时候", "地方",
+    "的是",
+    "是的",
+    "了吗",
+    "吗？",
+    "怎么",
+    "什么",
+    "这个",
+    "那个",
+    "一个",
+    "不是",
+    "没有",
+    "可以",
+    "我们",
+    "他们",
+    "她们",
+    "你们",
+    "已经",
+    "就是",
+    "还是",
+    "但是",
+    "因为",
+    "所以",
+    "如果",
+    "虽然",
+    "而且",
+    "或者",
+    "以及",
+    "不过",
+    "然后",
+    "这样",
+    "那样",
+    "现在",
+    "知道",
+    "觉得",
+    "应该",
+    "需要",
+    "能够",
+    "可能",
+    "时候",
+    "地方",
 }
 _LATIN_STOPWORDS: set[str] = {
-    "the", "is", "at", "in", "on", "to", "of", "and", "or", "for",
-    "it", "be", "as", "by", "an", "no", "do", "if", "so",
+    "the",
+    "is",
+    "at",
+    "in",
+    "on",
+    "to",
+    "of",
+    "and",
+    "or",
+    "for",
+    "it",
+    "be",
+    "as",
+    "by",
+    "an",
+    "no",
+    "do",
+    "if",
+    "so",
 }
 
 
@@ -101,7 +153,7 @@ def _extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
     for match in _CJK_RE.finditer(text):
         segment = match.group()
         for i in range(len(segment) - 1):
-            bigram = segment[i:i + 2]
+            bigram = segment[i : i + 2]
             if bigram not in seen and bigram not in _CJK_STOPWORDS:
                 seen.add(bigram)
                 keywords.append(bigram)
@@ -138,11 +190,25 @@ class Entry:
 
     @staticmethod
     def message(entry_id: int, role: str, content: str, **meta: Any) -> Entry:
-        return Entry(entry_id, "message", {"role": role, "content": content}, dict(meta), time.time())
+        return Entry(
+            entry_id,
+            "message",
+            {"role": role, "content": content},
+            dict(meta),
+            time.time(),
+        )
 
     @staticmethod
-    def anchor(entry_id: int, name: str, state: dict[str, Any] | None = None, **meta: Any) -> Entry:
-        return Entry(entry_id, "anchor", {"name": name, "state": state or {}}, dict(meta), time.time())
+    def anchor(
+        entry_id: int, name: str, state: dict[str, Any] | None = None, **meta: Any
+    ) -> Entry:
+        return Entry(
+            entry_id,
+            "anchor",
+            {"name": name, "state": state or {}},
+            dict(meta),
+            time.time(),
+        )
 
     @staticmethod
     def tool_call(
@@ -182,7 +248,9 @@ class Entry:
         )
 
     @staticmethod
-    def event(entry_id: int, event: str, payload: dict[str, Any] | None = None, **meta: Any) -> Entry:
+    def event(
+        entry_id: int, event: str, payload: dict[str, Any] | None = None, **meta: Any
+    ) -> Entry:
         return Entry(
             entry_id,
             "event",
@@ -200,7 +268,9 @@ class Tape:
         self.entries: list[Entry] = list(entries) if entries else []
         self._next_id: int = (self.entries[-1].entry_id + 1) if self.entries else 1
 
-    def append(self, kind: str, payload: dict[str, Any], meta: dict[str, Any] | None = None) -> Entry:
+    def append(
+        self, kind: str, payload: dict[str, Any], meta: dict[str, Any] | None = None
+    ) -> Entry:
         entry = Entry(self._next_id, kind, payload, meta or {}, time.time())
         self.entries.append(entry)
         self._next_id += 1
@@ -216,7 +286,7 @@ class Tape:
         """Return all entries after the most recent anchor."""
         for i in range(len(self.entries) - 1, -1, -1):
             if self.entries[i].kind == "anchor":
-                return self.entries[i + 1:]
+                return self.entries[i + 1 :]
         return list(self.entries)
 
     def total_tokens_since_anchor(self) -> int:
@@ -224,7 +294,8 @@ class Tape:
 
     def turn_count(self) -> int:
         return sum(
-            1 for e in self.entries
+            1
+            for e in self.entries
             if e.kind == "message" and e.payload.get("role") == "user"
         )
 
@@ -280,11 +351,17 @@ class TapeStore:
             db.execute("SELECT content FROM entries LIMIT 0")
         except sqlite3.OperationalError:
             db.execute("ALTER TABLE entries ADD COLUMN content TEXT DEFAULT ''")
-        rows = db.execute(
-            "SELECT entry_id, chat_id, kind, payload FROM entries "
-            "WHERE content IS NULL OR content = ''"
-        ).fetchall()
-        if rows:
+        # Backfill empty content in batches to avoid OOM on large DBs.
+        _BATCH = 500
+        while True:
+            rows = db.execute(
+                "SELECT entry_id, chat_id, kind, payload FROM entries "
+                "WHERE content IS NULL OR content = '' "
+                "LIMIT ?",
+                (_BATCH,),
+            ).fetchall()
+            if not rows:
+                break
             db.executemany(
                 "UPDATE entries SET content = ? WHERE chat_id = ? AND entry_id = ?",
                 [
@@ -340,7 +417,10 @@ class TapeStore:
         db.commit()
 
     def search_relevant(
-        self, chat_id: str, query: str, limit: int = 5,
+        self,
+        chat_id: str,
+        query: str,
+        limit: int = 5,
         exclude_ids: set[int] | None = None,
     ) -> list[Entry]:
         """Search across searchable entries for this chat (cross-anchor recall).
@@ -363,8 +443,11 @@ class TapeStore:
         searchable_kinds = ("message", "anchor", "tool_result", "event")
         params: list[str | int] = [chat_id, *searchable_kinds]
         for kw in keywords:
-            conditions.append("content LIKE ?")
-            params.append(f"%{kw}%")
+            conditions.append("content LIKE ? ESCAPE '\\'")
+            escaped_kw = (
+                kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            params.append(f"%{escaped_kw}%")
 
         where_clause = " OR ".join(conditions)
         rows = db.execute(
@@ -380,8 +463,13 @@ class TapeStore:
         stats_select = ["COUNT(*)", "AVG(LENGTH(content))"]
         stats_params: list[str] = []
         for kw in keywords:
-            stats_select.append("SUM(CASE WHEN content LIKE ? THEN 1 ELSE 0 END)")
-            stats_params.append(f"%{kw}%")
+            escaped_kw = (
+                kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            stats_select.append(
+                "SUM(CASE WHEN content LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
+            )
+            stats_params.append(f"%{escaped_kw}%")
         stats = db.execute(
             "SELECT " + ", ".join(stats_select) + " FROM entries "
             "WHERE chat_id=? AND kind IN ('message', 'anchor', 'tool_result', 'event')",
@@ -390,10 +478,7 @@ class TapeStore:
         total_docs = max(1, stats[0])
         avg_dl = max(1.0, float(stats[1] or 100))
 
-        doc_freq = {
-            kw: int(stats[idx + 2] or 0)
-            for idx, kw in enumerate(keywords)
-        }
+        doc_freq = {kw: int(stats[idx + 2] or 0) for idx, kw in enumerate(keywords)}
 
         # BM25 scoring (k1=1.5, b=0.75)
         k1 = 1.5
@@ -445,8 +530,7 @@ class TapeStore:
             ).fetchall()
 
         entries = [
-            Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[4])
-            for r in rows
+            Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[4]) for r in rows
         ]
         return Tape(chat_id, entries)
 
@@ -459,3 +543,13 @@ class TapeStore:
 
     def clear(self) -> None:
         self._cache.clear()
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        self._cache.clear()
+        if self._db is not None:
+            try:
+                self._db.close()
+            except Exception:
+                pass
+            self._db = None

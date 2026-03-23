@@ -36,7 +36,9 @@ class LoopGuard:
         self._config = config
         self._call_counts: dict[str, int] = {}
         self._per_tool_counts: dict[str, int] = {}
-        self._tool_sequence: deque[str] = deque(maxlen=max(2, config.ping_pong_window * 2))
+        self._tool_sequence: deque[str] = deque(
+            maxlen=max(2, config.ping_pong_window * 2)
+        )
 
     @property
     def enabled(self) -> bool:
@@ -79,7 +81,12 @@ class LoopGuard:
         return LoopVerdict()
 
     def compress_messages(self, messages: list[ModelMessage]) -> list[ModelMessage]:
-        """Compact message history when context grows too large."""
+        """Compact message history when context grows too large.
+
+        Preserves tool_call / tool_result pairing integrity: when truncating,
+        the cut point is adjusted so that assistant messages with tool_calls
+        are never separated from their corresponding tool result messages.
+        """
         if (
             not self._config.enabled
             or len(messages) <= self._config.max_context_messages
@@ -108,7 +115,24 @@ class LoopGuard:
         non_system = [m for m in compacted if m.role != "system"]
         window = max(0, self._config.max_context_messages - len(system_messages))
         if len(non_system) > window:
-            non_system = non_system[-window:]
+            cut = len(non_system) - window
+            # Move the cut forward to avoid splitting tool_call / tool_result
+            # pairs.  An assistant message with tool_calls must be followed by
+            # its tool result messages; a tool result message must be preceded
+            # by the assistant message that issued the call.
+            while cut < len(non_system):
+                msg = non_system[cut]
+                if msg.role == "tool":
+                    # This tool result belongs to a preceding assistant
+                    # tool_call that would be discarded — skip it too.
+                    cut += 1
+                elif msg.role == "assistant" and msg.tool_calls:
+                    # Count the tool_call results that follow this assistant
+                    # message; keep them all together.
+                    break
+                else:
+                    break
+            non_system = non_system[cut:]
         compacted = [*system_messages, *non_system]
 
         if len(compacted) <= self._config.max_context_messages:

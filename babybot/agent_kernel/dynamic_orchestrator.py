@@ -202,9 +202,7 @@ def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
     resource_ids: list[str] = []
     if isinstance(raw_multi, (list, tuple)):
         resource_ids.extend(
-            str(item).strip()
-            for item in raw_multi
-            if str(item).strip()
+            str(item).strip() for item in raw_multi if str(item).strip()
         )
     single = str(args.get("resource_id", "") or "").strip()
     if single:
@@ -228,29 +226,38 @@ class InMemoryChildTaskBus:
     def __init__(self) -> None:
         self._events: dict[str, list[ChildTaskEvent]] = {}
         self._subscribers: dict[str, list[asyncio.Queue[ChildTaskEvent]]] = {}
+        self._lock = asyncio.Lock()
 
     async def publish(self, event: ChildTaskEvent) -> None:
-        self._events.setdefault(event.flow_id, []).append(event)
-        for queue in list(self._subscribers.get(event.flow_id, ())):
-            queue.put_nowait(event)
+        async with self._lock:
+            self._events.setdefault(event.flow_id, []).append(event)
+            for queue in list(self._subscribers.get(event.flow_id, ())):
+                queue.put_nowait(event)
 
     def events_for(self, flow_id: str) -> list[ChildTaskEvent]:
         return list(self._events.get(flow_id, ()))
 
     async def subscribe(self, flow_id: str) -> AsyncIterator[ChildTaskEvent]:
         queue: asyncio.Queue[ChildTaskEvent] = asyncio.Queue()
-        self._subscribers.setdefault(flow_id, []).append(queue)
-        for event in self._events.get(flow_id, ()):
-            queue.put_nowait(event)
+        async with self._lock:
+            self._subscribers.setdefault(flow_id, []).append(queue)
+            for event in self._events.get(flow_id, ()):
+                queue.put_nowait(event)
         try:
             while True:
                 yield await queue.get()
         finally:
-            subscribers = self._subscribers.get(flow_id, [])
-            if queue in subscribers:
-                subscribers.remove(queue)
-            if not subscribers:
-                self._subscribers.pop(flow_id, None)
+            async with self._lock:
+                subscribers = self._subscribers.get(flow_id, [])
+                if queue in subscribers:
+                    subscribers.remove(queue)
+                if not subscribers:
+                    self._subscribers.pop(flow_id, None)
+
+    def clear_flow(self, flow_id: str) -> None:
+        """Remove all stored events and subscribers for a completed flow."""
+        self._events.pop(flow_id, None)
+        self._subscribers.pop(flow_id, None)
 
 
 class InProcessChildTaskRuntime:
@@ -288,6 +295,7 @@ class InProcessChildTaskRuntime:
         self._results: dict[str, TaskResult] = {}
         self._task_state: dict[str, dict[str, Any]] = {}
         self._dead_letters: dict[str, dict[str, Any]] = {}
+        self._cancelling = False
 
     @staticmethod
     def _coerce_timeout(raw_value: Any) -> float | None:
@@ -330,7 +338,9 @@ class InProcessChildTaskRuntime:
         return {
             task_id
             for task_id in task_ids
-            if task_id in self._in_flight and task_id in stale and task_id not in self._results
+            if task_id in self._in_flight
+            and task_id in stale
+            and task_id not in self._results
         }
 
     async def _promote_stalled_tasks(self, task_ids: list[str]) -> None:
@@ -353,7 +363,9 @@ class InProcessChildTaskRuntime:
             )
 
     @staticmethod
-    def _normalize_result(task_id: str, result: TaskResult, *, attempts: int) -> TaskResult:
+    def _normalize_result(
+        task_id: str, result: TaskResult, *, attempts: int
+    ) -> TaskResult:
         return TaskResult(
             task_id=task_id,
             status=result.status,
@@ -397,12 +409,14 @@ class InProcessChildTaskRuntime:
         max_attempts: int,
     ) -> TaskResult:
         metadata = dict(result.metadata)
-        metadata.update({
-            "dead_lettered": True,
-            "error_type": error_type,
-            "retryable": retryable,
-            "max_attempts": max_attempts,
-        })
+        metadata.update(
+            {
+                "dead_lettered": True,
+                "error_type": error_type,
+                "retryable": retryable,
+                "max_attempts": max_attempts,
+            }
+        )
         final_result = TaskResult(
             task_id=task_id,
             status="failed",
@@ -487,7 +501,8 @@ class InProcessChildTaskRuntime:
             description=description,
             deps=tuple(deps),
             lease=lease,
-            timeout_s=self._coerce_timeout(args.get("timeout_s")) or self._default_timeout_s,
+            timeout_s=self._coerce_timeout(args.get("timeout_s"))
+            or self._default_timeout_s,
             metadata={
                 "resource_id": primary_resource_id,
                 "resource_ids": list(resource_ids),
@@ -497,7 +512,9 @@ class InProcessChildTaskRuntime:
         child_context = ContextManager(context).fork(
             session_id=f"{context.session_id}:{task_id}",
         )
-        child_context.state["upstream_results"] = context.state.setdefault("upstream_results", {})
+        child_context.state["upstream_results"] = context.state.setdefault(
+            "upstream_results", {}
+        )
         child_context.state["heartbeat"] = self._task_heartbeat_registry.handle(
             flow_id,
             task_id,
@@ -577,7 +594,9 @@ class InProcessChildTaskRuntime:
                         async with self._semaphore:
                             if execution_contract.timeout_s is not None:
                                 raw_result = await asyncio.wait_for(
-                                    self._bridge.execute(execution_contract, child_context),
+                                    self._bridge.execute(
+                                        execution_contract, child_context
+                                    ),
                                     timeout=execution_contract.timeout_s,
                                 )
                             else:
@@ -585,9 +604,13 @@ class InProcessChildTaskRuntime:
                                     execution_contract,
                                     child_context,
                                 )
-                        result = self._normalize_result(task_id, raw_result, attempts=attempt)
+                        result = self._normalize_result(
+                            task_id, raw_result, attempts=attempt
+                        )
                     except asyncio.TimeoutError:
-                        timeout_s = execution_contract.timeout_s or self._default_timeout_s
+                        timeout_s = (
+                            execution_contract.timeout_s or self._default_timeout_s
+                        )
                         result = TaskResult(
                             task_id=task_id,
                             status="failed",
@@ -626,14 +649,19 @@ class InProcessChildTaskRuntime:
                                 },
                             )
                         )
-                        child_media = child_context.state.get("media_paths_collected", [])
+                        child_media = child_context.state.get(
+                            "media_paths_collected", []
+                        )
                         all_media = list(
                             dict.fromkeys(
-                                list(self._result_artifacts(result)) + list(child_media or ())
+                                list(self._result_artifacts(result))
+                                + list(child_media or ())
                             )
                         )
                         if all_media:
-                            context.state.setdefault("media_paths_collected", []).extend(all_media)
+                            context.state.setdefault(
+                                "media_paths_collected", []
+                            ).extend(all_media)
                         break
 
                     decision = classify_error(result.error)
@@ -713,7 +741,9 @@ class InProcessChildTaskRuntime:
         last_progress: float | None = None
         while task_id not in self._results:
             await asyncio.sleep(self._progress_poll_interval_s)
-            snapshot = self._task_heartbeat_registry.snapshot(self._flow_id).get(task_id)
+            snapshot = self._task_heartbeat_registry.snapshot(self._flow_id).get(
+                task_id
+            )
             if not snapshot:
                 continue
             status = str(snapshot.get("status", "") or "").strip()
@@ -722,7 +752,10 @@ class InProcessChildTaskRuntime:
             if isinstance(progress_raw, (int, float)):
                 progress = max(0.0, min(1.0, float(progress_raw)))
             rounded_progress = None if progress is None else round(progress, 2)
-            if status in {"", "idle", "queued", "started", "retrying"} and rounded_progress is None:
+            if (
+                status in {"", "idle", "queued", "started", "retrying"}
+                and rounded_progress is None
+            ):
                 continue
             if status == last_status and rounded_progress == last_progress:
                 continue
@@ -798,56 +831,75 @@ class InProcessChildTaskRuntime:
 
     def get_task_result(self, task_id: str) -> str:
         if task_id in self._in_flight and task_id in self._stale_task_ids([task_id]):
-            return json.dumps({
-                "status": "recoverable",
-                "output": "",
-                "error": "child task heartbeat stalled",
-                "reply_artifacts_ready": False,
-                "reply_artifacts_count": 0,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "status": "recoverable",
+                    "output": "",
+                    "error": "child task heartbeat stalled",
+                    "reply_artifacts_ready": False,
+                    "reply_artifacts_count": 0,
+                },
+                ensure_ascii=False,
+            )
         if task_id in self._results:
             result = self._results[task_id]
             return json.dumps(self._result_payload(result), ensure_ascii=False)
         if task_id in self._in_flight:
-            return json.dumps({
-                "status": "pending",
-                "output": "",
-                "error": "",
-                "reply_artifacts_ready": False,
-                "reply_artifacts_count": 0,
-            }, ensure_ascii=False)
-        if task_id in self._task_state:
-            status = str(self._task_state[task_id].get("status", "") or "")
-            if status in {"queued", "started", "retrying"}:
-                return json.dumps({
+            return json.dumps(
+                {
                     "status": "pending",
                     "output": "",
                     "error": "",
                     "reply_artifacts_ready": False,
                     "reply_artifacts_count": 0,
-                }, ensure_ascii=False)
+                },
+                ensure_ascii=False,
+            )
+        if task_id in self._task_state:
+            status = str(self._task_state[task_id].get("status", "") or "")
+            if status in {"queued", "started", "retrying"}:
+                return json.dumps(
+                    {
+                        "status": "pending",
+                        "output": "",
+                        "error": "",
+                        "reply_artifacts_ready": False,
+                        "reply_artifacts_count": 0,
+                    },
+                    ensure_ascii=False,
+                )
             if status == "recoverable":
                 error = str(
-                    self._task_state[task_id].get("error", "") or "previous run interrupted before completion"
+                    self._task_state[task_id].get("error", "")
+                    or "previous run interrupted before completion"
                 )
-                return json.dumps({
-                    "status": "recoverable",
-                    "output": "",
-                    "error": error,
-                    "reply_artifacts_ready": False,
-                    "reply_artifacts_count": 0,
-                }, ensure_ascii=False)
-        return json.dumps({
-            "status": "not_found",
-            "output": "",
-            "error": f"task not found: {task_id}",
-            "reply_artifacts_ready": False,
-            "reply_artifacts_count": 0,
-        }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "recoverable",
+                        "output": "",
+                        "error": error,
+                        "reply_artifacts_ready": False,
+                        "reply_artifacts_count": 0,
+                    },
+                    ensure_ascii=False,
+                )
+        return json.dumps(
+            {
+                "status": "not_found",
+                "output": "",
+                "error": f"task not found: {task_id}",
+                "reply_artifacts_ready": False,
+                "reply_artifacts_count": 0,
+            },
+            ensure_ascii=False,
+        )
 
     async def cancel_all(self, *, grace_period_s: float = 0.0) -> None:
+        # Prevent new dispatches by clearing the semaphore budget.
+        self._cancelling = True
         tasks = [task for task in self._in_flight.values() if not task.done()]
         if not tasks:
+            self._cancelling = False
             return
         if grace_period_s > 0:
             done, pending = await asyncio.wait(tasks, timeout=grace_period_s)
@@ -858,6 +910,7 @@ class InProcessChildTaskRuntime:
             for task in tasks:
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self._cancelling = False
 
 
 # ── DynamicOrchestrator ──────────────────────────────────────────────────
@@ -885,7 +938,9 @@ class DynamicOrchestrator:
         self._gateway = gateway
         self._bridge = ResourceBridgeExecutor(resource_manager, gateway)
         self._child_task_bus = child_task_bus or InMemoryChildTaskBus()
-        self._task_heartbeat_registry = task_heartbeat_registry or TaskHeartbeatRegistry()
+        self._task_heartbeat_registry = (
+            task_heartbeat_registry or TaskHeartbeatRegistry()
+        )
         self._task_stale_after_s = task_stale_after_s
         self._max_steps = max(1, int(max_steps or self.MAX_STEPS))
         self._default_task_timeout_s = default_task_timeout_s
@@ -915,6 +970,7 @@ class DynamicOrchestrator:
             )
 
         messages = self._build_initial_messages(goal, context)
+        logger.info("DynamicOrchestrator: initial messages built, entering main loop")
         try:
             for step in range(self._max_steps):
                 if heartbeat is not None:
@@ -928,11 +984,13 @@ class DynamicOrchestrator:
                     return FinalResult(conclusion=response.text)
 
                 # Append assistant message with all tool_calls
-                messages.append(ModelMessage(
-                    role="assistant",
-                    content=response.text,
-                    tool_calls=response.tool_calls,
-                ))
+                messages.append(
+                    ModelMessage(
+                        role="assistant",
+                        content=response.text,
+                        tool_calls=response.tool_calls,
+                    )
+                )
 
                 # Process each tool call
                 scheduler_dispatch_succeeded_this_turn = False
@@ -951,20 +1009,26 @@ class DynamicOrchestrator:
                         scheduler_handoff_created=scheduler_handoff_created,
                         scheduler_dispatch_present_this_turn=scheduler_dispatch_present_this_turn,
                         scheduler_dispatch_seen_before_call=scheduler_dispatch_succeeded_this_turn,
-                        prior_live_task_ids_this_turn=tuple(prior_live_task_ids_this_turn),
+                        prior_live_task_ids_this_turn=tuple(
+                            prior_live_task_ids_this_turn
+                        ),
                     )
-                    if tc.name == "dispatch_task" and not result_text.startswith("error:"):
+                    if tc.name == "dispatch_task" and not result_text.startswith(
+                        "error:"
+                    ):
                         task_counter += 1
                         resource_id = tc.arguments.get("resource_id")
                         if resource_id == "group.scheduler":
                             scheduler_dispatch_succeeded_this_turn = True
                         else:
                             prior_live_task_ids_this_turn.append(result_text)
-                    messages.append(ModelMessage(
-                        role="tool",
-                        content=result_text,
-                        tool_call_id=tc.call_id,
-                    ))
+                    messages.append(
+                        ModelMessage(
+                            role="tool",
+                            content=result_text,
+                            tool_call_id=tc.call_id,
+                        )
+                    )
                     if tc.name == "reply_to_user":
                         reply_text = tc.arguments.get("text", result_text)
 
@@ -973,7 +1037,9 @@ class DynamicOrchestrator:
 
                 if reply_text is not None:
                     await runtime.cancel_all()
-                    return FinalResult(conclusion=reply_text, task_results=runtime.results)
+                    return FinalResult(
+                        conclusion=reply_text, task_results=runtime.results
+                    )
 
             await runtime.cancel_all(grace_period_s=5.0)
             return self._build_fallback_result(goal, runtime.results)
@@ -986,7 +1052,9 @@ class DynamicOrchestrator:
     # ── Internal helpers ─────────────────────────────────────────────────
 
     def _build_initial_messages(
-        self, goal: str, context: ExecutionContext,
+        self,
+        goal: str,
+        context: ExecutionContext,
     ) -> list[ModelMessage]:
         briefs = self._rm.get_resource_briefs()
         tape = context.state.get("tape")
@@ -1132,7 +1200,9 @@ class DynamicOrchestrator:
                     "error: scheduled handoff is being created for a later stage; "
                     "do not mix new live tasks into the same turn"
                 )
-            return await runtime.dispatch(dispatch_args, task_counter=task_counter, context=context)
+            return await runtime.dispatch(
+                dispatch_args, task_counter=task_counter, context=context
+            )
         if name == "wait_for_tasks":
             return await runtime.wait_for_tasks(args.get("task_ids", []))
         if name == "get_task_result":

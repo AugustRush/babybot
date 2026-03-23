@@ -21,12 +21,15 @@ class HybridMemoryStore:
         self._db: sqlite3.Connection | None = None
         self._last_maintenance_run_at = 0.0
         self._file_records_cache: dict[str, tuple[int, tuple[MemoryRecord, ...]]] = {}
+        self._bootstrapped = False
 
     @property
     def memory_dir(self) -> Path:
         return self._memory_dir
 
     def ensure_bootstrap(self) -> None:
+        if self._bootstrapped:
+            return
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_db()
         self._bootstrap_json_file(
@@ -55,12 +58,26 @@ class HybridMemoryStore:
             ],
         )
         self._bootstrap_json_file("policies.json", [])
+        self._bootstrapped = True
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        if self._db is not None:
+            try:
+                self._db.close()
+            except Exception:
+                pass
+            self._db = None
+        self._file_records_cache.clear()
+        self._bootstrapped = False
 
     def _bootstrap_json_file(self, name: str, payload: list[dict[str, Any]]) -> None:
         path = self._memory_dir / name
         if path.exists():
             return
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def _ensure_db(self) -> sqlite3.Connection:
         if self._db is None:
@@ -116,7 +133,9 @@ class HybridMemoryStore:
         data = json.loads(path.read_text(encoding="utf-8") or "[]")
         if not isinstance(data, list):
             return []
-        records = tuple(MemoryRecord.from_dict(item) for item in data if isinstance(item, dict))
+        records = tuple(
+            MemoryRecord.from_dict(item) for item in data if isinstance(item, dict)
+        )
         self._file_records_cache[name] = (mtime_ns, records)
         return list(records)
 
@@ -210,12 +229,16 @@ class HybridMemoryStore:
             return record
         if existing.value == record.value:
             existing.summary = record.summary
-            existing.confidence = min(0.98, max(existing.confidence, record.confidence) + 0.1)
+            existing.confidence = min(
+                0.98, max(existing.confidence, record.confidence) + 0.1
+            )
             existing.evidence_count += 1
             existing.status = "active" if existing.evidence_count >= 2 else "candidate"
             existing.last_observed_at = now
             existing.updated_at = now
-            existing.source_ids = tuple(sorted(set(existing.source_ids) | set(record.source_ids)))
+            existing.source_ids = tuple(
+                sorted(set(existing.source_ids) | set(record.source_ids))
+            )
             existing.tags = tuple(sorted(set(existing.tags) | set(record.tags)))
             existing.meta.update(record.meta)
             existing.expires_at = record.expires_at
@@ -227,7 +250,9 @@ class HybridMemoryStore:
         existing.updated_at = now
         self._save_record(existing)
         record.status = "active" if record.tier == "ephemeral" else "candidate"
-        record.confidence = max(record.confidence, 0.7 if record.tier == "soft" else 1.0)
+        record.confidence = max(
+            record.confidence, 0.7 if record.tier == "soft" else 1.0
+        )
         record.supersedes = existing.memory_id
         record.created_at = now
         record.updated_at = now
@@ -239,7 +264,9 @@ class HybridMemoryStore:
         now = time.time()
         if now - self._last_maintenance_run_at >= _MAINTENANCE_INTERVAL_S:
             self.run_maintenance(now=now)
-        records = self._load_file_records("identity.json") + self._load_file_records("policies.json")
+        records = self._load_file_records("identity.json") + self._load_file_records(
+            "policies.json"
+        )
         db = self._ensure_db()
         rows = db.execute(
             """
@@ -286,7 +313,11 @@ class HybridMemoryStore:
             if record.expires_at is not None and record.expires_at <= current_time:
                 next_status = "expired"
             elif record.tier == "soft":
-                if record.status == "candidate" and record.evidence_count <= 1 and age > 7 * 24 * 3600:
+                if (
+                    record.status == "candidate"
+                    and record.evidence_count <= 1
+                    and age > 7 * 24 * 3600
+                ):
                     next_status = "decaying"
                 elif record.status == "decaying" and age > 30 * 24 * 3600:
                     next_status = "expired"
@@ -515,7 +546,9 @@ class HybridMemoryStore:
             if not value:
                 continue
             if isinstance(value, list):
-                summary_value = "，".join(str(item) for item in value if str(item).strip())
+                summary_value = "，".join(
+                    str(item) for item in value if str(item).strip()
+                )
             else:
                 summary_value = str(value).strip()
             if not summary_value:

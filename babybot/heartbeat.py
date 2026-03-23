@@ -134,6 +134,10 @@ class TaskHeartbeatRegistry:
                 }
         return stale
 
+    def clear_flow(self, flow_id: str) -> None:
+        """Remove all heartbeat records for a completed flow."""
+        self._records.pop(flow_id, None)
+
 
 class Heartbeat:
     """Track liveness via periodic beats; cancel work after idle timeout.
@@ -205,7 +209,9 @@ class Heartbeat:
         try:
             while not task.done():
                 self._event.clear()
-                remaining_idle = self.idle_timeout - (time.monotonic() - self._last_beat)
+                remaining_idle = self.idle_timeout - (
+                    time.monotonic() - self._last_beat
+                )
 
                 if deadline is not None:
                     remaining_hard = deadline - loop.time()
