@@ -55,6 +55,16 @@
       "react_emoji": "THUMBSUP",
       "media_dir": "",
       "stream_reply": false
+    },
+    "weixin": {
+      "enabled": false,
+      "base_url": "https://ilinkai.weixin.qq.com",
+      "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+      "token": "",
+      "state_dir": "",
+      "media_dir": "",
+      "poll_timeout": 35,
+      "allow_from": []
     }
   }
 }

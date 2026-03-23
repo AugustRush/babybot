@@ -158,3 +158,69 @@ def test_config_repr_no_longer_reports_custom_tool_count(tmp_path, monkeypatch):
     cfg = Config(config_file=str(config_path))
 
     assert "tools=" not in repr(cfg)
+
+
+def test_weixin_channel_config_loaded_from_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {
+                    "model_name": "test-model",
+                    "api_key": "k",
+                    "api_base": "",
+                    "temperature": 0.7,
+                    "max_tokens": 256,
+                },
+                "channels": {
+                    "weixin": {
+                        "enabled": True,
+                        "base_url": "https://example.invalid",
+                        "token": "tok",
+                        "poll_timeout": 12,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config(config_file=str(config_path))
+    weixin = cfg.get_channel_config("weixin")
+
+    assert weixin.enabled is True
+    assert weixin.base_url == "https://example.invalid"
+    assert weixin.token == "tok"
+    assert weixin.poll_timeout == 12
+
+
+def test_to_dict_includes_weixin_channel_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {
+                    "model_name": "test-model",
+                    "api_key": "k",
+                    "api_base": "",
+                    "temperature": 0.7,
+                    "max_tokens": 256,
+                },
+                "channels": {
+                    "weixin": {
+                        "enabled": True,
+                        "token": "tok",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config(config_file=str(config_path))
+    payload = cfg.to_dict()["channels"]["weixin"]
+
+    assert payload["enabled"] is True
+    assert payload["token"] == "***"

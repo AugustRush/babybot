@@ -68,6 +68,27 @@ class SystemConfig:
 
 
 @dataclass
+class WeixinConfig:
+    """Weixin channel configuration."""
+
+    enabled: bool = False
+    base_url: str = "https://ilinkai.weixin.qq.com"
+    cdn_base_url: str = "https://novac2c.cdn.weixin.qq.com/c2c"
+    token: str = ""
+    state_dir: str = ""
+    media_dir: str = ""
+    poll_timeout: int = 35
+    allow_from: list[str] | tuple[str, ...] = ()
+
+    def validate(self) -> None:
+        """Validate Weixin configuration when enabled."""
+        if not self.enabled:
+            return
+        if not self.token:
+            raise ValueError("token is required when Weixin channel is enabled")
+
+
+@dataclass
 class FeishuConfig:
     """Feishu channel configuration."""
 
@@ -198,6 +219,17 @@ class Config:
             media_dir=feishu_conf.get("media_dir", ""),
             stream_reply=feishu_conf.get("stream_reply", False),
         )
+        weixin_conf = channels_conf.get("weixin", {})
+        self.weixin = WeixinConfig(
+            enabled=weixin_conf.get("enabled", False),
+            base_url=weixin_conf.get("base_url", "https://ilinkai.weixin.qq.com"),
+            cdn_base_url=weixin_conf.get("cdn_base_url", "https://novac2c.cdn.weixin.qq.com/c2c"),
+            token=weixin_conf.get("token", ""),
+            state_dir=weixin_conf.get("state_dir", ""),
+            media_dir=weixin_conf.get("media_dir", ""),
+            poll_timeout=weixin_conf.get("poll_timeout", 35),
+            allow_from=tuple(weixin_conf.get("allow_from", []) or []),
+        )
 
     def _load_config(self) -> None:
         """Load configuration from file."""
@@ -318,6 +350,16 @@ class Config:
                     "react_emoji": "THUMBSUP",
                     "media_dir": "",
                     "stream_reply": False,
+                },
+                "weixin": {
+                    "enabled": False,
+                    "base_url": "https://ilinkai.weixin.qq.com",
+                    "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+                    "token": "",
+                    "state_dir": "",
+                    "media_dir": "",
+                    "poll_timeout": 35,
+                    "allow_from": [],
                 }
             },
         }
@@ -327,13 +369,11 @@ class Config:
         logger.info("Created default config file (fallback)")
 
     def get_channel_config(self, name: str) -> Any:
-        """Get the config object for a specific channel.
-
-        Currently only ``feishu`` is supported; returns ``None`` for unknown
-        channel names so that ``ChannelManager`` can skip them gracefully.
-        """
+        """Get the config object for a specific channel."""
         if name == "feishu":
             return self.feishu
+        if name == "weixin":
+            return self.weixin
         return None
 
     def get_tool_groups(self) -> dict[str, dict]:
@@ -414,6 +454,16 @@ class Config:
                     "react_emoji": self.feishu.react_emoji,
                     "media_dir": self.feishu.media_dir,
                     "stream_reply": self.feishu.stream_reply,
+                },
+                "weixin": {
+                    "enabled": self.weixin.enabled,
+                    "base_url": self.weixin.base_url,
+                    "cdn_base_url": self.weixin.cdn_base_url,
+                    "token": "***" if self.weixin.token else "",
+                    "state_dir": self.weixin.state_dir,
+                    "media_dir": self.weixin.media_dir,
+                    "poll_timeout": self.weixin.poll_timeout,
+                    "allow_from": list(self.weixin.allow_from),
                 }
             },
             "scheduled_tasks_count": len(self.scheduled_tasks),

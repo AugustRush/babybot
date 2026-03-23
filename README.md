@@ -14,9 +14,12 @@
 # 安装依赖
 uv sync
 
+# 准备默认目录
+mkdir -p ~/.babybot ~/.babybot/workspace
+
 # 配置主文件
-cp config.json.example config.json
-# 编辑 config.json，填入模型 API key 等
+cp config.json.example ~/.babybot/config.json
+# 编辑 ~/.babybot/config.json，填入模型 API key 等
 
 # 初始化工作区定时任务文件
 cp scheduled_tasks.json.example ~/.babybot/workspace/scheduled_tasks.json
@@ -142,17 +145,53 @@ uv run gateway
       "react_emoji": "THUMBSUP",
       "media_dir": "",
       "stream_reply": false
+    },
+    "weixin": {
+      "enabled": true,
+      "base_url": "https://ilinkai.weixin.qq.com",
+      "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+      "token": "",
+      "state_dir": "~/.babybot/weixin",
+      "media_dir": "~/.babybot/weixin/media",
+      "poll_timeout": 35,
+      "allow_from": []
     }
   }
 }
 ```
 
+**Feishu 字段**
+
 | 字段 | 说明 |
 |------|------|
 | `group_policy` | `mention` — 群聊中仅 @bot 时响应；`open` — 所有消息都响应 |
 | `reply_mode` | `chat` — 回复到当前会话；`p2p` — 按发送者 open_id 私聊回复 |
-| `media_dir` | 图片等媒体文件下载目录，为空则使用临时目录 |
+| `media_dir` | 图片等媒体文件下载目录，为空则使用默认目录 |
 | `stream_reply` | `true` 启用模型生成期实时流式推送（边生成边 patch 卡片） |
+
+**Weixin 字段**
+
+| 字段 | 说明 |
+|------|------|
+| `base_url` | 微信 long-poll API 地址，通常保持默认即可 |
+| `cdn_base_url` | 微信媒体上传/下载 CDN 地址，通常保持默认即可 |
+| `token` | 已登录后的 bot token；为空时启动会自动进入二维码登录 |
+| `state_dir` | 保存二维码 PNG 和 `account.json` 登录状态 |
+| `media_dir` | 微信图片/文件下载目录，为空则默认到 `~/.babybot/media/weixin` |
+| `poll_timeout` | 长轮询超时时间（秒） |
+| `allow_from` | 允许接入的微信用户 ID 白名单，空数组表示不限制 |
+
+### 微信测试步骤
+
+1. 安装依赖：`uv sync`
+2. 编辑 `~/.babybot/config.json`，填好模型配置，并设置 `channels.weixin.enabled=true`
+3. 若希望每次重新扫码，可先删除 `state_dir/account.json`
+4. 启动网关：`uv run gateway`
+5. 终端会打印二维码或登录 URL，并在 `state_dir/weixin-login-qr.png` 保存二维码图片
+6. 扫码确认后，会在 `state_dir/account.json` 写入登录状态；之后重启会优先复用该状态
+7. 发送文本、图片、文件到该微信账号，BabyBot 会按当前模型与工具能力回复
+
+> 说明：若运行环境未安装 `qrcode` 相关依赖，终端仍会输出登录 URL，但二维码 PNG 可能不会生成。
 
 ### 系统参数
 
