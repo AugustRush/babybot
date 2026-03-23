@@ -1328,6 +1328,23 @@ def test_build_worker_prompt_allows_live_subagents_to_send_final_delivery() -> N
     assert "避免发送中间状态" in prompt
 
 
+def test_build_worker_prompt_guides_skill_edits_to_skill_md_and_verification() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {}
+    prompt = manager._build_worker_sys_prompt(
+        agent_name="Worker",
+        task_description="删除一个技能并给另一个技能增加模型支持",
+        tools_text="_workspace_view_text_file, _workspace_write_text_file",
+        selected_skill_packs=[],
+    )
+
+    assert "SKILL.md" in prompt
+    assert "skill.yaml" in prompt
+    assert "config.yaml" in prompt
+    assert "先检查目标技能是否存在" in prompt
+    assert "output" in prompt
+
+
 def test_build_task_lease_excludes_nested_orchestration_tools_by_default() -> None:
     from babybot.agent_kernel import ToolRegistry
 

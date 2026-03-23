@@ -364,8 +364,14 @@ class InProcessChildTaskRuntime:
 
     @staticmethod
     def _normalize_result(
-        task_id: str, result: TaskResult, *, attempts: int
+        task_id: str,
+        result: TaskResult,
+        *,
+        attempts: int,
+        base_metadata: dict[str, Any] | None = None,
     ) -> TaskResult:
+        metadata = dict(base_metadata or {})
+        metadata.update(dict(result.metadata))
         return TaskResult(
             task_id=task_id,
             status=result.status,
@@ -373,7 +379,7 @@ class InProcessChildTaskRuntime:
             error=result.error,
             artifacts=tuple(result.artifacts or ()),
             attempts=attempts,
-            metadata=dict(result.metadata),
+            metadata=metadata,
         )
 
     @staticmethod
@@ -395,6 +401,21 @@ class InProcessChildTaskRuntime:
             "reply_artifacts_ready": bool(artifacts),
             "reply_artifacts_count": len(artifacts),
         }
+        metadata = dict(result.metadata or {})
+        for key in ("resource_id", "description", "error_type"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                payload[key] = value
+        for key in ("resource_ids", "skill_ids"):
+            value = metadata.get(key)
+            if isinstance(value, (list, tuple)):
+                normalized = [str(item) for item in value if str(item).strip()]
+                if normalized:
+                    payload[key] = normalized
+        if metadata.get("dead_lettered") is True:
+            payload["dead_lettered"] = True
+        if isinstance(metadata.get("retryable"), bool):
+            payload["retryable"] = metadata["retryable"]
         if artifacts:
             payload["reply_artifacts_preview"] = list(artifacts[:3])
         return payload
@@ -507,6 +528,7 @@ class InProcessChildTaskRuntime:
                 "resource_id": primary_resource_id,
                 "resource_ids": list(resource_ids),
                 "skill_ids": merged_skill_ids,
+                "description": description,
             },
         )
         child_context = ContextManager(context).fork(
@@ -605,7 +627,10 @@ class InProcessChildTaskRuntime:
                                     child_context,
                                 )
                         result = self._normalize_result(
-                            task_id, raw_result, attempts=attempt
+                            task_id,
+                            raw_result,
+                            attempts=attempt,
+                            base_metadata=dict(execution_contract.metadata),
                         )
                     except asyncio.TimeoutError:
                         timeout_s = (
@@ -616,6 +641,7 @@ class InProcessChildTaskRuntime:
                             status="failed",
                             error=f"child task timeout after {timeout_s:.2f}s",
                             attempts=attempt,
+                            metadata=dict(execution_contract.metadata),
                         )
                     except Exception as exc:
                         result = TaskResult(
@@ -623,6 +649,7 @@ class InProcessChildTaskRuntime:
                             status="failed",
                             error=str(exc),
                             attempts=attempt,
+                            metadata=dict(execution_contract.metadata),
                         )
 
                     if result.status == "succeeded":

@@ -1159,3 +1159,52 @@ def test_scheduler_stage_blocks_mixed_scheduler_and_live_dispatches_in_same_turn
     assert result.conclusion == "当前阶段结束"
     assert gw.scheduler_dispatch_result.startswith("task_")
     assert "scheduled" in gw.image_dispatch_result.lower()
+
+
+def test_wait_for_tasks_preserves_skill_context_for_failed_tasks() -> None:
+    from babybot.agent_kernel import TaskResult
+    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    class _DummyRM(DummyResourceManager):
+        def resolve_resource_scope(self, resource_id: str, require_tools: bool = False):
+            del require_tools
+            if resource_id == "skill.weather":
+                return {"include_groups": ["skill_weather"]}, ("weather",)
+            return None
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="ignored",
+                status="failed",
+                error="worker crashed",
+            )
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-failed-context",
+        resource_manager=_DummyRM(),  # type: ignore[arg-type]
+        bridge=_Bridge(),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+    )
+
+    async def _run() -> str:
+        task_id = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "查询天气"},
+            task_counter=0,
+            context=ExecutionContext(session_id="flow-failed-context"),
+        )
+        payload = json.loads(await runtime.wait_for_tasks([task_id]))
+        return json.dumps(payload[task_id], ensure_ascii=False)
+
+    payload = json.loads(asyncio.run(_run()))
+
+    assert payload["status"] == "failed"
+    assert payload["resource_id"] == "skill.weather"
+    assert payload["resource_ids"] == ["skill.weather"]
+    assert payload["skill_ids"] == ["weather"]
+    assert payload["description"] == "查询天气"
