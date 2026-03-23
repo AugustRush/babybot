@@ -464,3 +464,16 @@ def test_message_bus_chat_semaphore_uses_lru_eviction() -> None:
     assert added is bus._chat_sems["chat-new"]
     assert "chat-0" in bus._chat_sems
     assert "chat-1" not in bus._chat_sems
+
+
+
+def test_stop_does_not_block_when_queue_is_full() -> None:
+    bus = MessageBus(_Config(), _StreamingOrchestrator(), {})
+
+    async def _run() -> None:
+        bus._running = True
+        bus._accepting = False
+        await bus._user_queue.put(object())  # type: ignore[arg-type]
+        await asyncio.wait_for(bus.stop(drain=False), timeout=0.2)
+
+    asyncio.run(_run())

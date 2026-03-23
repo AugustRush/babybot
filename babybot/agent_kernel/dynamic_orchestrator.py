@@ -1075,6 +1075,7 @@ class DynamicOrchestrator:
                 forwarder_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await forwarder_task
+            self._child_task_bus.clear_flow(flow_id)
 
     # ── Internal helpers ─────────────────────────────────────────────────
 

@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from babybot.agent_kernel import (
     ExecutionContext,
     ModelRequest,
@@ -696,3 +698,23 @@ def test_inspect_chat_context_uses_stable_sectioned_format(tmp_path: Path) -> No
     assert "[Warm Context]" in text
     assert "[Memory Records]" in text
     assert "[Tape Summary]" in text
+
+
+
+def test_spawn_background_task_logs_exception_and_releases_reference(caplog: pytest.LogCaptureFixture) -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._background_tasks = set()
+
+    async def _boom() -> None:
+        raise RuntimeError("handoff boom")
+
+    async def _run() -> None:
+        agent._spawn_background_task(_boom(), label="handoff")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(_run())
+
+    assert agent._background_tasks == set()
+    assert "Background task failed" in caplog.text

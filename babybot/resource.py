@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import (
@@ -78,6 +79,8 @@ if TYPE_CHECKING:
 class CallableTool:
     """Wrap a python callable into kernel Tool protocol."""
 
+    _workspace_cwd_lock = threading.Lock()
+
     def __init__(
         self,
         func: Any,
@@ -134,12 +137,13 @@ class CallableTool:
                 artifact_base = write_root
 
                 def _run_in_workspace() -> Any:
-                    saved_cwd = os.getcwd()
-                    try:
-                        os.chdir(str(write_root))
-                        return self._func(**kwargs)
-                    finally:
-                        os.chdir(saved_cwd)
+                    with self._workspace_cwd_lock:
+                        saved_cwd = os.getcwd()
+                        try:
+                            os.chdir(str(write_root))
+                            return self._func(**kwargs)
+                        finally:
+                            os.chdir(saved_cwd)
 
                 value = await loop.run_in_executor(None, ctx.run, _run_in_workspace)
             return ToolResult(
@@ -1073,6 +1077,21 @@ class ResourceManager:
 
     def delete_scheduled_task_tool(self) -> Any:
         return build_delete_scheduled_task_tool(self)
+
+    async def areset(self) -> None:
+        for client in self.mcp_clients.values():
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.warning("Failed to close MCP client: %s", exc)
+        self.registry = ToolRegistry()
+        self.groups.clear()
+        self.channel_tools.clear()
+        self.mcp_clients.clear()
+        self.mcp_server_groups.clear()
+        self.skills.clear()
+        self._load_config()
+        self._register_builtin_tools()
 
     def reset(self) -> None:
         close_clients_best_effort(self.mcp_clients)

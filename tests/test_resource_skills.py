@@ -7,6 +7,9 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import importlib
+import threading
+import time
+import babybot.resource as resource_module
 
 from babybot.agent_kernel import SkillPack, TaskResult, ToolLease
 from babybot.agent_kernel.tools import ToolContext
@@ -1932,3 +1935,94 @@ def test_inspect_runtime_flow_uses_provider_snapshot(tmp_path: Path) -> None:
     result = manager._inspect_runtime_flow(flow_id="orchestrator:abc123")
 
     assert result == "flow=orchestrator:abc123;chat="
+
+
+
+def test_callable_tool_serializes_workspace_chdir_for_sync_tools(tmp_path: Path, monkeypatch) -> None:
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    active_workspace_switches = 0
+    overlap_detected: list[str] = []
+    started = threading.Event()
+    real_chdir = resource_module.os.chdir
+
+    def fake_chdir(path: str) -> None:
+        nonlocal active_workspace_switches
+        target = str(Path(path))
+        if target in {str(dir_a), str(dir_b)}:
+            active_workspace_switches += 1
+            if active_workspace_switches > 1:
+                overlap_detected.append(target)
+            started.set()
+        else:
+            active_workspace_switches = max(0, active_workspace_switches - 1)
+        real_chdir(path)
+
+    monkeypatch.setattr(resource_module.os, "chdir", fake_chdir)
+
+    class _Manager:
+        def __init__(self, root: Path):
+            self._root = root
+            self._tool_ctx = contextvars.ContextVar("tool_ctx", default=None)
+
+        def _get_current_tool_context_var(self):
+            return self._tool_ctx
+
+        def _get_active_write_root(self) -> Path:
+            return self._root
+
+    def slow_tool() -> str:
+        time.sleep(0.15)
+        return str(Path.cwd())
+
+    tool_a = CallableTool(
+        func=slow_tool,
+        name="slow_a",
+        description="slow",
+        schema={"type": "object", "properties": {}},
+        resource_manager=_Manager(dir_a),
+    )
+    tool_b = CallableTool(
+        func=slow_tool,
+        name="slow_b",
+        description="slow",
+        schema={"type": "object", "properties": {}},
+        resource_manager=_Manager(dir_b),
+    )
+
+    async def _run() -> None:
+        first = asyncio.create_task(tool_a.invoke({}, ToolContext(session_id="s1", state={})))
+        await asyncio.to_thread(started.wait, 1.0)
+        second = asyncio.create_task(tool_b.invoke({}, ToolContext(session_id="s2", state={})))
+        await asyncio.gather(first, second)
+
+    asyncio.run(_run())
+
+    assert overlap_detected == []
+
+
+
+def test_resource_manager_areset_awaits_client_close() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.registry = SimpleNamespace()
+    manager.groups = {}
+    manager.channel_tools = {}
+    manager.mcp_server_groups = {}
+    manager.skills = {}
+    manager._load_config = lambda: None
+    manager._register_builtin_tools = lambda: None
+    closed = {"count": 0}
+
+    class _Client:
+        async def close(self) -> None:
+            closed["count"] += 1
+
+    manager.mcp_clients = {"demo": _Client()}
+
+    asyncio.run(manager.areset())
+
+    assert closed["count"] == 1
+    assert manager.mcp_clients == {}

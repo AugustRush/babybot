@@ -16,6 +16,14 @@ class ToolLease:
     include_groups: tuple[str, ...] = ()
     include_tools: tuple[str, ...] = ()
     exclude_tools: tuple[str, ...] = ()
+    include_groups_set: frozenset[str] = field(init=False, repr=False, compare=False)
+    include_tools_set: frozenset[str] = field(init=False, repr=False, compare=False)
+    exclude_tools_set: frozenset[str] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "include_groups_set", frozenset(self.include_groups))
+        object.__setattr__(self, "include_tools_set", frozenset(self.include_tools))
+        object.__setattr__(self, "exclude_tools_set", frozenset(self.exclude_tools))
 
 
 @dataclass

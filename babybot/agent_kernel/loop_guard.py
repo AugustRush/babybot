@@ -140,6 +140,8 @@ class LoopGuard:
 
         system_messages = [m for m in compacted if m.role == "system"]
         tail = [m for m in compacted if m.role != "system"][-4:]
+        while tail and tail[0].role == "tool":
+            tail = tail[1:]
         return [*system_messages, *tail]
 
     @staticmethod

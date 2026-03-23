@@ -220,9 +220,17 @@ class MessageBus:
 
         # Stop all workers with sentinels.
         for _ in range(self._user_workers):
-            await self._user_queue.put(None)
+            try:
+                self._user_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                logger.warning("User queue full during stop; cancelling workers")
+                break
         for _ in range(self._scheduled_workers):
-            await self._scheduled_queue.put(None)
+            try:
+                self._scheduled_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                logger.warning("Scheduled queue full during stop; cancelling workers")
+                break
 
         if self._worker_tasks:
             done, pending = await asyncio.wait(self._worker_tasks, timeout=15.0)

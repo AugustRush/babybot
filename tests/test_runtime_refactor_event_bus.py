@@ -140,11 +140,22 @@ def test_dynamic_orchestrator_emits_child_task_lifecycle_events() -> None:
         child_task_bus=bus,
     )
 
-    asyncio.run(orchestrator.run("查天气", ExecutionContext(session_id="flow-1")))
+    async def _run() -> list[str]:
+        seen: list[str] = []
 
-    events = bus.events_for("flow-1")
-    assert [event.event for event in events] == ["queued", "started", "succeeded"]
-    assert len({event.task_id for event in events}) == 1
+        async def _collect() -> None:
+            async for event in bus.subscribe("flow-1"):
+                seen.append(event.event)
+                if event.event == "succeeded":
+                    break
+
+        collector = asyncio.create_task(_collect())
+        await orchestrator.run("查天气", ExecutionContext(session_id="flow-1"))
+        await collector
+        return seen
+
+    events = asyncio.run(_run())
+    assert events == ["queued", "started", "succeeded"]
 
 
 def test_dynamic_orchestrator_uses_in_memory_state_only_by_default() -> None:

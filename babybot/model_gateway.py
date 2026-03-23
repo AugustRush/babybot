@@ -28,12 +28,17 @@ T = TypeVar("T", bound=BaseModel)
 StreamTextCallback = Callable[[str], Awaitable[None] | None]
 logger = logging.getLogger(__name__)
 
+_MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024
+
 
 def _image_to_content_part(image_ref: str) -> dict[str, Any]:
     """File path or data URI → OpenAI image_url content part."""
     if image_ref.startswith("data:"):
         return {"type": "image_url", "image_url": {"url": image_ref}}
     path = Path(image_ref)
+    size = path.stat().st_size
+    if size > _MAX_INLINE_IMAGE_BYTES:
+        raise ValueError(f"Image too large for inline upload: {size} bytes")
     mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
     b64 = base64.b64encode(path.read_bytes()).decode("ascii")
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
@@ -70,8 +75,8 @@ class OpenAICompatibleGateway(ModelProvider):
         if self._client is not None:
             try:
                 await self._client.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to close model client: %s", exc)
             self._client = None
 
     async def _call_stream_callback(
@@ -211,12 +216,14 @@ class OpenAICompatibleGateway(ModelProvider):
 
     @staticmethod
     def _decode_partial_json_string(raw: str) -> str:
-        candidate = raw
-        while candidate:
+        for trim in range(0, min(len(raw), 6) + 1):
+            candidate = raw if trim == 0 else raw[:-trim]
+            if not candidate:
+                break
             try:
                 return json.loads(f'"{candidate}"')
             except json.JSONDecodeError:
-                candidate = candidate[:-1]
+                continue
         return ""
 
     def _parse_tool_calls(

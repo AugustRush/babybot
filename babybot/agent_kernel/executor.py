@@ -14,7 +14,7 @@ from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import ExecutionContext, TaskContract, TaskResult, ToolLease
 from ..context_views import build_context_view_messages
-from ..context import Entry, _extract_keywords
+from ..context import Entry, _estimate_token_count, _extract_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -480,9 +480,9 @@ class SingleAgentExecutor:
 
     @staticmethod
     def _tool_allowed(group: str, name: str, lease: ToolLease) -> bool:
-        include_groups = set(lease.include_groups)
-        include_tools = set(lease.include_tools)
-        exclude_tools = set(lease.exclude_tools)
+        include_groups = lease.include_groups_set
+        include_tools = lease.include_tools_set
+        exclude_tools = lease.exclude_tools_set
         if name in exclude_tools:
             return False
         if include_tools or include_groups:
@@ -723,7 +723,7 @@ def _build_history_messages(
             query=query,
         )
         for message in memory_messages:
-            cost = max(1, len(message.content) // 3)
+            cost = max(1, _estimate_token_count(message.content))
             if budget_remaining < cost:
                 continue
             messages.append(message)

@@ -105,7 +105,33 @@ class MemoryRecord:
         )
 
     @classmethod
-    def from_row(cls, row: tuple[Any, ...]) -> "MemoryRecord":
+    def from_row(cls, row: Any) -> "MemoryRecord":
+        if hasattr(row, "keys"):
+            payload = {key: row[key] for key in row.keys()}
+            return cls(
+                memory_id=payload["memory_id"],
+                memory_type=payload["memory_type"],
+                key=payload["key"],
+                value=json.loads(payload["value"]),
+                summary=payload["summary"],
+                tier=payload["tier"],
+                scope=payload["scope"],
+                scope_id=payload["scope_id"],
+                status=payload["status"],
+                confidence=float(payload["confidence"]),
+                evidence_count=int(payload["evidence_count"]),
+                contradiction_count=int(payload["contradiction_count"]),
+                source_ids=tuple(json.loads(payload["source_ids"] or "[]")),
+                last_observed_at=float(payload["last_observed_at"]),
+                last_used_at=float(payload["last_used_at"]),
+                expires_at=float(payload["expires_at"]) if payload.get("expires_at") is not None else None,
+                supersedes=payload["supersedes"],
+                superseded_by=payload["superseded_by"],
+                tags=tuple(json.loads(payload["tags"] or "[]")),
+                meta=json.loads(payload["meta"] or "{}"),
+                created_at=float(payload["created_at"]),
+                updated_at=float(payload["updated_at"]),
+            )
         return cls(
             memory_id=row[0],
             memory_type=row[1],

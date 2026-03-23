@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from babybot.agent_kernel import ContextManager, ExecutionContext, TaskResult
 from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
 from babybot.heartbeat import Heartbeat, TaskHeartbeatRegistry
@@ -102,3 +104,17 @@ def test_wait_for_tasks_uses_per_task_heartbeat_to_surface_stalled_child() -> No
 
     assert results[stalled_id]["status"] == "recoverable"
     assert results[stalled_id]["error"] == "child task heartbeat stalled"
+
+
+
+def test_watch_preserves_external_cancelled_error() -> None:
+    heartbeat = Heartbeat(idle_timeout=30)
+
+    async def _run() -> None:
+        task = asyncio.create_task(heartbeat.watch(asyncio.sleep(5)))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())

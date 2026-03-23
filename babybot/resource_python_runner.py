@@ -302,7 +302,7 @@ class ExternalPythonRunner:
                 if value is None:
                     continue
                 argv_tail.extend([spec.flag, self.format_cli_argument(value)])
-            timeout_s = owner._coerce_timeout(kwargs.get("timeout"), default=300.0)
+            timeout_s = owner._coerce_timeout(kwargs.get("_babybot_timeout"), default=300.0)
             attempts: list[str] = []
             for candidate in owner._get_python_candidates(runtime):
                 scoped_candidate = dict(candidate)
@@ -417,7 +417,7 @@ class ExternalPythonRunner:
             "    print(MARK + json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))\n"
         )
         args_json = json.dumps(arguments or {}, ensure_ascii=False)
-        timeout_s = owner._coerce_timeout(arguments.get("timeout"), default=300.0)
+        timeout_s = owner._coerce_timeout(arguments.get("_babybot_timeout"), default=300.0)
         attempts: list[str] = []
         last_tool_error = "Tool error: external execution failed."
         for candidate in owner._get_python_candidates(runtime):

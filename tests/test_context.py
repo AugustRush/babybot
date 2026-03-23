@@ -731,3 +731,19 @@ class TestBuildHistoryMessages:
         cold_text = "\n".join(view.cold)
         assert "默认中文" in warm_text
         assert "独立开发者" in cold_text
+
+
+
+def test_load_from_db_without_anchor_limits_recent_entries(tmp_path: Path) -> None:
+    store = TapeStore(db_path=tmp_path / "context.db")
+    tape = store.get_or_create("chat1")
+    entries = []
+    for idx in range(250):
+        entries.append(tape.append("message", {"role": "user", "content": f"msg-{idx}"}))
+    store.save_entries("chat1", entries)
+
+    loaded = store._load_from_db("chat1")
+
+    assert len(loaded.entries) == 200
+    assert loaded.entries[0].payload["content"] == "msg-50"
+    assert loaded.entries[-1].payload["content"] == "msg-249"

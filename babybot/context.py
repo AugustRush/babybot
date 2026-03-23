@@ -15,6 +15,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_NO_ANCHOR_RECENT_LIMIT = 200
+
 # CJK Unicode ranges for keyword extraction
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+")
 _LATIN_WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
@@ -83,6 +85,12 @@ _LATIN_STOPWORDS: set[str] = {
     "if",
     "so",
 }
+
+
+def _estimate_token_count(text: str) -> int:
+    cjk_chars = sum(1 for ch in text if _CJK_RE.match(ch))
+    other_chars = max(0, len(text) - cjk_chars)
+    return max(1, math.ceil(cjk_chars / 1.8 + other_chars / 4.0))
 
 
 def _payload_search_text(kind: str, payload: dict[str, Any]) -> str:
@@ -181,7 +189,7 @@ class Entry:
 
     def __post_init__(self) -> None:
         if self._token_est < 0:
-            est = len(json.dumps(self.payload, ensure_ascii=False)) // 3
+            est = _estimate_token_count(json.dumps(self.payload, ensure_ascii=False))
             object.__setattr__(self, "_token_est", est)
 
     @property
@@ -525,9 +533,10 @@ class TapeStore:
         else:
             rows = db.execute(
                 "SELECT entry_id, kind, payload, meta, timestamp FROM entries "
-                "WHERE chat_id=? ORDER BY entry_id",
-                (chat_id,),
+                "WHERE chat_id=? ORDER BY entry_id DESC LIMIT ?",
+                (chat_id, _NO_ANCHOR_RECENT_LIMIT),
             ).fetchall()
+            rows.reverse()
 
         entries = [
             Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[4]) for r in rows
@@ -550,6 +559,6 @@ class TapeStore:
         if self._db is not None:
             try:
                 self._db.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to close TapeStore DB: %s", exc)
             self._db = None

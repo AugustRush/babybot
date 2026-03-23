@@ -130,3 +130,12 @@ def test_executor_no_media_paths():
     media_paths = ctx.state.get("media_paths") or ()
     msg = ModelMessage(role="user", content="hello", images=tuple(media_paths))
     assert msg.images == ()
+
+
+
+def test_image_to_content_part_rejects_oversized_file(tmp_path: Path) -> None:
+    image_path = tmp_path / "big.png"
+    image_path.write_bytes(b"0" * (20 * 1024 * 1024 + 1))
+
+    with pytest.raises(ValueError):
+        _image_to_content_part(str(image_path))

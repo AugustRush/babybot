@@ -54,6 +54,7 @@ class TaskResponse:
 class OrchestratorAgent:
     _FLOW_CACHE_LIMIT = 256
     _HANDOFF_LOCK_LIMIT = 256
+    _DYNAMIC_ORCHESTRATOR_PARAMETERS: set[str] | None = None
 
     """Orchestrator — dynamic multi-agent mode via DynamicOrchestrator."""
 
@@ -79,6 +80,7 @@ class OrchestratorAgent:
         self._init_lock = asyncio.Lock()
         self._initialized = False
         self._recent_flow_ids_by_chat: OrderedDict[str, str] = OrderedDict()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def _remember_flow_id(self, chat_key: str, flow_id: str) -> None:
         if not isinstance(self._recent_flow_ids_by_chat, OrderedDict):
@@ -99,6 +101,31 @@ class OrchestratorAgent:
             self._handoff_locks.popitem(last=False)
         return lock
 
+    def _spawn_background_task(
+        self,
+        coro: Awaitable[Any],
+        *,
+        label: str,
+    ) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro)
+        background_tasks = getattr(self, "_background_tasks", None)
+        if background_tasks is None:
+            background_tasks = set()
+            self._background_tasks = background_tasks
+        background_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[Any]) -> None:
+            getattr(self, "_background_tasks", set()).discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Background task failed: %s", label)
+
+        task.add_done_callback(_on_done)
+        return task
+
     async def _answer_with_dag(
         self,
         user_input: str,
@@ -112,10 +139,13 @@ class OrchestratorAgent:
             "resource_manager": self.resource_manager,
             "gateway": self.gateway,
         }
-        try:
-            parameters = inspect.signature(DynamicOrchestrator).parameters
-        except (TypeError, ValueError):
-            parameters = {}
+        parameters = self._DYNAMIC_ORCHESTRATOR_PARAMETERS
+        if parameters is None:
+            try:
+                parameters = set(inspect.signature(DynamicOrchestrator).parameters)
+            except (TypeError, ValueError):
+                parameters = set()
+            self._DYNAMIC_ORCHESTRATOR_PARAMETERS = parameters
         optional_kwargs = {
             "child_task_bus": getattr(self, "_child_task_bus", None),
             "task_heartbeat_registry": getattr(self, "_task_heartbeat_registry", None),
@@ -341,7 +371,10 @@ class OrchestratorAgent:
                 if hasattr(self, "memory_store"):
                     self.memory_store.observe_assistant_message(chat_key, text)
                 # Fire-and-forget async handoff check
-                asyncio.create_task(self._maybe_handoff(tape, chat_key))
+                self._spawn_background_task(
+                    self._maybe_handoff(tape, chat_key),
+                    label=f"handoff:{chat_key}",
+                )
 
             return TaskResponse(text=text, media_paths=collected_media)
         except Exception as exc:

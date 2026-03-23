@@ -441,9 +441,13 @@ class ScheduledTaskManager:
     def __init__(self, config: Any, scheduler: CronScheduler | None = None) -> None:
         self._config = config
         self._scheduler = scheduler
+        self._defs_cache: list[ScheduledTaskDef] | None = None
 
     def bind_scheduler(self, scheduler: CronScheduler | None) -> None:
         self._scheduler = scheduler
+
+    def _invalidate_defs_cache(self) -> None:
+        self._defs_cache = None
 
     @staticmethod
     def _schedule_key(cron: str | None, interval_seconds: float | None) -> str:
@@ -514,6 +518,8 @@ class ScheduledTaskManager:
             )
 
     def _load_defs(self) -> list[ScheduledTaskDef]:
+        if self._defs_cache is not None:
+            return list(self._defs_cache)
         raw_tasks = self._config.get_scheduled_tasks()
         seen: set[str] = set()
         defs: list[ScheduledTaskDef] = []
@@ -523,10 +529,12 @@ class ScheduledTaskManager:
                 raise ValueError(f"Duplicate scheduled task name: {task.name}")
             seen.add(task.name)
             defs.append(task)
-        return defs
+        self._defs_cache = list(defs)
+        return list(defs)
 
     def _save_defs(self, defs: list[ScheduledTaskDef]) -> None:
         self._config.save_scheduled_tasks([task.to_dict() for task in defs])
+        self._defs_cache = list(defs)
 
     def list_tasks(self) -> list[dict[str, Any]]:
         if self._scheduler is not None:

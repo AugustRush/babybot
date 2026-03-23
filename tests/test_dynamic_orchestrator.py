@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from babybot.agent_kernel import ExecutionContext, ModelRequest, ModelResponse, ModelToolCall
-from babybot.agent_kernel.dynamic_orchestrator import DynamicOrchestrator, _build_resource_catalog
+from babybot.agent_kernel.dynamic_orchestrator import DynamicOrchestrator, InMemoryChildTaskBus, _build_resource_catalog
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -1208,3 +1208,46 @@ def test_wait_for_tasks_preserves_skill_context_for_failed_tasks() -> None:
     assert payload["resource_ids"] == ["skill.weather"]
     assert payload["skill_ids"] == ["weather"]
     assert payload["description"] == "查询天气"
+
+
+
+def test_child_task_bus_clears_events_after_flow_completion() -> None:
+    step1 = ModelResponse(
+        text="",
+        tool_calls=(_dispatch_tool_call("skill.weather", "查询天气", call_id="c1"),),
+        finish_reason="tool_calls",
+    )
+
+    class _Gateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([step1])
+            self._task_id = ""
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            if self._call_idx == 0:
+                return await super().generate(request, context)
+            if self._call_idx == 1:
+                for msg in reversed(request.messages):
+                    if msg.role == "tool" and msg.content and not msg.content.startswith("error:"):
+                        self._task_id = msg.content
+                        break
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            return _reply_tool_call("done", call_id="c3")
+
+    bus = InMemoryChildTaskBus()
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(),
+        gateway=_Gateway(),
+        child_task_bus=bus,
+    )
+    context = ExecutionContext(session_id="flow-test")
+
+    result = asyncio.run(orch.run("查询天气", context))
+
+    assert result.conclusion == "done"
+    assert bus.events_for("flow-test") == []

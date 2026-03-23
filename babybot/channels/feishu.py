@@ -86,9 +86,8 @@ def _extract_interactive_content(content: dict | str) -> list[str]:
         elif isinstance(title, str):
             parts.append(f"title: {title}")
 
-    for elements in (
-        content.get("elements", []) if isinstance(content.get("elements"), list) else []
-    ):
+    elements = content.get("elements", [])
+    if isinstance(elements, list):
         for element in elements:
             parts.extend(_extract_element_content(element))
 
@@ -318,7 +317,7 @@ class FeishuChannel(BaseChannel):
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
-        self._processed_lock = threading.Lock()
+        self._processed_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # Resolve media directory
@@ -410,6 +409,25 @@ class FeishuChannel(BaseChannel):
     async def stop(self) -> None:
         """Stop Feishu channel."""
         self._running = False
+        ws_client = self._ws_client
+        ws_thread = self._ws_thread
+        self._ws_client = None
+        self._ws_thread = None
+
+        for obj, method_name in ((ws_client, "stop"), (self._client, "close")):
+            method = getattr(obj, method_name, None)
+            if callable(method):
+                try:
+                    result = method()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:
+                    logger.warning("Error stopping Feishu resource %s: %s", method_name, exc)
+
+        self._client = None
+
+        if ws_thread is not None:
+            await asyncio.get_running_loop().run_in_executor(None, ws_thread.join, 5.0)
 
     def get_channel_tools(self) -> FeishuChannelTools | None:
         """Return Feishu channel tools for registration."""
@@ -1116,7 +1134,7 @@ class FeishuChannel(BaseChannel):
                 return
 
             message_id = getattr(message, "message_id", "")
-            with self._processed_lock:
+            async with self._processed_lock:
                 if message_id in self._processed_message_ids:
                     return
                 self._processed_message_ids[message_id] = None

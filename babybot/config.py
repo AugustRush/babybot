@@ -130,15 +130,8 @@ class Config:
             config_file: Path to config file.
                 Defaults to `$BABYBOT_CONFIG` or `~/.babybot/config.json`.
         """
-        self.home_dir = Path(os.getenv("BABYBOT_HOME", "~/.babybot")).expanduser()
-        self.workspace_dir = Path(
-            os.getenv("BABYBOT_WORKSPACE", str(self.home_dir / "workspace"))
-        ).expanduser()
-        self.builtin_skills_dir = Path(__file__).resolve().parent.parent / "skills"
-        self.workspace_skills_dir = self.workspace_dir / "skills"
-        self.workspace_tools_dir = self.workspace_dir / "tools"
-        self.scheduled_tasks_file = self.workspace_dir / "scheduled_tasks.json"
-
+        env_home = os.getenv("BABYBOT_HOME", "")
+        env_workspace = os.getenv("BABYBOT_WORKSPACE", "")
         if config_file:
             self.config_file = Path(config_file).expanduser()
         else:
@@ -146,8 +139,23 @@ class Config:
             self.config_file = (
                 Path(env_config).expanduser()
                 if env_config
-                else self.home_dir / "config.json"
+                else Path(env_home or "~/.babybot").expanduser() / "config.json"
             )
+
+        if env_home:
+            self.home_dir = Path(env_home).expanduser()
+        elif config_file:
+            self.home_dir = self.config_file.parent
+        else:
+            self.home_dir = Path("~/.babybot").expanduser()
+
+        self.workspace_dir = Path(
+            env_workspace or str(self.home_dir / "workspace")
+        ).expanduser()
+        self.builtin_skills_dir = Path(__file__).resolve().parent.parent / "skills"
+        self.workspace_skills_dir = self.workspace_dir / "skills"
+        self.workspace_tools_dir = self.workspace_dir / "tools"
+        self.scheduled_tasks_file = self.workspace_dir / "scheduled_tasks.json"
         self.raw_config: dict[str, Any] = {}
         self.is_bootstrapped = False
         self.scheduled_tasks: list[dict[str, Any]] = []

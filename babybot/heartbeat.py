@@ -206,6 +206,7 @@ class Heartbeat:
         self._last_beat = time.monotonic()
         self._event.clear()
 
+        cancelled_by_watch = False
         try:
             while not task.done():
                 self._event.clear()
@@ -216,6 +217,8 @@ class Heartbeat:
                 if deadline is not None:
                     remaining_hard = deadline - loop.time()
                     if remaining_hard <= 0:
+                        cancelled_by_watch = True
+                        cancelled_by_watch = True
                         task.cancel()
                         raise asyncio.TimeoutError(
                             f"Hard timeout ({hard_timeout}s) exceeded"
@@ -225,6 +228,7 @@ class Heartbeat:
                     wait_time = remaining_idle
 
                 if wait_time <= 0:
+                    cancelled_by_watch = True
                     task.cancel()
                     raise asyncio.TimeoutError(
                         f"Idle timeout ({self.idle_timeout}s) — no heartbeat"
@@ -270,7 +274,8 @@ class Heartbeat:
 
             return await task
         except asyncio.CancelledError:
-            # If the task was cancelled by us, convert to TimeoutError.
+            if cancelled_by_watch:
+                raise asyncio.TimeoutError("Task cancelled during heartbeat watch")
             if not task.done():
                 task.cancel()
-            raise asyncio.TimeoutError("Task cancelled during heartbeat watch")
+            raise

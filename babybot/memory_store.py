@@ -65,8 +65,8 @@ class HybridMemoryStore:
         if self._db is not None:
             try:
                 self._db.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to close memory store DB: %s", exc)
             self._db = None
         self._file_records_cache.clear()
         self._bootstrapped = False
