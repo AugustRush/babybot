@@ -65,6 +65,15 @@ class OpenAICompatibleGateway(ModelProvider):
         self._client = AsyncOpenAI(**kwargs)
         return self._client
 
+    async def close(self) -> None:
+        """Release the underlying HTTP client resources."""
+        if self._client is not None:
+            try:
+                await self._client.close()
+            except Exception:
+                pass
+            self._client = None
+
     async def _call_stream_callback(
         self,
         callback: StreamTextCallback | None,
@@ -263,7 +272,9 @@ class OpenAICompatibleGateway(ModelProvider):
             stream = await client.chat.completions.create(**kwargs, stream=True)
             async for chunk in stream:
                 for choice in getattr(chunk, "choices", []) or []:
-                    finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                    finish_reason = (
+                        getattr(choice, "finish_reason", None) or finish_reason
+                    )
                     delta = getattr(choice, "delta", None)
                     if delta is None:
                         continue
@@ -296,7 +307,9 @@ class OpenAICompatibleGateway(ModelProvider):
 
                     next_text = streamed_text
                     if not saw_content_text:
-                        next_text = self._extract_reply_text_from_stream_tool_calls(tool_calls)
+                        next_text = self._extract_reply_text_from_stream_tool_calls(
+                            tool_calls
+                        )
                     if next_text and next_text != streamed_text:
                         streamed_text = next_text
                         await self._call_stream_callback(on_stream_text, streamed_text)
@@ -359,8 +372,11 @@ class OpenAICompatibleGateway(ModelProvider):
         step = meta.get("step", "?")
         logger.info(
             "LLM request task=%s step=%s model=%s tools=%d msgs=%d",
-            task_id, step, self._config.model.model_name,
-            tool_count, len(messages),
+            task_id,
+            step,
+            self._config.model.model_name,
+            tool_count,
+            len(messages),
         )
         per_call_timeout = max(1.0, float(self._config.system.subtask_timeout))
         logger.info(
@@ -426,8 +442,12 @@ class OpenAICompatibleGateway(ModelProvider):
         tc_names = [tc.name for tc in tool_calls]
         logger.info(
             "LLM response task=%s step=%s elapsed=%.2fs finish=%s text_len=%d tool_calls=%s",
-            task_id, step, elapsed, choice.finish_reason,
-            len(content), tc_names or "none",
+            task_id,
+            step,
+            elapsed,
+            choice.finish_reason,
+            len(content),
+            tc_names or "none",
         )
         usage = completion.usage
         metadata: dict[str, Any] = {
@@ -529,15 +549,21 @@ class OpenAICompatibleGateway(ModelProvider):
                 try:
                     data = json.loads(cleaned[start : end + 1])
                 except json.JSONDecodeError:
-                    logger.warning("LLM structured parse failed model=%s", model_cls.__name__)
+                    logger.warning(
+                        "LLM structured parse failed model=%s", model_cls.__name__
+                    )
                     return None
             else:
-                logger.warning("LLM structured parse failed model=%s", model_cls.__name__)
+                logger.warning(
+                    "LLM structured parse failed model=%s", model_cls.__name__
+                )
                 return None
         try:
             return model_cls.model_validate(data)
         except Exception:
-            logger.warning("LLM structured validation failed model=%s", model_cls.__name__)
+            logger.warning(
+                "LLM structured validation failed model=%s", model_cls.__name__
+            )
             return None
 
     @staticmethod
@@ -549,7 +575,9 @@ class OpenAICompatibleGateway(ModelProvider):
                 parts.append({"type": "text", "text": message.content})
             for img in message.images:
                 if not _is_supported_image_ref(img):
-                    logger.warning("Skipping non-image attachment for multimodal input: %s", img)
+                    logger.warning(
+                        "Skipping non-image attachment for multimodal input: %s", img
+                    )
                     continue
                 try:
                     parts.append(_image_to_content_part(img))
