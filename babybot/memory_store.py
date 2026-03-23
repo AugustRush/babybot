@@ -11,6 +11,7 @@ from .memory_models import MemoryRecord
 
 
 _ACTIVE_STATUSES = ("candidate", "active", "decaying")
+_MAINTENANCE_INTERVAL_S = 300.0
 
 
 class HybridMemoryStore:
@@ -18,6 +19,8 @@ class HybridMemoryStore:
         self._db_path = Path(db_path)
         self._memory_dir = Path(memory_dir)
         self._db: sqlite3.Connection | None = None
+        self._last_maintenance_run_at = 0.0
+        self._file_records_cache: dict[str, tuple[int, tuple[MemoryRecord, ...]]] = {}
 
     @property
     def memory_dir(self) -> Path:
@@ -104,13 +107,20 @@ class HybridMemoryStore:
     def _load_file_records(self, name: str) -> list[MemoryRecord]:
         path = self._memory_dir / name
         if not path.exists():
+            self._file_records_cache.pop(name, None)
             return []
+        mtime_ns = path.stat().st_mtime_ns
+        cached = self._file_records_cache.get(name)
+        if cached is not None and cached[0] == mtime_ns:
+            return list(cached[1])
         data = json.loads(path.read_text(encoding="utf-8") or "[]")
         if not isinstance(data, list):
             return []
-        return [MemoryRecord.from_dict(item) for item in data if isinstance(item, dict)]
+        records = tuple(MemoryRecord.from_dict(item) for item in data if isinstance(item, dict))
+        self._file_records_cache[name] = (mtime_ns, records)
+        return list(records)
 
-    def _save_record(self, record: MemoryRecord) -> None:
+    def _save_record(self, record: MemoryRecord, *, commit: bool = True) -> None:
         db = self._ensure_db()
         db.execute(
             """
@@ -146,7 +156,8 @@ class HybridMemoryStore:
                 record.updated_at,
             ),
         )
-        db.commit()
+        if commit:
+            db.commit()
 
     def _find_current(
         self,
@@ -226,7 +237,8 @@ class HybridMemoryStore:
     def list_memories(self, chat_id: str = "") -> list[MemoryRecord]:
         self.ensure_bootstrap()
         now = time.time()
-        self.run_maintenance(now=now)
+        if now - self._last_maintenance_run_at >= _MAINTENANCE_INTERVAL_S:
+            self.run_maintenance(now=now)
         records = self._load_file_records("identity.json") + self._load_file_records("policies.json")
         db = self._ensure_db()
         rows = db.execute(
@@ -284,11 +296,12 @@ class HybridMemoryStore:
                 record.status = next_status
                 record.expires_at = next_expires
                 record.updated_at = current_time
-                self._save_record(record)
+                self._save_record(record, commit=False)
                 changed = True
 
         if changed:
             db.commit()
+        self._last_maintenance_run_at = current_time
 
     def observe_user_message(self, chat_id: str, content: str) -> None:
         text = (content or "").strip()

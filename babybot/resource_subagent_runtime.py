@@ -121,6 +121,7 @@ class ResourceSubagentRuntime:
         started = time.perf_counter()
         scope_token: contextvars.Token[ToolLease | None] | None = None
         skill_ids_token: contextvars.Token[tuple[str, ...] | None] | None = None
+        worker_depth_token: contextvars.Token[int] | None = None
         try:
             merged_lease = self._owner._build_task_lease(lease or {})
             skill_packs = await self._owner._select_skill_packs(
@@ -135,6 +136,10 @@ class ResourceSubagentRuntime:
             scope_token = self._owner._get_current_task_lease_var().set(merged_lease)
             skill_ids_token = self._owner._get_current_skill_ids_var().set(
                 tuple(skill_ids) if skill_ids is not None else None
+            )
+            parent_depth = self._owner._get_current_worker_depth_var().get()
+            worker_depth_token = self._owner._get_current_worker_depth_var().set(
+                int(parent_depth) + 1
             )
             tools_text = (
                 ", ".join(
@@ -211,6 +216,8 @@ class ResourceSubagentRuntime:
             logger.exception("Run subagent crashed agent=%s", agent_name)
             raise
         finally:
+            if worker_depth_token is not None:
+                self._owner._get_current_worker_depth_var().reset(worker_depth_token)
             if skill_ids_token is not None:
                 self._owner._get_current_skill_ids_var().reset(skill_ids_token)
             if scope_token is not None:

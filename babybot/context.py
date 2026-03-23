@@ -368,7 +368,7 @@ class TapeStore:
 
         where_clause = " OR ".join(conditions)
         rows = db.execute(
-            f"SELECT entry_id, kind, payload, meta, timestamp FROM entries "
+            f"SELECT entry_id, kind, payload, meta, content, timestamp FROM entries "
             f"WHERE chat_id=? AND kind IN (?, ?, ?, ?) AND ({where_clause}) "
             f"ORDER BY entry_id DESC LIMIT ?",
             [*params, limit * 3],
@@ -377,24 +377,23 @@ class TapeStore:
         if not rows:
             return []
 
-        # Fetch total searchable count + avg content length for BM25
+        stats_select = ["COUNT(*)", "AVG(LENGTH(content))"]
+        stats_params: list[str] = []
+        for kw in keywords:
+            stats_select.append("SUM(CASE WHEN content LIKE ? THEN 1 ELSE 0 END)")
+            stats_params.append(f"%{kw}%")
         stats = db.execute(
-            "SELECT COUNT(*), AVG(LENGTH(content)) FROM entries "
+            "SELECT " + ", ".join(stats_select) + " FROM entries "
             "WHERE chat_id=? AND kind IN ('message', 'anchor', 'tool_result', 'event')",
-            (chat_id,),
+            (*stats_params, chat_id),
         ).fetchone()
         total_docs = max(1, stats[0])
         avg_dl = max(1.0, float(stats[1] or 100))
 
-        # Batch doc frequency: one query per keyword on content column
-        doc_freq: dict[str, int] = {}
-        for kw in keywords:
-            df_row = db.execute(
-                "SELECT COUNT(*) FROM entries "
-                "WHERE chat_id=? AND kind IN ('message', 'anchor', 'tool_result', 'event') AND content LIKE ?",
-                (chat_id, f"%{kw}%"),
-            ).fetchone()
-            doc_freq[kw] = df_row[0] if df_row else 0
+        doc_freq = {
+            kw: int(stats[idx + 2] or 0)
+            for idx, kw in enumerate(keywords)
+        }
 
         # BM25 scoring (k1=1.5, b=0.75)
         k1 = 1.5
@@ -404,8 +403,8 @@ class TapeStore:
             eid = r[0]
             if eid in exclude:
                 continue
-            entry = Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[4])
-            content = _payload_search_text(entry.kind, entry.payload)
+            entry = Entry(r[0], r[1], json.loads(r[2]), json.loads(r[3]), r[5])
+            content = r[4] or ""
             dl = len(content)
             score = 0.0
             for kw in keywords:

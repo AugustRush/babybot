@@ -343,6 +343,37 @@ class TestTapeStore:
         assert len(results) >= 1
         assert "小猪" in results[0].payload["content"]
 
+    def test_search_relevant_uses_bounded_sql_queries(self, tmp_path, monkeypatch):
+        store = self._make_store(tmp_path)
+        tape = store.get_or_create("chat1")
+        entries = [
+            tape.append("message", {"role": "user", "content": "画一只黑色小猪"}),
+            tape.append("message", {"role": "assistant", "content": "好的，已生成黑色小猪图片"}),
+            tape.append("tool_result", {"name": "generate_image", "ok": True, "content_preview": "黑色小猪", "artifacts": []}),
+        ]
+        store.save_entries("chat1", entries)
+
+        db = store._ensure_db()
+        execute_count = {"value": 0}
+
+        class _DBProxy:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def execute(self, *args, **kwargs):
+                execute_count["value"] += 1
+                return self._wrapped.execute(*args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        monkeypatch.setattr(store, "_ensure_db", lambda: _DBProxy(db))
+
+        results = store.search_relevant("chat1", "黑色 小猪", limit=5)
+
+        assert results
+        assert execute_count["value"] <= 3
+
 
 # ── _build_history_messages ────────────────────────────────────────
 

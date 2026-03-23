@@ -74,6 +74,17 @@ Add detailed reference material for {skill_title}.
 EXAMPLE_ASSET = "Replace this placeholder with a real asset if needed.\n"
 
 
+def _example_resource_specs(skill_name: str, skill_title: str) -> dict[str, tuple[str, str]]:
+    return {
+        "scripts": ("_example.py", EXAMPLE_SCRIPT.format(skill_name=skill_name)),
+        "references": (
+            "reference.md",
+            EXAMPLE_REFERENCE.format(skill_title=skill_title),
+        ),
+        "assets": ("example.txt", EXAMPLE_ASSET),
+    }
+
+
 def _normalize_skill_name(skill_name: str) -> str:
     normalized = skill_name.strip().lower()
     normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
@@ -275,30 +286,23 @@ def _create_resource_dirs(
     resources: list[str],
     include_examples: bool,
 ) -> None:
+    example_specs = _example_resource_specs(skill_name, skill_title)
     for resource in resources:
         resource_dir = skill_dir / resource
         resource_dir.mkdir(parents=True, exist_ok=True)
         if not include_examples:
+            example_name, example_content = example_specs[resource]
+            example_path = resource_dir / example_name
+            if example_path.exists() and example_path.read_text(encoding="utf-8") == example_content:
+                example_path.unlink()
             continue
+        example_name, example_content = example_specs[resource]
+        example_path = resource_dir / example_name
+        if example_path.exists():
+            continue
+        example_path.write_text(example_content, encoding="utf-8")
         if resource == "scripts":
-            example_script = resource_dir / "_example.py"
-            if not example_script.exists():
-                example_script.write_text(
-                    EXAMPLE_SCRIPT.format(skill_name=skill_name),
-                    encoding="utf-8",
-                )
-                example_script.chmod(0o755)
-        elif resource == "references":
-            example_reference = resource_dir / "reference.md"
-            if not example_reference.exists():
-                example_reference.write_text(
-                    EXAMPLE_REFERENCE.format(skill_title=skill_title),
-                    encoding="utf-8",
-                )
-        elif resource == "assets":
-            example_asset = resource_dir / "example.txt"
-            if not example_asset.exists():
-                example_asset.write_text(EXAMPLE_ASSET, encoding="utf-8")
+            example_path.chmod(0o755)
 
 
 def init_skill(

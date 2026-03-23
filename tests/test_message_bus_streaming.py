@@ -445,3 +445,22 @@ def test_message_bus_dedupes_repeated_runtime_progress_messages() -> None:
     assert len(channel.sent) == 2
     assert "30%" in channel.sent[0].text
     assert channel.sent[1].text == "done"
+
+
+def test_message_bus_chat_semaphore_uses_lru_eviction() -> None:
+    cfg = _Config()
+    cfg.system.max_concurrency = 2
+    bus = MessageBus(cfg, _StreamingOrchestrator(), {})
+
+    bus._chat_sems = {
+        f"chat-{idx}": asyncio.Semaphore(1)
+        for idx in range(2000)
+    }
+
+    recent = bus._get_chat_sem("chat-0")
+    added = bus._get_chat_sem("chat-new")
+
+    assert recent is bus._chat_sems["chat-0"]
+    assert added is bus._chat_sems["chat-new"]
+    assert "chat-0" in bus._chat_sems
+    assert "chat-1" not in bus._chat_sems

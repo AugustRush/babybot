@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import time
 
 from babybot.memory_store import HybridMemoryStore
@@ -163,3 +164,81 @@ def test_hybrid_memory_store_maintenance_decays_and_expires_stale_candidates(tmp
     records = store.list_memories(chat_id="feishu:chat-1")
     keys = {(record.memory_type, record.key, str(record.value)) for record in records}
     assert ("relationship_policy", "default_language", "zh-CN") not in keys
+
+
+def test_hybrid_memory_store_throttles_maintenance_between_list_calls(tmp_path, monkeypatch) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    store.ensure_bootstrap()
+
+    current_time = {"value": 1000.0}
+    runs: list[float] = []
+
+    monkeypatch.setattr("babybot.memory_store.time.time", lambda: current_time["value"])
+
+    original_run_maintenance = store.run_maintenance
+
+    def _wrapped_run_maintenance(now=None):
+        runs.append(float(now if now is not None else current_time["value"]))
+        return original_run_maintenance(now=now)
+
+    monkeypatch.setattr(store, "run_maintenance", _wrapped_run_maintenance)
+
+    store.list_memories(chat_id="feishu:chat-1")
+    current_time["value"] += 1
+    store.list_memories(chat_id="feishu:chat-1")
+    current_time["value"] += 301
+    store.list_memories(chat_id="feishu:chat-1")
+
+    assert len(runs) == 2
+
+
+def test_hybrid_memory_store_run_maintenance_batches_record_saves(tmp_path, monkeypatch) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    store.ensure_bootstrap()
+
+    store.observe_user_message("feishu:chat-1", "以后默认用中文")
+    store.observe_user_message("feishu:chat-2", "Please reply in English from now on")
+
+    commit_flags: list[bool] = []
+    original_save_record = store._save_record
+
+    def _wrapped_save_record(record, *args, **kwargs):
+        commit_flags.append(bool(kwargs.get("commit", True)))
+        return original_save_record(record, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_save_record", _wrapped_save_record)
+
+    store.run_maintenance(now=time.time() + 8 * 24 * 3600)
+
+    assert commit_flags
+    assert all(flag is False for flag in commit_flags)
+
+
+def test_hybrid_memory_store_caches_static_file_records_between_reads(tmp_path, monkeypatch) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    store.ensure_bootstrap()
+
+    read_counts = {"identity.json": 0, "policies.json": 0}
+    original_read_text = Path.read_text
+
+    def _wrapped_read_text(path_obj, *args, **kwargs):
+        if path_obj.name in read_counts:
+            read_counts[path_obj.name] += 1
+        return original_read_text(path_obj, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _wrapped_read_text)
+
+    store.list_memories(chat_id="feishu:chat-1")
+    store.list_memories(chat_id="feishu:chat-1")
+    store.list_memories(chat_id="feishu:chat-2")
+
+    assert read_counts == {"identity.json": 1, "policies.json": 1}

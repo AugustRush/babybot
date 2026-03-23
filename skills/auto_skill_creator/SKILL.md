@@ -79,6 +79,8 @@ python skills/auto_skill_creator/scripts/init_skill.py "<skill name>" \
    - Any public Python script in `scripts/` must expose at least one top-level callable function that the agent can invoke directly.
    - Do not leave upstream demo CLIs as the public tool surface. Wrap them in a stable function such as `generate_image(prompt: str, ...) -> str`.
    - Helper modules, pure clients, and demo entrypoints should be named with a leading underscore such as `_client.py` or `_demo.py` so they are not auto-registered as tools.
+   - Write persistent files directly into the target skill folder. Do not leave generated skill files in `/workspace/output` or any other temporary artifact directory.
+   - If scaffolding created placeholder files such as `scripts/_example.py`, `references/reference.md`, or `assets/example.txt`, replace them with real content or delete them before finishing.
 6. Validate before finishing:
 
 ```bash
@@ -128,4 +130,5 @@ python skills/auto_skill_creator/scripts/quick_validate.py <skill-directory>
 - Keep `SKILL.md` focused on triggering conditions, workflow, and expected outputs.
 - Do not change `babybot` runtime skill discovery just to support a new skill layout.
 - For workspace skills, never write generated files into project root.
+- For workspace skills, do not leave generated skill files under `/workspace/output`; move final files into the skill directory and remove temporary artifacts.
 - For builtin skills, keep the files inside repository `skills/`.

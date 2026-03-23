@@ -1,0 +1,1446 @@
+- generic [ref=e2]:
+  - region
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner "Global Navigation Menu" [ref=e8]:
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - button "Open menu" [ref=e12] [cursor=pointer]:
+            - img [ref=e13]
+          - link "Homepage (g then d)" [ref=e15] [cursor=pointer]:
+            - /url: /
+            - img [ref=e16]
+        - generic [ref=e18]:
+          - navigation "Breadcrumbs" [ref=e19]:
+            - list [ref=e20]:
+              - listitem [ref=e21]:
+                - link "EverMind-AI" [ref=e22] [cursor=pointer]:
+                  - /url: /EverMind-AI
+                  - generic [ref=e23]: EverMind-AI
+              - listitem [ref=e24]:
+                - link "EverMemOS" [ref=e25] [cursor=pointer]:
+                  - /url: /EverMind-AI/EverMemOS
+                  - generic [ref=e26]: EverMemOS
+          - button "Search or jump to…" [ref=e29] [cursor=pointer]:
+            - generic [ref=e30]:
+              - generic:
+                - img
+              - generic [ref=e31]:
+                - generic:
+                  - text: Type
+                  - generic: /
+                  - text: to search
+        - generic [ref=e32]:
+          - generic [ref=e33]:
+            - generic [ref=e35]:
+              - link "Chat with Copilot" [ref=e37] [cursor=pointer]:
+                - /url: /copilot
+                - img [ref=e38]
+              - button "Open Copilot…" [ref=e42] [cursor=pointer]:
+                - generic:
+                  - img
+            - button "Create new..." [ref=e44] [cursor=pointer]:
+              - generic [ref=e45]:
+                - generic:
+                  - img
+              - generic:
+                - img
+            - link "Issues" [ref=e46] [cursor=pointer]:
+              - /url: /issues
+              - img [ref=e47]
+            - link "Pull requests" [ref=e50] [cursor=pointer]:
+              - /url: /pulls
+              - img [ref=e51]
+            - link "Repositories" [ref=e53] [cursor=pointer]:
+              - /url: /repos
+              - img [ref=e54]
+          - link "You have unread notifications (g then n)" [ref=e56] [cursor=pointer]:
+            - /url: /notifications
+            - img [ref=e57]
+          - button "Open user navigation menu" [ref=e60] [cursor=pointer]:
+            - img "August" [ref=e61]
+      - heading "Repository navigation" [level=2] [ref=e62]
+      - navigation "Repository" [ref=e63]:
+        - list [ref=e64]:
+          - listitem [ref=e65]:
+            - link "Code" [ref=e66] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS
+              - img [ref=e68]
+              - generic [ref=e70]: Code
+          - listitem [ref=e71]:
+            - link "Issues (46)" [ref=e72] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS/issues
+              - img [ref=e74]
+              - generic [ref=e77]: Issues
+              - generic [ref=e78]:
+                - generic [ref=e79]: "46"
+                - generic [ref=e80]: (46)
+          - listitem [ref=e81]:
+            - link "Pull requests (26)" [ref=e82] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS/pulls
+              - img [ref=e84]
+              - generic [ref=e86]: Pull requests
+              - generic [ref=e87]:
+                - generic [ref=e88]: "26"
+                - generic [ref=e89]: (26)
+          - listitem [ref=e90]:
+            - link "Discussions" [ref=e91] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS/discussions
+              - img [ref=e93]
+              - generic [ref=e95]: Discussions
+          - listitem [ref=e96]:
+            - link "Actions" [ref=e97] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS/actions
+              - img [ref=e99]
+              - generic [ref=e101]: Actions
+          - listitem [ref=e102]:
+            - link "Projects" [ref=e103] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS/projects
+              - img [ref=e105]
+              - generic [ref=e107]: Projects
+          - listitem [ref=e108]:
+            - link "Security" [ref=e109] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS/security
+              - img [ref=e111]
+              - generic [ref=e113]: Security
+          - listitem [ref=e114]:
+            - link "Insights" [ref=e115] [cursor=pointer]:
+              - /url: /EverMind-AI/EverMemOS/pulse
+              - img [ref=e117]
+              - generic [ref=e119]: Insights
+  - main [ref=e123]:
+    - generic [ref=e129]:
+      - heading "Commits" [level=1] [ref=e133]
+      - generic [ref=e138]:
+        - generic [ref=e139]:
+          - heading "Branch selector" [level=2] [ref=e140]
+          - button "main branch" [ref=e141] [cursor=pointer]:
+            - generic [ref=e142]:
+              - generic [ref=e144]:
+                - img [ref=e146]
+                - generic [ref=e149]: main
+              - generic:
+                - img
+          - generic [ref=e150]:
+            - heading "User selector" [level=2] [ref=e151]
+            - button "All users" [ref=e153] [cursor=pointer]:
+              - generic [ref=e156]:
+                - img [ref=e158]
+                - generic [ref=e160]: All users
+              - generic:
+                - img
+            - heading "Datepicker" [level=2] [ref=e161]
+            - button "All time" [ref=e162] [cursor=pointer]:
+              - generic [ref=e163]:
+                - generic:
+                  - img
+                - generic [ref=e164]: All time
+                - generic:
+                  - img
+        - generic [ref=e165]:
+          - heading "Commit History" [level=2] [ref=e166]
+          - generic [ref=e167]:
+            - generic [ref=e168]:
+              - img [ref=e171]
+              - generic [ref=e173]:
+                - heading "Commits on Mar 19, 2026" [level=3] [ref=e174]
+                - list "Commits on Mar 19, 2026" [ref=e177]:
+                  - 'listitem "feat: add EverOS OpenClaw Plugin with memory management capabilities. More information available below." [ref=e178]':
+                    - generic [ref=e179]:
+                      - 'heading "feat: add EverOS OpenClaw Plugin with memory management capabilities" [level=4] [ref=e180]':
+                        - 'link "feat: add EverOS OpenClaw Plugin with memory management capabilities" [ref=e182] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/3c9a2d02460748310c7707048f7ed6b6bb078ab4
+                      - button "Show description for 3c9a2d0" [ref=e183] [cursor=pointer]:
+                        - img [ref=e184]
+                    - generic [ref=e190]:
+                      - generic [ref=e191]:
+                        - link "alwaysday1" [ref=e192] [cursor=pointer]:
+                          - /url: /alwaysday1
+                          - img "alwaysday1" [ref=e193]
+                        - link "commits by alwaysday1" [ref=e194] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=alwaysday1
+                          - text: alwaysday1
+                      - generic [ref=e195]: committed
+                      - generic "Mar 19, 2026, 4:19 PM GMT+8" [ref=e196]: Mar 19, 20263 days ago
+                    - generic [ref=e199]:
+                      - generic [ref=e200]:
+                        - tooltip "View commit details" [ref=e201]:
+                          - link "3c9a2d0" [ref=e202] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/3c9a2d02460748310c7707048f7ed6b6bb078ab4
+                            - generic [ref=e204]: 3c9a2d0
+                        - button "Copy full SHA for 3c9a2d0" [ref=e206] [cursor=pointer]:
+                          - img [ref=e207]
+                      - tooltip "Browse repository at this point" [ref=e210]:
+                        - link "Browse repository at this point" [ref=e211] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/tree/3c9a2d02460748310c7707048f7ed6b6bb078ab4
+                          - img [ref=e212]
+            - generic [ref=e214]:
+              - img [ref=e217]
+              - generic [ref=e219]:
+                - heading "Commits on Mar 8, 2026" [level=3] [ref=e220]
+                - list "Commits on Mar 8, 2026" [ref=e223]:
+                  - 'listitem "docs: add Chinese translation of README (#125). More information available below." [ref=e224]':
+                    - 'heading "docs: add Chinese translation of README (#125)" [level=4] [ref=e226]':
+                      - generic [ref=e227]:
+                        - 'link "docs: add Chinese translation of README (" [ref=e228] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/8cb6d0197503e2f0f0f439e1208efc4d3c429bcc
+                        - link "#125" [ref=e229] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/125
+                        - link ")" [ref=e230] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/8cb6d0197503e2f0f0f439e1208efc4d3c429bcc
+                    - generic [ref=e235]:
+                      - generic [ref=e236]:
+                        - link "cyfyifanchen" [ref=e237] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e238]
+                        - link "commits by cyfyifanchen" [ref=e239] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e240]: authored
+                      - generic "Mar 8, 2026, 4:48 PM GMT+8" [ref=e241]: Mar 8, 20262 weeks ago
+                    - generic [ref=e242]:
+                      - button "Verified" [ref=e244] [cursor=pointer]
+                      - generic [ref=e245]:
+                        - generic [ref=e246]:
+                          - tooltip "View commit details" [ref=e247]:
+                            - link "8cb6d01" [ref=e248] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/8cb6d0197503e2f0f0f439e1208efc4d3c429bcc
+                              - generic [ref=e250]: 8cb6d01
+                          - button "Copy full SHA for 8cb6d01" [ref=e252] [cursor=pointer]:
+                            - img [ref=e253]
+                        - tooltip "Browse repository at this point" [ref=e256]:
+                          - link "Browse repository at this point" [ref=e257] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/8cb6d0197503e2f0f0f439e1208efc4d3c429bcc
+                            - img [ref=e258]
+            - generic [ref=e260]:
+              - img [ref=e263]
+              - generic [ref=e265]:
+                - heading "Commits on Mar 7, 2026" [level=3] [ref=e266]
+                - list "Commits on Mar 7, 2026" [ref=e269]:
+                  - 'listitem "docs: update banner GIF URL in README (#122). More information available below." [ref=e270]':
+                    - 'heading "docs: update banner GIF URL in README (#122)" [level=4] [ref=e272]':
+                      - generic [ref=e273]:
+                        - 'link "docs: update banner GIF URL in README (" [ref=e274] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/b9136180298c09b6bbee17d2794766a88586f12a
+                        - link "#122" [ref=e275] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/122
+                        - link ")" [ref=e276] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/b9136180298c09b6bbee17d2794766a88586f12a
+                    - generic [ref=e281]:
+                      - generic [ref=e282]:
+                        - link "cyfyifanchen" [ref=e283] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e284]
+                        - link "commits by cyfyifanchen" [ref=e285] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e286]: authored
+                      - generic "Mar 7, 2026, 2:20 PM GMT+8" [ref=e287]: Mar 7, 20262 weeks ago
+                    - generic [ref=e288]:
+                      - button "Verified" [ref=e290] [cursor=pointer]
+                      - generic [ref=e291]:
+                        - generic [ref=e292]:
+                          - tooltip "View commit details" [ref=e293]:
+                            - link "b913618" [ref=e294] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/b9136180298c09b6bbee17d2794766a88586f12a
+                              - generic [ref=e296]: b913618
+                          - button "Copy full SHA for b913618" [ref=e298] [cursor=pointer]:
+                            - img [ref=e299]
+                        - tooltip "Browse repository at this point" [ref=e302]:
+                          - link "Browse repository at this point" [ref=e303] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/b9136180298c09b6bbee17d2794766a88586f12a
+                            - img [ref=e304]
+                  - 'listitem "docs: update usecase banner image and fix link (#121). More information available below." [ref=e306]':
+                    - generic [ref=e307]:
+                      - 'heading "docs: update usecase banner image and fix link (#121)" [level=4] [ref=e308]':
+                        - generic [ref=e309]:
+                          - 'link "docs: update usecase banner image and fix link (" [ref=e310] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/004355dea98813f1b97e59581fc9b42453c2eff6
+                          - link "#121" [ref=e311] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/121
+                          - link ")" [ref=e312] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/004355dea98813f1b97e59581fc9b42453c2eff6
+                      - button "Show description for 004355d" [ref=e313] [cursor=pointer]:
+                        - img [ref=e314]
+                    - generic [ref=e320]:
+                      - generic [ref=e321]:
+                        - link "cyfyifanchen" [ref=e322] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e323]
+                        - link "commits by cyfyifanchen" [ref=e324] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e325]: authored
+                      - generic "Mar 7, 2026, 8:59 AM GMT+8" [ref=e326]: Mar 7, 20262 weeks ago
+                    - generic [ref=e327]:
+                      - button "Verified" [ref=e329] [cursor=pointer]
+                      - generic [ref=e330]:
+                        - generic [ref=e331]:
+                          - tooltip "View commit details" [ref=e332]:
+                            - link "004355d" [ref=e333] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/004355dea98813f1b97e59581fc9b42453c2eff6
+                              - generic [ref=e335]: 004355d
+                          - button "Copy full SHA for 004355d" [ref=e337] [cursor=pointer]:
+                            - img [ref=e338]
+                        - tooltip "Browse repository at this point" [ref=e341]:
+                          - link "Browse repository at this point" [ref=e342] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/004355dea98813f1b97e59581fc9b42453c2eff6
+                            - img [ref=e343]
+                  - 'listitem "docs: update README with corrected links and plugin info (#119). More information available below." [ref=e345]':
+                    - generic [ref=e346]:
+                      - 'heading "docs: update README with corrected links and plugin info (#119)" [level=4] [ref=e347]':
+                        - generic [ref=e348]:
+                          - 'link "docs: update README with corrected links and plugin info (" [ref=e349] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/ba62be64718793e8009c8d9a01ca977569c7704b
+                          - link "#119" [ref=e350] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/119
+                          - link ")" [ref=e351] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/ba62be64718793e8009c8d9a01ca977569c7704b
+                      - button "Show description for ba62be6" [ref=e352] [cursor=pointer]:
+                        - img [ref=e353]
+                    - generic [ref=e359]:
+                      - generic [ref=e360]:
+                        - link "cyfyifanchen" [ref=e361] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e362]
+                        - link "commits by cyfyifanchen" [ref=e363] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e364]: authored
+                      - generic "Mar 7, 2026, 8:54 AM GMT+8" [ref=e365]: Mar 7, 20262 weeks ago
+                    - generic [ref=e366]:
+                      - button "Verified" [ref=e368] [cursor=pointer]
+                      - generic [ref=e369]:
+                        - generic [ref=e370]:
+                          - tooltip "View commit details" [ref=e371]:
+                            - link "ba62be6" [ref=e372] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/ba62be64718793e8009c8d9a01ca977569c7704b
+                              - generic [ref=e374]: ba62be6
+                          - button "Copy full SHA for ba62be6" [ref=e376] [cursor=pointer]:
+                            - img [ref=e377]
+                        - tooltip "Browse repository at this point" [ref=e380]:
+                          - link "Browse repository at this point" [ref=e381] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/ba62be64718793e8009c8d9a01ca977569c7704b
+                            - img [ref=e382]
+            - generic [ref=e384]:
+              - img [ref=e387]
+              - generic [ref=e389]:
+                - heading "Commits on Mar 6, 2026" [level=3] [ref=e390]
+                - list "Commits on Mar 6, 2026" [ref=e393]:
+                  - 'listitem "docs: update README with link to agent_memory branch (#117). More information available below." [ref=e394]':
+                    - 'heading "docs: update README with link to agent_memory branch (#117)" [level=4] [ref=e396]':
+                      - generic [ref=e397]:
+                        - 'link "docs: update README with link to agent_memory branch (" [ref=e398] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/c2fdcb502d1bfd56684f06b2a692254ecfb64839
+                        - link "#117" [ref=e399] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/117
+                        - link ")" [ref=e400] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/c2fdcb502d1bfd56684f06b2a692254ecfb64839
+                    - generic [ref=e405]:
+                      - generic [ref=e406]:
+                        - link "cyfyifanchen" [ref=e407] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e408]
+                        - link "commits by cyfyifanchen" [ref=e409] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e410]: authored
+                      - generic "Mar 6, 2026, 6:54 PM GMT+8" [ref=e411]: Mar 6, 20262 weeks ago
+                    - generic [ref=e412]:
+                      - button "Verified" [ref=e414] [cursor=pointer]
+                      - generic [ref=e415]:
+                        - generic [ref=e416]:
+                          - tooltip "View commit details" [ref=e417]:
+                            - link "c2fdcb5" [ref=e418] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/c2fdcb502d1bfd56684f06b2a692254ecfb64839
+                              - generic [ref=e420]: c2fdcb5
+                          - button "Copy full SHA for c2fdcb5" [ref=e422] [cursor=pointer]:
+                            - img [ref=e423]
+                        - tooltip "Browse repository at this point" [ref=e426]:
+                          - link "Browse repository at this point" [ref=e427] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/c2fdcb502d1bfd56684f06b2a692254ecfb64839
+                            - img [ref=e428]
+                  - 'listitem "docs: update README with OpenClaw plugin release and image link (#116). More information available below." [ref=e430]':
+                    - generic [ref=e431]:
+                      - 'heading "docs: update README with OpenClaw plugin release and image link (#116)" [level=4] [ref=e432]':
+                        - generic [ref=e433]:
+                          - 'link "docs: update README with OpenClaw plugin release and image link (" [ref=e434] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/1900be40bc5087dc9873cbd9b21ea213638a5995
+                          - link "#116" [ref=e435] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/116
+                          - link ")" [ref=e436] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/1900be40bc5087dc9873cbd9b21ea213638a5995
+                      - button "Show description for 1900be4" [ref=e437] [cursor=pointer]:
+                        - img [ref=e438]
+                    - generic [ref=e444]:
+                      - generic [ref=e445]:
+                        - link "cyfyifanchen" [ref=e446] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e447]
+                        - link "commits by cyfyifanchen" [ref=e448] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e449]: authored
+                      - generic "Mar 6, 2026, 6:47 PM GMT+8" [ref=e450]: Mar 6, 20262 weeks ago
+                    - generic [ref=e451]:
+                      - button "Verified" [ref=e453] [cursor=pointer]
+                      - generic [ref=e454]:
+                        - generic [ref=e455]:
+                          - tooltip "View commit details" [ref=e456]:
+                            - link "1900be4" [ref=e457] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/1900be40bc5087dc9873cbd9b21ea213638a5995
+                              - generic [ref=e459]: 1900be4
+                          - button "Copy full SHA for 1900be4" [ref=e461] [cursor=pointer]:
+                            - img [ref=e462]
+                        - tooltip "Browse repository at this point" [ref=e465]:
+                          - link "Browse repository at this point" [ref=e466] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/1900be40bc5087dc9873cbd9b21ea213638a5995
+                            - img [ref=e467]
+            - generic [ref=e469]:
+              - img [ref=e472]
+              - generic [ref=e474]:
+                - heading "Commits on Mar 5, 2026" [level=3] [ref=e475]
+                - list "Commits on Mar 5, 2026" [ref=e478]:
+                  - 'listitem "docs: update screenshot and live demo links in README (#114). More information available below." [ref=e479]':
+                    - 'heading "docs: update screenshot and live demo links in README (#114)" [level=4] [ref=e481]':
+                      - generic [ref=e482]:
+                        - 'link "docs: update screenshot and live demo links in README (" [ref=e483] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/1f581ac0a489b0409602fd382c36293c17273b8a
+                        - link "#114" [ref=e484] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/114
+                        - link ")" [ref=e485] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/1f581ac0a489b0409602fd382c36293c17273b8a
+                    - generic [ref=e490]:
+                      - generic [ref=e491]:
+                        - link "cyfyifanchen" [ref=e492] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e493]
+                        - link "commits by cyfyifanchen" [ref=e494] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e495]: authored
+                      - generic "Mar 5, 2026, 11:30 AM GMT+8" [ref=e496]: Mar 5, 20262 weeks ago
+                    - generic [ref=e497]:
+                      - button "Verified" [ref=e499] [cursor=pointer]
+                      - generic [ref=e500]:
+                        - generic [ref=e501]:
+                          - tooltip "View commit details" [ref=e502]:
+                            - link "1f581ac" [ref=e503] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/1f581ac0a489b0409602fd382c36293c17273b8a
+                              - generic [ref=e505]: 1f581ac
+                          - button "Copy full SHA for 1f581ac" [ref=e507] [cursor=pointer]:
+                            - img [ref=e508]
+                        - tooltip "Browse repository at this point" [ref=e511]:
+                          - link "Browse repository at this point" [ref=e512] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/1f581ac0a489b0409602fd382c36293c17273b8a
+                            - img [ref=e513]
+            - generic [ref=e515]:
+              - img [ref=e518]
+              - generic [ref=e520]:
+                - heading "Commits on Mar 2, 2026" [level=3] [ref=e521]
+                - list "Commits on Mar 2, 2026" [ref=e524]:
+                  - 'listitem "docs: adding reduce-sized banner images (#105). More information available below." [ref=e525]':
+                    - 'heading "docs: adding reduce-sized banner images (#105)" [level=4] [ref=e527]':
+                      - generic [ref=e528]:
+                        - 'link "docs: adding reduce-sized banner images (" [ref=e529] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/8578dfd9f78bfcf5175819e7e605271fbcabd683
+                        - link "#105" [ref=e530] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/105
+                        - link ")" [ref=e531] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/8578dfd9f78bfcf5175819e7e605271fbcabd683
+                    - generic [ref=e536]:
+                      - generic [ref=e537]:
+                        - link "cyfyifanchen" [ref=e538] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e539]
+                        - link "commits by cyfyifanchen" [ref=e540] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e541]: authored
+                      - generic "Mar 2, 2026, 10:16 PM GMT+8" [ref=e542]: Mar 2, 20263 weeks ago
+                    - generic [ref=e543]:
+                      - button "Verified" [ref=e545] [cursor=pointer]
+                      - generic [ref=e546]:
+                        - generic [ref=e547]:
+                          - tooltip "View commit details" [ref=e548]:
+                            - link "8578dfd" [ref=e549] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/8578dfd9f78bfcf5175819e7e605271fbcabd683
+                              - generic [ref=e551]: 8578dfd
+                          - button "Copy full SHA for 8578dfd" [ref=e553] [cursor=pointer]:
+                            - img [ref=e554]
+                        - tooltip "Browse repository at this point" [ref=e557]:
+                          - link "Browse repository at this point" [ref=e558] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/8578dfd9f78bfcf5175819e7e605271fbcabd683
+                            - img [ref=e559]
+                  - 'listitem "docs: adding banners for usecases (#103). More information available below." [ref=e561]':
+                    - generic [ref=e562]:
+                      - 'heading "docs: adding banners for usecases (#103)" [level=4] [ref=e563]':
+                        - generic [ref=e564]:
+                          - 'link "docs: adding banners for usecases (" [ref=e565] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/c031e91a083be33d8541b64c3880cb3765e264ae
+                          - link "#103" [ref=e566] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/103
+                          - link ")" [ref=e567] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/c031e91a083be33d8541b64c3880cb3765e264ae
+                      - button "Show description for c031e91" [ref=e568] [cursor=pointer]:
+                        - img [ref=e569]
+                    - generic [ref=e575]:
+                      - generic [ref=e576]:
+                        - link "cyfyifanchen" [ref=e577] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e578]
+                        - link "commits by cyfyifanchen" [ref=e579] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e580]: authored
+                      - generic "Mar 2, 2026, 8:00 PM GMT+8" [ref=e581]: Mar 2, 20263 weeks ago
+                    - generic [ref=e582]:
+                      - button "Verified" [ref=e584] [cursor=pointer]
+                      - generic [ref=e585]:
+                        - generic [ref=e586]:
+                          - tooltip "View commit details" [ref=e587]:
+                            - link "c031e91" [ref=e588] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/c031e91a083be33d8541b64c3880cb3765e264ae
+                              - generic [ref=e590]: c031e91
+                          - button "Copy full SHA for c031e91" [ref=e592] [cursor=pointer]:
+                            - img [ref=e593]
+                        - tooltip "Browse repository at this point" [ref=e596]:
+                          - link "Browse repository at this point" [ref=e597] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/c031e91a083be33d8541b64c3880cb3765e264ae
+                            - img [ref=e598]
+            - generic [ref=e600]:
+              - img [ref=e603]
+              - generic [ref=e605]:
+                - heading "Commits on Feb 28, 2026" [level=3] [ref=e606]
+                - list "Commits on Feb 28, 2026" [ref=e609]:
+                  - 'listitem "docs: update community links and badge labels (#100). More information available below." [ref=e610]':
+                    - generic [ref=e611]:
+                      - 'heading "docs: update community links and badge labels (#100)" [level=4] [ref=e612]':
+                        - generic [ref=e613]:
+                          - 'link "docs: update community links and badge labels (" [ref=e614] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/967f1a36c7e8433b6544bf6374f7afd83b4b4d05
+                          - link "#100" [ref=e615] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/100
+                          - link ")" [ref=e616] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/967f1a36c7e8433b6544bf6374f7afd83b4b4d05
+                      - button "Show description for 967f1a3" [ref=e617] [cursor=pointer]:
+                        - img [ref=e618]
+                    - generic [ref=e624]:
+                      - generic [ref=e625]:
+                        - link "cyfyifanchen" [ref=e626] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e627]
+                        - link "commits by cyfyifanchen" [ref=e628] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e629]: authored
+                      - generic "Feb 28, 2026, 6:26 PM GMT+8" [ref=e630]: Feb 28, 20263 weeks ago
+                    - generic [ref=e631]:
+                      - button "Verified" [ref=e633] [cursor=pointer]
+                      - generic [ref=e634]:
+                        - generic [ref=e635]:
+                          - tooltip "View commit details" [ref=e636]:
+                            - link "967f1a3" [ref=e637] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/967f1a36c7e8433b6544bf6374f7afd83b4b4d05
+                              - generic [ref=e639]: 967f1a3
+                          - button "Copy full SHA for 967f1a3" [ref=e641] [cursor=pointer]:
+                            - img [ref=e642]
+                        - tooltip "Browse repository at this point" [ref=e645]:
+                          - link "Browse repository at this point" [ref=e646] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/967f1a36c7e8433b6544bf6374f7afd83b4b4d05
+                            - img [ref=e647]
+                  - 'listitem "docs: update README with new banner and examples section (#99). More information available below." [ref=e649]':
+                    - 'heading "docs: update README with new banner and examples section (#99)" [level=4] [ref=e651]':
+                      - generic [ref=e652]:
+                        - 'link "docs: update README with new banner and examples section (" [ref=e653] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/19b3c7baaff83b8e5f9a0cd844d5fa269f210f80
+                        - link "#99" [ref=e654] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/99
+                        - link ")" [ref=e655] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/19b3c7baaff83b8e5f9a0cd844d5fa269f210f80
+                    - generic [ref=e660]:
+                      - generic [ref=e661]:
+                        - link "cyfyifanchen" [ref=e662] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e663]
+                        - link "commits by cyfyifanchen" [ref=e664] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e665]: authored
+                      - generic "Feb 28, 2026, 5:02 PM GMT+8" [ref=e666]: Feb 28, 20263 weeks ago
+                    - generic [ref=e667]:
+                      - button "Verified" [ref=e669] [cursor=pointer]
+                      - generic [ref=e670]:
+                        - generic [ref=e671]:
+                          - tooltip "View commit details" [ref=e672]:
+                            - link "19b3c7b" [ref=e673] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/19b3c7baaff83b8e5f9a0cd844d5fa269f210f80
+                              - generic [ref=e675]: 19b3c7b
+                          - button "Copy full SHA for 19b3c7b" [ref=e677] [cursor=pointer]:
+                            - img [ref=e678]
+                        - tooltip "Browse repository at this point" [ref=e681]:
+                          - link "Browse repository at this point" [ref=e682] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/19b3c7baaff83b8e5f9a0cd844d5fa269f210f80
+                            - img [ref=e683]
+            - generic [ref=e685]:
+              - img [ref=e688]
+              - generic [ref=e690]:
+                - heading "Commits on Feb 12, 2026" [level=3] [ref=e691]
+                - list "Commits on Feb 12, 2026" [ref=e694]:
+                  - 'listitem "docs: banner fix (#85). More information available below." [ref=e695]':
+                    - 'heading "docs: banner fix (#85)" [level=4] [ref=e697]':
+                      - generic [ref=e698]:
+                        - 'link "docs: banner fix (" [ref=e699] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/1f2f083d9fd07fd6580064bbdfc7b97da39c47bb
+                        - link "#85" [ref=e700] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/85
+                        - link ")" [ref=e701] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/1f2f083d9fd07fd6580064bbdfc7b97da39c47bb
+                    - generic [ref=e706]:
+                      - generic [ref=e707]:
+                        - link "cyfyifanchen" [ref=e708] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e709]
+                        - link "commits by cyfyifanchen" [ref=e710] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e711]: authored
+                      - generic "Feb 12, 2026, 2:25 PM GMT+8" [ref=e712]: Feb 12, 2026on Feb 12
+                    - generic [ref=e713]:
+                      - button "Verified" [ref=e715] [cursor=pointer]
+                      - generic [ref=e716]:
+                        - generic [ref=e717]:
+                          - tooltip "View commit details" [ref=e718]:
+                            - link "1f2f083" [ref=e719] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/1f2f083d9fd07fd6580064bbdfc7b97da39c47bb
+                              - generic [ref=e721]: 1f2f083
+                          - button "Copy full SHA for 1f2f083" [ref=e723] [cursor=pointer]:
+                            - img [ref=e724]
+                        - tooltip "Browse repository at this point" [ref=e727]:
+                          - link "Browse repository at this point" [ref=e728] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/1f2f083d9fd07fd6580064bbdfc7b97da39c47bb
+                            - img [ref=e729]
+            - generic [ref=e731]:
+              - img [ref=e734]
+              - generic [ref=e736]:
+                - heading "Commits on Feb 11, 2026" [level=3] [ref=e737]
+                - list "Commits on Feb 11, 2026" [ref=e740]:
+                  - 'listitem "docs: add new image of benchmark (#84). More information available below." [ref=e741]':
+                    - 'heading "docs: add new image of benchmark (#84)" [level=4] [ref=e743]':
+                      - generic [ref=e744]:
+                        - 'link "docs: add new image of benchmark (" [ref=e745] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/f1d5493ef52475f2e7e88bc2bc73870c9c83c1ef
+                        - link "#84" [ref=e746] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/84
+                        - link ")" [ref=e747] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/f1d5493ef52475f2e7e88bc2bc73870c9c83c1ef
+                    - generic [ref=e752]:
+                      - generic [ref=e753]:
+                        - link "cyfyifanchen" [ref=e754] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e755]
+                        - link "commits by cyfyifanchen" [ref=e756] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e757]: authored
+                      - generic "Feb 11, 2026, 7:26 PM GMT+8" [ref=e758]: Feb 11, 2026on Feb 11
+                    - generic [ref=e759]:
+                      - button "Verified" [ref=e761] [cursor=pointer]
+                      - generic [ref=e762]:
+                        - generic [ref=e763]:
+                          - tooltip "View commit details" [ref=e764]:
+                            - link "f1d5493" [ref=e765] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/f1d5493ef52475f2e7e88bc2bc73870c9c83c1ef
+                              - generic [ref=e767]: f1d5493
+                          - button "Copy full SHA for f1d5493" [ref=e769] [cursor=pointer]:
+                            - img [ref=e770]
+                        - tooltip "Browse repository at this point" [ref=e773]:
+                          - link "Browse repository at this point" [ref=e774] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/f1d5493ef52475f2e7e88bc2bc73870c9c83c1ef
+                            - img [ref=e775]
+                  - listitem "Codex/core optimization audit (#77). More information available below." [ref=e777]:
+                    - generic [ref=e778]:
+                      - heading "Codex/core optimization audit (#77)" [level=4] [ref=e779]:
+                        - generic [ref=e780]:
+                          - link "Codex/core optimization audit (" [ref=e781] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/0e1b0023f29cd21bb4a8a24e853110600e6f8aa3
+                          - link "#77" [ref=e782] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/77
+                          - link ")" [ref=e783] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/0e1b0023f29cd21bb4a8a24e853110600e6f8aa3
+                      - button "Show description for 0e1b002" [ref=e784] [cursor=pointer]:
+                        - img [ref=e785]
+                    - generic [ref=e791]:
+                      - generic [ref=e792]:
+                        - link "fatflowers" [ref=e793] [cursor=pointer]:
+                          - /url: /fatflowers
+                          - img "fatflowers" [ref=e794]
+                        - link "commits by fatflowers" [ref=e795] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=fatflowers
+                          - text: fatflowers
+                      - generic [ref=e796]: authored
+                      - generic "Feb 11, 2026, 7:19 PM GMT+8" [ref=e797]: Feb 11, 2026on Feb 11
+                    - generic [ref=e798]:
+                      - button "Verified" [ref=e800] [cursor=pointer]
+                      - generic [ref=e801]:
+                        - generic [ref=e802]:
+                          - tooltip "View commit details" [ref=e803]:
+                            - link "0e1b002" [ref=e804] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/0e1b0023f29cd21bb4a8a24e853110600e6f8aa3
+                              - generic [ref=e806]: 0e1b002
+                          - button "Copy full SHA for 0e1b002" [ref=e808] [cursor=pointer]:
+                            - img [ref=e809]
+                        - tooltip "Browse repository at this point" [ref=e812]:
+                          - link "Browse repository at this point" [ref=e813] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/0e1b0023f29cd21bb4a8a24e853110600e6f8aa3
+                            - img [ref=e814]
+                  - 'listitem "fix: remove redundant code in memcell extraction (#59). More information available below." [ref=e816]':
+                    - generic [ref=e817]:
+                      - 'heading "fix: remove redundant code in memcell extraction (#59)" [level=4] [ref=e818]':
+                        - generic [ref=e819]:
+                          - 'link "fix: remove redundant code in memcell extraction (" [ref=e820] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/679f20ee5fdffb0283066dec50b6a80ef997832f
+                          - link "#59" [ref=e821] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/59
+                          - link ")" [ref=e822] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/679f20ee5fdffb0283066dec50b6a80ef997832f
+                      - button "Show description for 679f20e" [ref=e823] [cursor=pointer]:
+                        - img [ref=e824]
+                    - generic [ref=e830]:
+                      - generic [ref=e832]:
+                        - img "deadpool66" [ref=e833]
+                        - img "root" [ref=e834]
+                        - img "claude" [ref=e835]
+                      - button "Show 3 authors" [ref=e836] [cursor=pointer]: 3 people
+                      - generic [ref=e837]: authored
+                      - generic "Feb 11, 2026, 7:18 PM GMT+8" [ref=e838]: Feb 11, 2026on Feb 11
+                    - generic [ref=e839]:
+                      - button "Verified" [ref=e841] [cursor=pointer]
+                      - generic [ref=e842]:
+                        - generic [ref=e843]:
+                          - tooltip "View commit details" [ref=e844]:
+                            - link "679f20e" [ref=e845] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/679f20ee5fdffb0283066dec50b6a80ef997832f
+                              - generic [ref=e847]: 679f20e
+                          - button "Copy full SHA for 679f20e" [ref=e849] [cursor=pointer]:
+                            - img [ref=e850]
+                        - tooltip "Browse repository at this point" [ref=e853]:
+                          - link "Browse repository at this point" [ref=e854] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/679f20ee5fdffb0283066dec50b6a80ef997832f
+                            - img [ref=e855]
+                  - 'listitem "docs: update default ports and remove issue templates (#83). More information available below." [ref=e857]':
+                    - 'heading "docs: update default ports and remove issue templates (#83)" [level=4] [ref=e859]':
+                      - generic [ref=e860]:
+                        - 'link "docs: update default ports and remove issue templates (" [ref=e861] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/2a69bf8f72eee2ce33aa84040326bd3c67ab800c
+                        - link "#83" [ref=e862] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/83
+                        - link ")" [ref=e863] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/2a69bf8f72eee2ce33aa84040326bd3c67ab800c
+                    - generic [ref=e868]:
+                      - generic [ref=e869]:
+                        - link "cyfyifanchen" [ref=e870] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e871]
+                        - link "commits by cyfyifanchen" [ref=e872] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e873]: authored
+                      - generic "Feb 11, 2026, 6:14 PM GMT+8" [ref=e874]: Feb 11, 2026on Feb 11
+                    - generic [ref=e875]:
+                      - button "Verified" [ref=e877] [cursor=pointer]
+                      - generic [ref=e878]:
+                        - generic [ref=e879]:
+                          - tooltip "View commit details" [ref=e880]:
+                            - link "2a69bf8" [ref=e881] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/2a69bf8f72eee2ce33aa84040326bd3c67ab800c
+                              - generic [ref=e883]: 2a69bf8
+                          - button "Copy full SHA for 2a69bf8" [ref=e885] [cursor=pointer]:
+                            - img [ref=e886]
+                        - tooltip "Browse repository at this point" [ref=e889]:
+                          - link "Browse repository at this point" [ref=e890] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/2a69bf8f72eee2ce33aa84040326bd3c67ab800c
+                            - img [ref=e891]
+                  - 'listitem "docs: update the social channel position (#82). More information available below." [ref=e893]':
+                    - 'heading "docs: update the social channel position (#82)" [level=4] [ref=e895]':
+                      - generic [ref=e896]:
+                        - 'link "docs: update the social channel position (" [ref=e897] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/21a2fd8348c98665c6bd99524fe8ab938b691be0
+                        - link "#82" [ref=e898] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/82
+                        - link ")" [ref=e899] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/21a2fd8348c98665c6bd99524fe8ab938b691be0
+                    - generic [ref=e904]:
+                      - generic [ref=e905]:
+                        - link "cyfyifanchen" [ref=e906] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e907]
+                        - link "commits by cyfyifanchen" [ref=e908] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e909]: authored
+                      - generic "Feb 11, 2026, 5:10 PM GMT+8" [ref=e910]: Feb 11, 2026on Feb 11
+                    - generic [ref=e911]:
+                      - button "Verified" [ref=e913] [cursor=pointer]
+                      - generic [ref=e914]:
+                        - generic [ref=e915]:
+                          - tooltip "View commit details" [ref=e916]:
+                            - link "21a2fd8" [ref=e917] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/21a2fd8348c98665c6bd99524fe8ab938b691be0
+                              - generic [ref=e919]: 21a2fd8
+                          - button "Copy full SHA for 21a2fd8" [ref=e921] [cursor=pointer]:
+                            - img [ref=e922]
+                        - tooltip "Browse repository at this point" [ref=e925]:
+                          - link "Browse repository at this point" [ref=e926] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/21a2fd8348c98665c6bd99524fe8ab938b691be0
+                            - img [ref=e927]
+                  - 'listitem "docs: comment share buttons (#81). More information available below." [ref=e929]':
+                    - 'heading "docs: comment share buttons (#81)" [level=4] [ref=e931]':
+                      - generic [ref=e932]:
+                        - 'link "docs: comment share buttons (" [ref=e933] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/827af01b7366c6be3c46eefd995097b54be9b834
+                        - link "#81" [ref=e934] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/81
+                        - link ")" [ref=e935] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/827af01b7366c6be3c46eefd995097b54be9b834
+                    - generic [ref=e940]:
+                      - generic [ref=e941]:
+                        - link "cyfyifanchen" [ref=e942] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e943]
+                        - link "commits by cyfyifanchen" [ref=e944] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e945]: authored
+                      - generic "Feb 11, 2026, 4:21 PM GMT+8" [ref=e946]: Feb 11, 2026on Feb 11
+                    - generic [ref=e947]:
+                      - button "Verified" [ref=e949] [cursor=pointer]
+                      - generic [ref=e950]:
+                        - generic [ref=e951]:
+                          - tooltip "View commit details" [ref=e952]:
+                            - link "827af01" [ref=e953] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/827af01b7366c6be3c46eefd995097b54be9b834
+                              - generic [ref=e955]: 827af01
+                          - button "Copy full SHA for 827af01" [ref=e957] [cursor=pointer]:
+                            - img [ref=e958]
+                        - tooltip "Browse repository at this point" [ref=e961]:
+                          - link "Browse repository at this point" [ref=e962] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/827af01b7366c6be3c46eefd995097b54be9b834
+                            - img [ref=e963]
+            - generic [ref=e965]:
+              - img [ref=e968]
+              - generic [ref=e970]:
+                - heading "Commits on Feb 10, 2026" [level=3] [ref=e971]
+                - list "Commits on Feb 10, 2026" [ref=e974]:
+                  - 'listitem "docs: update the banner on github (#80). More information available below." [ref=e975]':
+                    - generic [ref=e976]:
+                      - 'heading "docs: update the banner on github (#80)" [level=4] [ref=e977]':
+                        - generic [ref=e978]:
+                          - 'link "docs: update the banner on github (" [ref=e979] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/dc6af1d4fd3452da7a6066cdc437b6c738e832bf
+                          - link "#80" [ref=e980] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/80
+                          - link ")" [ref=e981] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/dc6af1d4fd3452da7a6066cdc437b6c738e832bf
+                      - button "Show description for dc6af1d" [ref=e982] [cursor=pointer]:
+                        - img [ref=e983]
+                    - generic [ref=e989]:
+                      - generic [ref=e990]:
+                        - link "cyfyifanchen" [ref=e991] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e992]
+                        - link "commits by cyfyifanchen" [ref=e993] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e994]: authored
+                      - generic "Feb 10, 2026, 10:24 PM GMT+8" [ref=e995]: Feb 10, 2026on Feb 10
+                    - generic [ref=e996]:
+                      - button "Verified" [ref=e998] [cursor=pointer]
+                      - generic [ref=e999]:
+                        - generic [ref=e1000]:
+                          - tooltip "View commit details" [ref=e1001]:
+                            - link "dc6af1d" [ref=e1002] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/dc6af1d4fd3452da7a6066cdc437b6c738e832bf
+                              - generic [ref=e1004]: dc6af1d
+                          - button "Copy full SHA for dc6af1d" [ref=e1006] [cursor=pointer]:
+                            - img [ref=e1007]
+                        - tooltip "Browse repository at this point" [ref=e1010]:
+                          - link "Browse repository at this point" [ref=e1011] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/dc6af1d4fd3452da7a6066cdc437b6c738e832bf
+                            - img [ref=e1012]
+            - generic [ref=e1014]:
+              - img [ref=e1017]
+              - generic [ref=e1019]:
+                - heading "Commits on Feb 7, 2026" [level=3] [ref=e1020]
+                - list "Commits on Feb 7, 2026" [ref=e1023]:
+                  - 'listitem "docs(readme): fix share link reference and update message text (#76). More information available below." [ref=e1024]':
+                    - generic [ref=e1025]:
+                      - 'heading "docs(readme): fix share link reference and update message text (#76)" [level=4] [ref=e1026]':
+                        - generic [ref=e1027]:
+                          - 'link "docs(readme): fix share link reference and update message text (" [ref=e1028] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/539db77d5cc804c875246e34611fd266bf8c1e5d
+                          - link "#76" [ref=e1029] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/76
+                          - link ")" [ref=e1030] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/539db77d5cc804c875246e34611fd266bf8c1e5d
+                      - button "Show description for 539db77" [ref=e1031] [cursor=pointer]:
+                        - img [ref=e1032]
+                    - generic [ref=e1038]:
+                      - generic [ref=e1039]:
+                        - link "cyfyifanchen" [ref=e1040] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1041]
+                        - link "commits by cyfyifanchen" [ref=e1042] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1043]: authored
+                      - generic "Feb 7, 2026, 8:02 AM GMT+8" [ref=e1044]: Feb 7, 2026on Feb 7
+                    - generic [ref=e1045]:
+                      - button "Verified" [ref=e1047] [cursor=pointer]
+                      - generic [ref=e1048]:
+                        - generic [ref=e1049]:
+                          - tooltip "View commit details" [ref=e1050]:
+                            - link "539db77" [ref=e1051] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/539db77d5cc804c875246e34611fd266bf8c1e5d
+                              - generic [ref=e1053]: 539db77
+                          - button "Copy full SHA for 539db77" [ref=e1055] [cursor=pointer]:
+                            - img [ref=e1056]
+                        - tooltip "Browse repository at this point" [ref=e1059]:
+                          - link "Browse repository at this point" [ref=e1060] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/539db77d5cc804c875246e34611fd266bf8c1e5d
+                            - img [ref=e1061]
+            - generic [ref=e1063]:
+              - img [ref=e1066]
+              - generic [ref=e1068]:
+                - heading "Commits on Feb 6, 2026" [level=3] [ref=e1069]
+                - list "Commits on Feb 6, 2026" [ref=e1072]:
+                  - 'listitem "docs: add templates and link fix (#75). More information available below." [ref=e1073]':
+                    - generic [ref=e1074]:
+                      - 'heading "docs: add templates and link fix (#75)" [level=4] [ref=e1075]':
+                        - generic [ref=e1076]:
+                          - 'link "docs: add templates and link fix (" [ref=e1077] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/112afd900d1203ab752f57045aa48245fe9a2f4d
+                          - link "#75" [ref=e1078] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/75
+                          - link ")" [ref=e1079] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/112afd900d1203ab752f57045aa48245fe9a2f4d
+                      - button "Show description for 112afd9" [ref=e1080] [cursor=pointer]:
+                        - img [ref=e1081]
+                    - generic [ref=e1087]:
+                      - generic [ref=e1088]:
+                        - link "cyfyifanchen" [ref=e1089] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1090]
+                        - link "commits by cyfyifanchen" [ref=e1091] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1092]: authored
+                      - generic "Feb 6, 2026, 2:43 PM GMT+8" [ref=e1093]: Feb 6, 2026on Feb 6
+                    - generic [ref=e1094]:
+                      - button "Verified" [ref=e1096] [cursor=pointer]
+                      - generic [ref=e1097]:
+                        - generic [ref=e1098]:
+                          - tooltip "View commit details" [ref=e1099]:
+                            - link "112afd9" [ref=e1100] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/112afd900d1203ab752f57045aa48245fe9a2f4d
+                              - generic [ref=e1102]: 112afd9
+                          - button "Copy full SHA for 112afd9" [ref=e1104] [cursor=pointer]:
+                            - img [ref=e1105]
+                        - tooltip "Browse repository at this point" [ref=e1108]:
+                          - link "Browse repository at this point" [ref=e1109] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/112afd900d1203ab752f57045aa48245fe9a2f4d
+                            - img [ref=e1110]
+                  - 'listitem "docs: remove \"(for Chinese only)\" from WeChat group description (#74). More information available below." [ref=e1112]':
+                    - generic [ref=e1113]:
+                      - 'heading "docs: remove \"(for Chinese only)\" from WeChat group description (#74)" [level=4] [ref=e1114]':
+                        - generic [ref=e1115]:
+                          - 'link "docs: remove \"(for Chinese only)\" from WeChat group description (" [ref=e1116] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/157406337bafb2e91a777ad303c39b88f452377d
+                          - link "#74" [ref=e1117] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/74
+                          - link ")" [ref=e1118] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/157406337bafb2e91a777ad303c39b88f452377d
+                      - button "Show description for 1574063" [ref=e1119] [cursor=pointer]:
+                        - img [ref=e1120]
+                    - generic [ref=e1126]:
+                      - generic [ref=e1127]:
+                        - link "cyfyifanchen" [ref=e1128] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1129]
+                        - link "commits by cyfyifanchen" [ref=e1130] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1131]: authored
+                      - generic "Feb 6, 2026, 11:09 AM GMT+8" [ref=e1132]: Feb 6, 2026on Feb 6
+                    - generic [ref=e1133]:
+                      - button "Verified" [ref=e1135] [cursor=pointer]
+                      - generic [ref=e1136]:
+                        - generic [ref=e1137]:
+                          - tooltip "View commit details" [ref=e1138]:
+                            - link "1574063" [ref=e1139] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/157406337bafb2e91a777ad303c39b88f452377d
+                              - generic [ref=e1141]: "1574063"
+                          - button "Copy full SHA for 1574063" [ref=e1143] [cursor=pointer]:
+                            - img [ref=e1144]
+                        - tooltip "Browse repository at this point" [ref=e1147]:
+                          - link "Browse repository at this point" [ref=e1148] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/157406337bafb2e91a777ad303c39b88f452377d
+                            - img [ref=e1149]
+            - generic [ref=e1151]:
+              - img [ref=e1154]
+              - generic [ref=e1156]:
+                - heading "Commits on Feb 5, 2026" [level=3] [ref=e1157]
+                - list "Commits on Feb 5, 2026" [ref=e1160]:
+                  - 'listitem "docs: change the names on the badges in the welcome section (#72). More information available below." [ref=e1161]':
+                    - 'heading "docs: change the names on the badges in the welcome section (#72)" [level=4] [ref=e1163]':
+                      - generic [ref=e1164]:
+                        - 'link "docs: change the names on the badges in the welcome section (" [ref=e1165] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/88e2a75db772dde662d09dafc1f7617f7ca30a0c
+                        - link "#72" [ref=e1166] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/72
+                        - link ")" [ref=e1167] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/88e2a75db772dde662d09dafc1f7617f7ca30a0c
+                    - generic [ref=e1172]:
+                      - generic [ref=e1173]:
+                        - link "cyfyifanchen" [ref=e1174] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1175]
+                        - link "commits by cyfyifanchen" [ref=e1176] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1177]: authored
+                      - generic "Feb 5, 2026, 7:26 PM GMT+8" [ref=e1178]: Feb 5, 2026on Feb 5
+                    - generic [ref=e1179]:
+                      - button "Verified" [ref=e1181] [cursor=pointer]
+                      - generic [ref=e1182]:
+                        - generic [ref=e1183]:
+                          - tooltip "View commit details" [ref=e1184]:
+                            - link "88e2a75" [ref=e1185] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/88e2a75db772dde662d09dafc1f7617f7ca30a0c
+                              - generic [ref=e1187]: 88e2a75
+                          - button "Copy full SHA for 88e2a75" [ref=e1189] [cursor=pointer]:
+                            - img [ref=e1190]
+                        - tooltip "Browse repository at this point" [ref=e1193]:
+                          - link "Browse repository at this point" [ref=e1194] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/88e2a75db772dde662d09dafc1f7617f7ca30a0c
+                            - img [ref=e1195]
+                  - 'listitem "docs: add wechat badge and link (#71). More information available below." [ref=e1197]':
+                    - generic [ref=e1198]:
+                      - 'heading "docs: add wechat badge and link (#71)" [level=4] [ref=e1199]':
+                        - generic [ref=e1200]:
+                          - 'link "docs: add wechat badge and link (" [ref=e1201] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/f4d65d7087d90cfef64a6dd6a4ff1ca3f4d43667
+                          - link "#71" [ref=e1202] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/71
+                          - link ")" [ref=e1203] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/f4d65d7087d90cfef64a6dd6a4ff1ca3f4d43667
+                      - button "Show description for f4d65d7" [ref=e1204] [cursor=pointer]:
+                        - img [ref=e1205]
+                    - generic [ref=e1211]:
+                      - generic [ref=e1212]:
+                        - link "cyfyifanchen" [ref=e1213] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1214]
+                        - link "commits by cyfyifanchen" [ref=e1215] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1216]: authored
+                      - generic "Feb 5, 2026, 7:05 PM GMT+8" [ref=e1217]: Feb 5, 2026on Feb 5
+                    - generic [ref=e1218]:
+                      - button "Verified" [ref=e1220] [cursor=pointer]
+                      - generic [ref=e1221]:
+                        - generic [ref=e1222]:
+                          - tooltip "View commit details" [ref=e1223]:
+                            - link "f4d65d7" [ref=e1224] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/f4d65d7087d90cfef64a6dd6a4ff1ca3f4d43667
+                              - generic [ref=e1226]: f4d65d7
+                          - button "Copy full SHA for f4d65d7" [ref=e1228] [cursor=pointer]:
+                            - img [ref=e1229]
+                        - tooltip "Browse repository at this point" [ref=e1232]:
+                          - link "Browse repository at this point" [ref=e1233] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/f4d65d7087d90cfef64a6dd6a4ff1ca3f4d43667
+                            - img [ref=e1234]
+                  - listitem "Update Docker command syntax in README (#68). More information available below." [ref=e1236]:
+                    - heading "Update Docker command syntax in README (#68)" [level=4] [ref=e1238]:
+                      - generic [ref=e1239]:
+                        - link "Update Docker command syntax in README (" [ref=e1240] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/411964bf6367e62de42b5bb6b4b8cfbaa7751aa4
+                        - link "#68" [ref=e1241] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/68
+                        - link ")" [ref=e1242] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/411964bf6367e62de42b5bb6b4b8cfbaa7751aa4
+                    - generic [ref=e1247]:
+                      - generic [ref=e1248]:
+                        - link "AI-J-IN" [ref=e1249] [cursor=pointer]:
+                          - /url: /AI-J-IN
+                          - img "AI-J-IN" [ref=e1250]
+                        - link "commits by AI-J-IN" [ref=e1251] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=AI-J-IN
+                          - text: AI-J-IN
+                      - generic [ref=e1252]: authored
+                      - generic "Feb 5, 2026, 3:44 PM GMT+8" [ref=e1253]: Feb 5, 2026on Feb 5
+                    - generic [ref=e1254]:
+                      - button "Verified" [ref=e1256] [cursor=pointer]
+                      - generic [ref=e1257]:
+                        - generic [ref=e1258]:
+                          - tooltip "View commit details" [ref=e1259]:
+                            - link "411964b" [ref=e1260] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/411964bf6367e62de42b5bb6b4b8cfbaa7751aa4
+                              - generic [ref=e1262]: 411964b
+                          - button "Copy full SHA for 411964b" [ref=e1264] [cursor=pointer]:
+                            - img [ref=e1265]
+                        - tooltip "Browse repository at this point" [ref=e1268]:
+                          - link "Browse repository at this point" [ref=e1269] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/411964bf6367e62de42b5bb6b4b8cfbaa7751aa4
+                            - img [ref=e1270]
+            - generic [ref=e1272]:
+              - img [ref=e1275]
+              - generic [ref=e1277]:
+                - heading "Commits on Feb 2, 2026" [level=3] [ref=e1278]
+                - list "Commits on Feb 2, 2026" [ref=e1281]:
+                  - 'listitem "feat: add GitHub Codespaces dev container configuration (#62). More information available below." [ref=e1282]':
+                    - generic [ref=e1283]:
+                      - 'heading "feat: add GitHub Codespaces dev container configuration (#62)" [level=4] [ref=e1284]':
+                        - generic [ref=e1285]:
+                          - 'link "feat: add GitHub Codespaces dev container configuration (" [ref=e1286] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/7041e70c1e76fe7da16c05f68dce23bb6f191b8a
+                          - link "#62" [ref=e1287] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/62
+                          - link ")" [ref=e1288] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/7041e70c1e76fe7da16c05f68dce23bb6f191b8a
+                      - button "Show description for 7041e70" [ref=e1289] [cursor=pointer]:
+                        - img [ref=e1290]
+                    - generic [ref=e1296]:
+                      - generic [ref=e1297]:
+                        - link "cyfyifanchen" [ref=e1298] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1299]
+                        - link "commits by cyfyifanchen" [ref=e1300] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1301]: authored
+                      - generic "Feb 2, 2026, 6:59 PM GMT+8" [ref=e1302]: Feb 2, 2026on Feb 2
+                    - generic [ref=e1303]:
+                      - button "Verified" [ref=e1305] [cursor=pointer]
+                      - generic [ref=e1306]:
+                        - generic [ref=e1307]:
+                          - tooltip "View commit details" [ref=e1308]:
+                            - link "7041e70" [ref=e1309] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/7041e70c1e76fe7da16c05f68dce23bb6f191b8a
+                              - generic [ref=e1311]: "7041e70"
+                          - button "Copy full SHA for 7041e70" [ref=e1313] [cursor=pointer]:
+                            - img [ref=e1314]
+                        - tooltip "Browse repository at this point" [ref=e1317]:
+                          - link "Browse repository at this point" [ref=e1318] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/7041e70c1e76fe7da16c05f68dce23bb6f191b8a
+                            - img [ref=e1319]
+                  - 'listitem "docs: translate Chinese comments and documentation to English (#61). More information available below." [ref=e1321]':
+                    - generic [ref=e1322]:
+                      - 'heading "docs: translate Chinese comments and documentation to English (#61)" [level=4] [ref=e1323]':
+                        - generic [ref=e1324]:
+                          - 'link "docs: translate Chinese comments and documentation to English (" [ref=e1325] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/77a22206a7014bcf2ad34521e7e61019090ec3b8
+                          - link "#61" [ref=e1326] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/61
+                          - link ")" [ref=e1327] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/77a22206a7014bcf2ad34521e7e61019090ec3b8
+                      - button "Show description for 77a2220" [ref=e1328] [cursor=pointer]:
+                        - img [ref=e1329]
+                    - generic [ref=e1335]:
+                      - generic [ref=e1336]:
+                        - link "cyfyifanchen" [ref=e1337] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1338]
+                        - link "commits by cyfyifanchen" [ref=e1339] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1340]: authored
+                      - generic "Feb 2, 2026, 6:55 PM GMT+8" [ref=e1341]: Feb 2, 2026on Feb 2
+                    - generic [ref=e1342]:
+                      - button "Verified" [ref=e1344] [cursor=pointer]
+                      - generic [ref=e1345]:
+                        - generic [ref=e1346]:
+                          - tooltip "View commit details" [ref=e1347]:
+                            - link "77a2220" [ref=e1348] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/77a22206a7014bcf2ad34521e7e61019090ec3b8
+                              - generic [ref=e1350]: 77a2220
+                          - button "Copy full SHA for 77a2220" [ref=e1352] [cursor=pointer]:
+                            - img [ref=e1353]
+                        - tooltip "Browse repository at this point" [ref=e1356]:
+                          - link "Browse repository at this point" [ref=e1357] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/77a22206a7014bcf2ad34521e7e61019090ec3b8
+                            - img [ref=e1358]
+                  - 'listitem "docs: rename hackathon to competition in README (#64). More information available below." [ref=e1360]':
+                    - generic [ref=e1361]:
+                      - 'heading "docs: rename hackathon to competition in README (#64)" [level=4] [ref=e1362]':
+                        - generic [ref=e1363]:
+                          - 'link "docs: rename hackathon to competition in README (" [ref=e1364] [cursor=pointer]':
+                            - /url: /EverMind-AI/EverMemOS/commit/6f0b719e98c2a8102d090266895d274188cf0213
+                          - link "#64" [ref=e1365] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/64
+                          - link ")" [ref=e1366] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/6f0b719e98c2a8102d090266895d274188cf0213
+                      - button "Show description for 6f0b719" [ref=e1367] [cursor=pointer]:
+                        - img [ref=e1368]
+                    - generic [ref=e1374]:
+                      - generic [ref=e1375]:
+                        - link "cyfyifanchen" [ref=e1376] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1377]
+                        - link "commits by cyfyifanchen" [ref=e1378] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1379]: authored
+                      - generic "Feb 2, 2026, 6:54 PM GMT+8" [ref=e1380]: Feb 2, 2026on Feb 2
+                    - generic [ref=e1381]:
+                      - button "Verified" [ref=e1383] [cursor=pointer]
+                      - generic [ref=e1384]:
+                        - generic [ref=e1385]:
+                          - tooltip "View commit details" [ref=e1386]:
+                            - link "6f0b719" [ref=e1387] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/6f0b719e98c2a8102d090266895d274188cf0213
+                              - generic [ref=e1389]: 6f0b719
+                          - button "Copy full SHA for 6f0b719" [ref=e1391] [cursor=pointer]:
+                            - img [ref=e1392]
+                        - tooltip "Browse repository at this point" [ref=e1395]:
+                          - link "Browse repository at this point" [ref=e1396] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/6f0b719e98c2a8102d090266895d274188cf0213
+                            - img [ref=e1397]
+            - generic [ref=e1399]:
+              - img [ref=e1402]
+              - generic [ref=e1404]:
+                - heading "Commits on Jan 27, 2026" [level=3] [ref=e1405]
+                - list "Commits on Jan 27, 2026" [ref=e1408]:
+                  - 'listitem "docs: fix broken Discord link and restructure README (#54). More information available below." [ref=e1409]':
+                    - 'heading "docs: fix broken Discord link and restructure README (#54)" [level=4] [ref=e1411]':
+                      - generic [ref=e1412]:
+                        - 'link "docs: fix broken Discord link and restructure README (" [ref=e1413] [cursor=pointer]':
+                          - /url: /EverMind-AI/EverMemOS/commit/0187c003bb301d36cc3c172ca97870c56b9c8482
+                        - link "#54" [ref=e1414] [cursor=pointer]:
+                          - /url: https://github.com/EverMind-AI/EverMemOS/pull/54
+                        - link ")" [ref=e1415] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commit/0187c003bb301d36cc3c172ca97870c56b9c8482
+                    - generic [ref=e1420]:
+                      - generic [ref=e1421]:
+                        - link "cyfyifanchen" [ref=e1422] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1423]
+                        - link "commits by cyfyifanchen" [ref=e1424] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1425]: authored
+                      - generic "Jan 27, 2026, 10:42 PM GMT+8" [ref=e1426]: Jan 27, 2026on Jan 27
+                    - generic [ref=e1427]:
+                      - button "Verified" [ref=e1429] [cursor=pointer]
+                      - generic [ref=e1430]:
+                        - generic [ref=e1431]:
+                          - tooltip "View commit details" [ref=e1432]:
+                            - link "0187c00" [ref=e1433] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/0187c003bb301d36cc3c172ca97870c56b9c8482
+                              - generic [ref=e1435]: 0187c00
+                          - button "Copy full SHA for 0187c00" [ref=e1437] [cursor=pointer]:
+                            - img [ref=e1438]
+                        - tooltip "Browse repository at this point" [ref=e1441]:
+                          - link "Browse repository at this point" [ref=e1442] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/0187c003bb301d36cc3c172ca97870c56b9c8482
+                            - img [ref=e1443]
+                  - 'listitem "Merge pull request #39 from EverMind-AI/0120-adding-claude-agents-md. More information available below." [ref=e1445]':
+                    - generic [ref=e1446]:
+                      - 'heading "Merge pull request #39 from EverMind-AI/0120-adding-claude-agents-md" [level=4] [ref=e1447]':
+                        - generic [ref=e1448]:
+                          - link "Merge pull request" [ref=e1449] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/8625494900a08af43e4893f482747e1eb0c8a4cc
+                          - link "#39" [ref=e1450] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/39
+                          - link "from EverMind-AI/0120-adding-claude-agents-md" [ref=e1451] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/8625494900a08af43e4893f482747e1eb0c8a4cc
+                      - button "Show description for 8625494" [ref=e1452] [cursor=pointer]:
+                        - img [ref=e1453]
+                    - generic [ref=e1459]:
+                      - generic [ref=e1460]:
+                        - link "cyfyifanchen" [ref=e1461] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1462]
+                        - link "commits by cyfyifanchen" [ref=e1463] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1464]: authored
+                      - generic "Jan 27, 2026, 4:21 PM GMT+8" [ref=e1465]: Jan 27, 2026on Jan 27
+                    - generic [ref=e1466]:
+                      - button "Verified" [ref=e1468] [cursor=pointer]
+                      - generic [ref=e1469]:
+                        - generic [ref=e1470]:
+                          - tooltip "View commit details" [ref=e1471]:
+                            - link "8625494" [ref=e1472] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/8625494900a08af43e4893f482747e1eb0c8a4cc
+                              - generic [ref=e1474]: "8625494"
+                          - button "Copy full SHA for 8625494" [ref=e1476] [cursor=pointer]:
+                            - img [ref=e1477]
+                        - tooltip "Browse repository at this point" [ref=e1480]:
+                          - link "Browse repository at this point" [ref=e1481] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/8625494900a08af43e4893f482747e1eb0c8a4cc
+                            - img [ref=e1482]
+                  - listitem "Update README.md. More information available below." [ref=e1484]:
+                    - heading "Update README.md" [level=4] [ref=e1486]:
+                      - link "Update README.md" [ref=e1488] [cursor=pointer]:
+                        - /url: /EverMind-AI/EverMemOS/commit/d1f07a2cf793e8eefed79fe7a2a8f7ff545dc463
+                    - generic [ref=e1493]:
+                      - generic [ref=e1494]:
+                        - link "troyhua" [ref=e1495] [cursor=pointer]:
+                          - /url: /troyhua
+                          - img "troyhua" [ref=e1496]
+                        - link "commits by troyhua" [ref=e1497] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=troyhua
+                          - text: troyhua
+                      - generic [ref=e1498]: authored
+                      - generic "Jan 27, 2026, 12:57 PM GMT+8" [ref=e1499]: Jan 27, 2026on Jan 27
+                    - generic [ref=e1500]:
+                      - button "Verified" [ref=e1502] [cursor=pointer]
+                      - generic [ref=e1503]:
+                        - generic [ref=e1504]:
+                          - tooltip "View commit details" [ref=e1505]:
+                            - link "d1f07a2" [ref=e1506] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/d1f07a2cf793e8eefed79fe7a2a8f7ff545dc463
+                              - generic [ref=e1508]: d1f07a2
+                          - button "Copy full SHA for d1f07a2" [ref=e1510] [cursor=pointer]:
+                            - img [ref=e1511]
+                        - tooltip "Browse repository at this point" [ref=e1514]:
+                          - link "Browse repository at this point" [ref=e1515] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/d1f07a2cf793e8eefed79fe7a2a8f7ff545dc463
+                            - img [ref=e1516]
+                  - 'listitem "Merge pull request #44 from cyfyifanchen/0120-update-readme. More information available below." [ref=e1518]':
+                    - generic [ref=e1519]:
+                      - 'heading "Merge pull request #44 from cyfyifanchen/0120-update-readme" [level=4] [ref=e1520]':
+                        - generic [ref=e1521]:
+                          - link "Merge pull request" [ref=e1522] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/ebcae6d28a3b28e698f8fe7f734600fc9a895f35
+                          - link "#44" [ref=e1523] [cursor=pointer]:
+                            - /url: https://github.com/EverMind-AI/EverMemOS/pull/44
+                          - link "from cyfyifanchen/0120-update-readme" [ref=e1524] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/ebcae6d28a3b28e698f8fe7f734600fc9a895f35
+                      - button "Show description for ebcae6d" [ref=e1525] [cursor=pointer]:
+                        - img [ref=e1526]
+                    - generic [ref=e1532]:
+                      - generic [ref=e1533]:
+                        - link "troyhua" [ref=e1534] [cursor=pointer]:
+                          - /url: /troyhua
+                          - img "troyhua" [ref=e1535]
+                        - link "commits by troyhua" [ref=e1536] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=troyhua
+                          - text: troyhua
+                      - generic [ref=e1537]: authored
+                      - generic "Jan 27, 2026, 12:56 PM GMT+8" [ref=e1538]: Jan 27, 2026on Jan 27
+                    - generic [ref=e1539]:
+                      - button "Verified" [ref=e1541] [cursor=pointer]
+                      - generic [ref=e1542]:
+                        - generic [ref=e1543]:
+                          - tooltip "View commit details" [ref=e1544]:
+                            - link "ebcae6d" [ref=e1545] [cursor=pointer]:
+                              - /url: /EverMind-AI/EverMemOS/commit/ebcae6d28a3b28e698f8fe7f734600fc9a895f35
+                              - generic [ref=e1547]: ebcae6d
+                          - button "Copy full SHA for ebcae6d" [ref=e1549] [cursor=pointer]:
+                            - img [ref=e1550]
+                        - tooltip "Browse repository at this point" [ref=e1553]:
+                          - link "Browse repository at this point" [ref=e1554] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/tree/ebcae6d28a3b28e698f8fe7f734600fc9a895f35
+                            - img [ref=e1555]
+                  - 'listitem "docs: update README heading format for hackathon note. More information available below." [ref=e1557]':
+                    - 'heading "docs: update README heading format for hackathon note" [level=4] [ref=e1559]':
+                      - 'link "docs: update README heading format for hackathon note" [ref=e1561] [cursor=pointer]':
+                        - /url: /EverMind-AI/EverMemOS/commit/b5342d17dd8ea5f6009dc186b225538f46f12a89
+                    - generic [ref=e1566]:
+                      - generic [ref=e1567]:
+                        - link "cyfyifanchen" [ref=e1568] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1569]
+                        - link "commits by cyfyifanchen" [ref=e1570] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1571]: committed
+                      - generic "Jan 27, 2026, 8:42 AM GMT+8" [ref=e1572]: Jan 27, 2026on Jan 27
+                    - generic [ref=e1575]:
+                      - generic [ref=e1576]:
+                        - tooltip "View commit details" [ref=e1577]:
+                          - link "b5342d1" [ref=e1578] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/b5342d17dd8ea5f6009dc186b225538f46f12a89
+                            - generic [ref=e1580]: b5342d1
+                        - button "Copy full SHA for b5342d1" [ref=e1582] [cursor=pointer]:
+                          - img [ref=e1583]
+                      - tooltip "Browse repository at this point" [ref=e1586]:
+                        - link "Browse repository at this point" [ref=e1587] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/tree/b5342d17dd8ea5f6009dc186b225538f46f12a89
+                          - img [ref=e1588]
+                  - 'listitem "docs: simplify README formatting and remove redundant dividers. More information available below." [ref=e1590]':
+                    - 'heading "docs: simplify README formatting and remove redundant dividers" [level=4] [ref=e1592]':
+                      - 'link "docs: simplify README formatting and remove redundant dividers" [ref=e1594] [cursor=pointer]':
+                        - /url: /EverMind-AI/EverMemOS/commit/9b23c75dfb6151b92b98d66f07f4b59fba95472a
+                    - generic [ref=e1599]:
+                      - generic [ref=e1600]:
+                        - link "cyfyifanchen" [ref=e1601] [cursor=pointer]:
+                          - /url: /cyfyifanchen
+                          - img "cyfyifanchen" [ref=e1602]
+                        - link "commits by cyfyifanchen" [ref=e1603] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/commits?author=cyfyifanchen
+                          - text: cyfyifanchen
+                      - generic [ref=e1604]: committed
+                      - generic "Jan 27, 2026, 8:23 AM GMT+8" [ref=e1605]: Jan 27, 2026on Jan 27
+                    - generic [ref=e1608]:
+                      - generic [ref=e1609]:
+                        - tooltip "View commit details" [ref=e1610]:
+                          - link "9b23c75" [ref=e1611] [cursor=pointer]:
+                            - /url: /EverMind-AI/EverMemOS/commit/9b23c75dfb6151b92b98d66f07f4b59fba95472a
+                            - generic [ref=e1613]: 9b23c75
+                        - button "Copy full SHA for 9b23c75" [ref=e1615] [cursor=pointer]:
+                          - img [ref=e1616]
+                      - tooltip "Browse repository at this point" [ref=e1619]:
+                        - link "Browse repository at this point" [ref=e1620] [cursor=pointer]:
+                          - /url: /EverMind-AI/EverMemOS/tree/9b23c75dfb6151b92b98d66f07f4b59fba95472a
+                          - img [ref=e1621]
+        - heading "Pagination" [level=2] [ref=e1623]
+        - generic [ref=e1625]:
+          - link "Previous" [disabled] [ref=e1627]:
+            - /url: /EverMind-AI/EverMemOS/commits/main?before=3c9a2d02460748310c7707048f7ed6b6bb078ab4+0
+            - generic [ref=e1629]: Previous
+          - link "Next" [ref=e1631] [cursor=pointer]:
+            - /url: /EverMind-AI/EverMemOS/commits/main?after=3c9a2d02460748310c7707048f7ed6b6bb078ab4+34
+            - generic [ref=e1632]:
+              - generic [ref=e1633]: Next
+              - generic:
+                - img
+  - contentinfo [ref=e1634]:
+    - heading "Footer" [level=2] [ref=e1635]
+    - generic [ref=e1636]:
+      - generic [ref=e1637]:
+        - link "GitHub Homepage" [ref=e1638] [cursor=pointer]:
+          - /url: https://github.com
+          - img [ref=e1639]
+        - generic [ref=e1641]: © 2026 GitHub, Inc.
+      - navigation "Footer" [ref=e1642]:
+        - heading "Footer navigation" [level=3] [ref=e1643]
+        - list "Footer navigation" [ref=e1644]:
+          - listitem [ref=e1645]:
+            - link "Terms" [ref=e1646] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+          - listitem [ref=e1647]:
+            - link "Privacy" [ref=e1648] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+          - listitem [ref=e1649]:
+            - link "Security" [ref=e1650] [cursor=pointer]:
+              - /url: https://github.com/security
+          - listitem [ref=e1651]:
+            - link "Status" [ref=e1652] [cursor=pointer]:
+              - /url: https://www.githubstatus.com/
+          - listitem [ref=e1653]:
+            - link "Community" [ref=e1654] [cursor=pointer]:
+              - /url: https://github.community/
+          - listitem [ref=e1655]:
+            - link "Docs" [ref=e1656] [cursor=pointer]:
+              - /url: https://docs.github.com/
+          - listitem [ref=e1657]:
+            - link "Contact" [ref=e1658] [cursor=pointer]:
+              - /url: https://support.github.com?tags=dotcom-footer
+          - listitem [ref=e1659]:
+            - button "Manage cookies" [ref=e1661] [cursor=pointer]
+          - listitem [ref=e1662]:
+            - button "Do not share my personal information" [ref=e1664] [cursor=pointer]

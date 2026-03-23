@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import inspect
 import json
 import logging
@@ -51,6 +52,9 @@ class TaskResponse:
 
 
 class OrchestratorAgent:
+    _FLOW_CACHE_LIMIT = 256
+    _HANDOFF_LOCK_LIMIT = 256
+
     """Orchestrator — dynamic multi-agent mode via DynamicOrchestrator."""
 
     def __init__(self, config: Config | None = None):
@@ -71,10 +75,29 @@ class OrchestratorAgent:
         self.resource_manager.set_observability_provider(self)
         self._child_task_bus = InMemoryChildTaskBus()
         self._task_heartbeat_registry = TaskHeartbeatRegistry()
-        self._handoff_locks: dict[str, asyncio.Lock] = {}
+        self._handoff_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._init_lock = asyncio.Lock()
         self._initialized = False
-        self._recent_flow_ids_by_chat: dict[str, str] = {}
+        self._recent_flow_ids_by_chat: OrderedDict[str, str] = OrderedDict()
+
+    def _remember_flow_id(self, chat_key: str, flow_id: str) -> None:
+        if not isinstance(self._recent_flow_ids_by_chat, OrderedDict):
+            self._recent_flow_ids_by_chat = OrderedDict(self._recent_flow_ids_by_chat)
+        self._recent_flow_ids_by_chat.pop(chat_key, None)
+        self._recent_flow_ids_by_chat[chat_key] = flow_id
+        while len(self._recent_flow_ids_by_chat) > self._FLOW_CACHE_LIMIT:
+            self._recent_flow_ids_by_chat.popitem(last=False)
+
+    def _get_handoff_lock(self, chat_key: str) -> asyncio.Lock:
+        if not isinstance(self._handoff_locks, OrderedDict):
+            self._handoff_locks = OrderedDict(self._handoff_locks)
+        lock = self._handoff_locks.pop(chat_key, None)
+        if lock is None:
+            lock = asyncio.Lock()
+        self._handoff_locks[chat_key] = lock
+        while len(self._handoff_locks) > self._HANDOFF_LOCK_LIMIT:
+            self._handoff_locks.popitem(last=False)
+        return lock
 
     async def _answer_with_dag(
         self,
@@ -108,7 +131,7 @@ class OrchestratorAgent:
         flow_id = f"orchestrator:{uuid.uuid4().hex[:12]}"
         chat_key = getattr(tape, "chat_id", "") if tape is not None else ""
         if chat_key:
-            self._recent_flow_ids_by_chat[chat_key] = flow_id
+            self._remember_flow_id(chat_key, flow_id)
 
         context = ExecutionContext(
             session_id=flow_id,
@@ -306,7 +329,7 @@ class OrchestratorAgent:
 
     async def _maybe_handoff(self, tape: Tape, chat_key: str) -> None:
         """Check if entries since last anchor exceed threshold; if so, create a new anchor."""
-        lock = self._handoff_locks.setdefault(chat_key, asyncio.Lock())
+        lock = self._get_handoff_lock(chat_key)
         try:
             async with lock:
                 threshold = self.config.system.context_compact_threshold

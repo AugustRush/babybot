@@ -59,6 +59,10 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                         "description": "依赖的 task_id 列表，这些任务必须先完成",
                         "default": [],
                     },
+                    "timeout_s": {
+                        "type": "number",
+                        "description": "子任务超时时间（秒）。未提供时使用运行时默认超时。",
+                    },
                 },
                 "required": ["description"],
             },
@@ -264,6 +268,7 @@ class InProcessChildTaskRuntime:
         max_tasks: int,
         max_retries: int = 0,
         retry_delay_seconds: Callable[[int], float] = default_retry_delay_seconds,
+        default_timeout_s: float | None = 120.0,
         stale_after_s: float | None = None,
         progress_poll_interval_s: float = 0.05,
     ) -> None:
@@ -275,6 +280,7 @@ class InProcessChildTaskRuntime:
         self._max_tasks = max_tasks
         self._max_retries = max(0, int(max_retries))
         self._retry_delay_seconds = retry_delay_seconds
+        self._default_timeout_s = self._coerce_timeout(default_timeout_s)
         self._stale_after_s = stale_after_s
         self._progress_poll_interval_s = max(0.02, float(progress_poll_interval_s))
         self._semaphore = asyncio.Semaphore(max_parallel)
@@ -282,6 +288,18 @@ class InProcessChildTaskRuntime:
         self._results: dict[str, TaskResult] = {}
         self._task_state: dict[str, dict[str, Any]] = {}
         self._dead_letters: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _coerce_timeout(raw_value: Any) -> float | None:
+        if raw_value is None:
+            return None
+        try:
+            timeout_s = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        if timeout_s <= 0:
+            return None
+        return timeout_s
 
     @property
     def in_flight(self) -> dict[str, asyncio.Task]:
@@ -469,6 +487,7 @@ class InProcessChildTaskRuntime:
             description=description,
             deps=tuple(deps),
             lease=lease,
+            timeout_s=self._coerce_timeout(args.get("timeout_s")) or self._default_timeout_s,
             metadata={
                 "resource_id": primary_resource_id,
                 "resource_ids": list(resource_ids),
@@ -530,7 +549,7 @@ class InProcessChildTaskRuntime:
                             task_id=task_id,
                             event="started",
                             payload={
-                                "resource_id": resource_id,
+                                "resource_id": primary_resource_id,
                                 "description": description,
                             },
                         )
@@ -556,8 +575,25 @@ class InProcessChildTaskRuntime:
                     )
                     try:
                         async with self._semaphore:
-                            raw_result = await self._bridge.execute(execution_contract, child_context)
+                            if execution_contract.timeout_s is not None:
+                                raw_result = await asyncio.wait_for(
+                                    self._bridge.execute(execution_contract, child_context),
+                                    timeout=execution_contract.timeout_s,
+                                )
+                            else:
+                                raw_result = await self._bridge.execute(
+                                    execution_contract,
+                                    child_context,
+                                )
                         result = self._normalize_result(task_id, raw_result, attempts=attempt)
+                    except asyncio.TimeoutError:
+                        timeout_s = execution_contract.timeout_s or self._default_timeout_s
+                        result = TaskResult(
+                            task_id=task_id,
+                            status="failed",
+                            error=f"child task timeout after {timeout_s:.2f}s",
+                            attempts=attempt,
+                        )
                     except Exception as exc:
                         result = TaskResult(
                             task_id=task_id,
@@ -582,7 +618,7 @@ class InProcessChildTaskRuntime:
                                 task_id=task_id,
                                 event="succeeded",
                                 payload={
-                                    "resource_id": resource_id,
+                                    "resource_id": primary_resource_id,
                                     "description": description,
                                     "status": result.status,
                                     "output": result.output,
@@ -619,7 +655,7 @@ class InProcessChildTaskRuntime:
                                 task_id=task_id,
                                 event="retrying",
                                 payload={
-                                    "resource_id": resource_id,
+                                    "resource_id": primary_resource_id,
                                     "description": description,
                                     "attempt": attempt,
                                     "max_attempts": max_attempts,
@@ -646,7 +682,7 @@ class InProcessChildTaskRuntime:
                             task_id=task_id,
                             event="dead_lettered",
                             payload={
-                                "resource_id": resource_id,
+                                "resource_id": primary_resource_id,
                                 "description": description,
                                 "status": final_result.status,
                                 "error": final_result.error,
@@ -809,9 +845,19 @@ class InProcessChildTaskRuntime:
             "reply_artifacts_count": 0,
         }, ensure_ascii=False)
 
-    def cancel_all(self) -> None:
-        for task in self._in_flight.values():
-            task.cancel()
+    async def cancel_all(self, *, grace_period_s: float = 0.0) -> None:
+        tasks = [task for task in self._in_flight.values() if not task.done()]
+        if not tasks:
+            return
+        if grace_period_s > 0:
+            done, pending = await asyncio.wait(tasks, timeout=grace_period_s)
+            del done
+            for task in pending:
+                task.cancel()
+        else:
+            for task in tasks:
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # ── DynamicOrchestrator ──────────────────────────────────────────────────
@@ -831,6 +877,7 @@ class DynamicOrchestrator:
         task_heartbeat_registry: "TaskHeartbeatRegistry | None" = None,
         task_stale_after_s: float | None = None,
         max_steps: int | None = None,
+        default_task_timeout_s: float | None = 120.0,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
@@ -841,6 +888,7 @@ class DynamicOrchestrator:
         self._task_heartbeat_registry = task_heartbeat_registry or TaskHeartbeatRegistry()
         self._task_stale_after_s = task_stale_after_s
         self._max_steps = max(1, int(max_steps or self.MAX_STEPS))
+        self._default_task_timeout_s = default_task_timeout_s
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
@@ -856,6 +904,7 @@ class DynamicOrchestrator:
             task_heartbeat_registry=self._task_heartbeat_registry,
             max_parallel=4,
             max_tasks=self.MAX_TASKS,
+            default_timeout_s=self._default_task_timeout_s,
             stale_after_s=self._task_stale_after_s,
         )
         runtime_event_callback = context.state.get("runtime_event_callback")
@@ -923,10 +972,11 @@ class DynamicOrchestrator:
                     scheduler_handoff_created = True
 
                 if reply_text is not None:
-                    runtime.cancel_all()
+                    await runtime.cancel_all()
                     return FinalResult(conclusion=reply_text, task_results=runtime.results)
 
-            return self._build_fallback_result(goal, runtime.results, runtime.in_flight)
+            await runtime.cancel_all(grace_period_s=5.0)
+            return self._build_fallback_result(goal, runtime.results)
         finally:
             if forwarder_task is not None:
                 forwarder_task.cancel()
@@ -1105,10 +1155,8 @@ class DynamicOrchestrator:
     def _build_fallback_result(
         goal: str,
         results: dict[str, TaskResult],
-        in_flight: dict[str, asyncio.Task],
     ) -> FinalResult:
-        for task in in_flight.values():
-            task.cancel()
+        del goal
         parts = ["（编排步数已达上限，以下为已完成的任务结果）"]
         for task_id, r in results.items():
             if r.status == "succeeded":

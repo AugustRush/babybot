@@ -643,6 +643,30 @@ def test_inspect_runtime_flow_uses_stable_sectioned_format() -> None:
     assert "event=progress" in text
 
 
+def test_remember_flow_id_uses_lru_eviction() -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._recent_flow_ids_by_chat = {f"chat-{idx}": f"flow-{idx}" for idx in range(256)}
+
+    agent._remember_flow_id("chat-0", "flow-0-new")
+    agent._remember_flow_id("chat-new", "flow-new")
+
+    assert agent._recent_flow_ids_by_chat["chat-0"] == "flow-0-new"
+    assert "chat-1" not in agent._recent_flow_ids_by_chat
+    assert agent._recent_flow_ids_by_chat["chat-new"] == "flow-new"
+
+
+def test_get_handoff_lock_uses_lru_eviction() -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._handoff_locks = {f"chat-{idx}": asyncio.Lock() for idx in range(256)}
+
+    recent = agent._get_handoff_lock("chat-0")
+    added = agent._get_handoff_lock("chat-new")
+
+    assert recent is agent._handoff_locks["chat-0"]
+    assert added is agent._handoff_locks["chat-new"]
+    assert "chat-1" not in agent._handoff_locks
+
+
 def test_inspect_chat_context_uses_stable_sectioned_format(tmp_path: Path) -> None:
     from babybot.memory_store import HybridMemoryStore
 

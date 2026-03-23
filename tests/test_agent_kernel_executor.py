@@ -284,6 +284,61 @@ def test_single_agent_executor_collects_tool_artifacts_into_context(tmp_path: Pa
     assert context.state["media_paths_collected"] == [str(image_path.resolve())]
 
 
+def test_single_agent_executor_isolates_parallel_tool_exceptions() -> None:
+    class ExplodingTool(Tool):
+        @property
+        def name(self) -> str:
+            return "explode"
+
+        @property
+        def description(self) -> str:
+            return "Raise an exception."
+
+        @property
+        def schema(self) -> dict:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+            del args, context
+            raise RuntimeError("boom")
+
+    class ParallelToolModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(call_id="c1", name="add", arguments={"a": 2, "b": 3}),
+                        ModelToolCall(call_id="c2", name="explode", arguments={}),
+                    )
+                )
+            tool_messages = [msg.content for msg in request.messages if msg.role == "tool"]
+            return ModelResponse(text=" | ".join(tool_messages))
+
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    registry.register(ExplodingTool(), group="math")
+    executor = SingleAgentExecutor(model=ParallelToolModel(), tools=registry)
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="parallel"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert "5" in result.output
+    assert "Tool error:" in result.output
+    assert "boom" in result.output
+
+
 def test_single_agent_executor_persists_tool_call_and_result_to_tape() -> None:
     registry = ToolRegistry()
     registry.register(AddTool(), group="math")

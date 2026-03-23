@@ -52,13 +52,42 @@ class ResourceScopeHelper:
         )
         return tuple(names[:limit])
 
+    @staticmethod
+    def _filter_registered_tools(
+        tools: list[Any],
+        lease: ToolLease | None = None,
+    ) -> list[Any]:
+        lease = lease or ToolLease()
+        include_groups = set(lease.include_groups)
+        include_tools = set(lease.include_tools)
+        exclude_tools = set(lease.exclude_tools)
+
+        selected: list[Any] = []
+        for registered in tools:
+            name = registered.tool.name
+            if name in exclude_tools:
+                continue
+            if include_tools or include_groups:
+                in_tools = name in include_tools if include_tools else False
+                in_groups = registered.group in include_groups if include_groups else False
+                if not (in_tools or in_groups):
+                    continue
+            selected.append(registered)
+        return selected
+
     def get_resource_briefs(self) -> list[dict[str, Any]]:
         briefs: list[ResourceBrief] = []
         mcp_groups = set(self._owner.mcp_server_groups.values())
+        registry_snapshot = list(self._owner.registry.list())
+
+        def _tool_summary(lease: ToolLease) -> tuple[int, tuple[str, ...]]:
+            selected = self._filter_registered_tools(registry_snapshot, lease)
+            names = tuple(sorted(registered.tool.name for registered in selected))
+            return len(names), names[:6]
 
         for server_name, group_name in sorted(self._owner.mcp_server_groups.items()):
             group = self._owner.groups.get(group_name)
-            tool_count = len(self._owner.registry.list(ToolLease(include_groups=(group_name,))))
+            tool_count, tools_preview = _tool_summary(ToolLease(include_groups=(group_name,)))
             briefs.append(
                 ResourceBrief(
                     resource_id=self.mcp_resource_id(server_name),
@@ -67,9 +96,7 @@ class ResourceScopeHelper:
                     purpose=group.description if group else f"MCP tools from {server_name}",
                     group=group_name,
                     tool_count=tool_count,
-                    tools_preview=self.preview_tool_names(
-                        ToolLease(include_groups=(group_name,))
-                    ),
+                    tools_preview=tools_preview,
                     active=(bool(group.active) if group else True) and tool_count > 0,
                 )
             )
@@ -81,8 +108,7 @@ class ResourceScopeHelper:
             has_explicit_scope = bool(
                 skill_lease.include_groups or skill_lease.include_tools
             )
-            tools = self._owner.registry.list(skill_lease) if has_explicit_scope else []
-            tool_count = len(tools)
+            tool_count, tools_preview = _tool_summary(skill_lease) if has_explicit_scope else (0, ())
             briefs.append(
                 ResourceBrief(
                     resource_id=self.skill_resource_id(skill),
@@ -91,11 +117,7 @@ class ResourceScopeHelper:
                     purpose=skill.description or f"Skill: {skill.name}",
                     group=skill.tool_group,
                     tool_count=tool_count,
-                    tools_preview=(
-                        self.preview_tool_names(skill_lease)
-                        if has_explicit_scope
-                        else ()
-                    ),
+                    tools_preview=tools_preview if has_explicit_scope else (),
                     active=skill.active and (tool_count > 0 or not has_explicit_scope),
                 )
             )
@@ -103,9 +125,7 @@ class ResourceScopeHelper:
         for group_name, group in sorted(self._owner.groups.items()):
             if group_name.startswith("skill_") or group_name in mcp_groups:
                 continue
-            tool_count = len(
-                self._owner.registry.list(ToolLease(include_groups=(group_name,)))
-            )
+            tool_count, tools_preview = _tool_summary(ToolLease(include_groups=(group_name,)))
             briefs.append(
                 ResourceBrief(
                     resource_id=self.group_resource_id(group_name),
@@ -114,9 +134,7 @@ class ResourceScopeHelper:
                     purpose=group.description,
                     group=group_name,
                     tool_count=tool_count,
-                    tools_preview=self.preview_tool_names(
-                        ToolLease(include_groups=(group_name,))
-                    ),
+                    tools_preview=tools_preview,
                     active=group.active and tool_count > 0,
                 )
             )

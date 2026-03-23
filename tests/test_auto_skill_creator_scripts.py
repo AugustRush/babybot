@@ -96,6 +96,34 @@ def test_init_skill_treats_examples_resource_alias_as_include_examples(tmp_path:
     assert (skill_dir / "scripts" / "_example.py").exists()
 
 
+def test_init_skill_removes_placeholder_examples_on_rerun_without_examples(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "cleanup skill",
+        target="workspace",
+        workspace_skills_dir=tmp_path / "workspace" / "skills",
+        builtin_skills_dir=tmp_path / "builtin" / "skills",
+        resources=["scripts", "references", "assets"],
+        include_examples=True,
+    )
+
+    assert (skill_dir / "scripts" / "_example.py").exists()
+    assert (skill_dir / "references" / "reference.md").exists()
+    assert (skill_dir / "assets" / "example.txt").exists()
+
+    skill_dir = init_skill.init_skill(
+        "cleanup skill",
+        target="workspace",
+        workspace_skills_dir=tmp_path / "workspace" / "skills",
+        builtin_skills_dir=tmp_path / "builtin" / "skills",
+        resources=["scripts", "references", "assets"],
+        include_examples=False,
+    )
+
+    assert not (skill_dir / "scripts" / "_example.py").exists()
+    assert not (skill_dir / "references" / "reference.md").exists()
+    assert not (skill_dir / "assets" / "example.txt").exists()
+
+
 def test_validate_skill_accepts_generated_skill(tmp_path: Path) -> None:
     skill_dir = init_skill.init_skill(
         "validator-skill",
@@ -205,6 +233,20 @@ def test_validate_skill_rejects_placeholder_skill_body(tmp_path: Path) -> None:
     assert "placeholder" in message.lower()
 
 
+def test_validate_skill_rejects_generated_placeholder_resources(tmp_path: Path) -> None:
+    skill_dir = init_skill.init_skill(
+        "placeholder-resources",
+        path=tmp_path,
+        resources=["scripts", "references", "assets"],
+        include_examples=True,
+    )
+
+    valid, message = quick_validate.validate_skill(skill_dir)
+
+    assert not valid
+    assert "placeholder resource" in message.lower()
+
+
 def test_validate_skill_rejects_missing_example_requests_section(tmp_path: Path) -> None:
     skill_dir = tmp_path / "missing-examples-skill"
     skill_dir.mkdir()
@@ -268,6 +310,59 @@ def test_validate_skill_accepts_current_auto_skill_creator_folder_naming() -> No
     )
 
     assert valid, message
+
+
+def test_validate_skill_accepts_non_english_description_prefix(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "bilingual-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: bilingual-skill\n"
+        "description: 适用于处理发票识别和小票抽取请求。\n"
+        "---\n\n"
+        "# Bilingual Skill\n\n"
+        "## Example Requests\n\n"
+        "- 帮我提取这张发票里的金额和日期。\n\n"
+        "## Workflow\n\n"
+        "1. 读取输入。\n"
+        "2. 返回结构化结果。\n",
+        encoding="utf-8",
+    )
+
+    valid, message = quick_validate.validate_skill(skill_dir)
+
+    assert valid, message
+
+
+def test_validate_skill_allows_common_noise_files_in_root(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "noise-ok-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: noise-ok-skill\n"
+        "description: Use when handling noise-tolerant skill requests.\n"
+        "---\n\n"
+        "# Noise OK Skill\n\n"
+        "## Example Requests\n\n"
+        "- Validate this skill folder.\n\n"
+        "## Workflow\n\n"
+        "1. Inspect the files.\n"
+        "2. Return the result.\n",
+        encoding="utf-8",
+    )
+    (skill_dir / ".DS_Store").write_text("x", encoding="utf-8")
+    (skill_dir / "__pycache__").mkdir()
+
+    valid, message = quick_validate.validate_skill(skill_dir)
+
+    assert valid, message
+
+
+def test_auto_skill_creator_skill_forbids_workspace_output_artifacts() -> None:
+    content = Path("skills/auto_skill_creator/SKILL.md").read_text(encoding="utf-8")
+
+    assert "/workspace/output" in content
+    assert "do not leave generated skill files" in content.lower()
 
 
 def test_validate_skill_rejects_public_cli_only_script(tmp_path: Path) -> None:

@@ -694,6 +694,143 @@ def test_get_task_result_reports_collected_media_ready_for_final_reply() -> None
     assert payload["reply_artifacts_count"] == 1
 
 
+def test_dispatch_emits_primary_resource_id_for_multi_resource_task() -> None:
+    from babybot.agent_kernel import TaskResult
+    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    child_bus = InMemoryChildTaskBus()
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="ignored",
+                status="succeeded",
+                output="done",
+            )
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-primary-resource",
+        resource_manager=DummyResourceManager(),  # type: ignore[arg-type]
+        bridge=_Bridge(),  # type: ignore[arg-type]
+        child_task_bus=child_bus,
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+    )
+
+    async def _run() -> list[dict[str, Any]]:
+        task_id = await runtime.dispatch(
+            {
+                "resource_ids": ["skill.weather", "skill.image"],
+                "description": "组合任务",
+            },
+            task_counter=0,
+            context=ExecutionContext(session_id="flow-primary-resource"),
+        )
+        await runtime.wait_for_tasks([task_id])
+        return [event.payload for event in child_bus.events_for("flow-primary-resource")]
+
+    payloads = asyncio.run(_run())
+    resource_ids = [payload.get("resource_id") for payload in payloads if "resource_id" in payload]
+
+    assert resource_ids
+    assert set(resource_ids) == {"skill.weather"}
+
+
+def test_dispatch_times_out_hung_child_task() -> None:
+    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    cancelled = asyncio.Event()
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cancelled.set()
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-timeout",
+        resource_manager=DummyResourceManager(),  # type: ignore[arg-type]
+        bridge=_Bridge(),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+        default_timeout_s=0.01,
+    )
+
+    async def _run() -> tuple[dict[str, Any], bool]:
+        task_id = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "hang forever"},
+            task_counter=0,
+            context=ExecutionContext(session_id="flow-timeout"),
+        )
+        payload = json.loads(await runtime.wait_for_tasks([task_id]))[task_id]
+        return payload, cancelled.is_set()
+
+    payload, was_cancelled = asyncio.run(_run())
+
+    assert payload["status"] == "failed"
+    assert "timeout" in payload["error"].lower()
+    assert was_cancelled is True
+
+
+def test_orchestrator_reply_waits_for_child_task_cancellation_cleanup() -> None:
+    cleaned_up = asyncio.Event()
+    started = asyncio.Event()
+
+    class _Gateway:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+            del request, context
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "后台慢任务", call_id="c1"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            await asyncio.sleep(0)
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="c2",
+                        name="reply_to_user",
+                        arguments={"text": "先给用户回复"},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            finally:
+                cleaned_up.set()
+
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=_Gateway())
+    orch._bridge = _Bridge()  # type: ignore[assignment]
+
+    result = asyncio.run(orch.run("先回复我", ExecutionContext(session_id="cancel-cleanup")))
+
+    assert result.conclusion == "先给用户回复"
+    assert started.is_set() is True
+    assert cleaned_up.is_set() is True
+
+
 def test_system_prompt_explains_reply_artifacts_are_auto_attached() -> None:
     gateway = DummyGateway([])
     rm = DummyResourceManager()

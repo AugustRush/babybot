@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import dataclasses
 import datetime
 import inspect
@@ -58,7 +59,7 @@ class MessageBus:
             maxsize=max(1, queue_size)
         )
         self._global_sem = asyncio.Semaphore(config.system.max_concurrency)
-        self._chat_sems: dict[str, asyncio.Semaphore] = {}
+        self._chat_sems: OrderedDict[str, asyncio.Semaphore] = OrderedDict()
         max_concurrency = max(1, int(config.system.max_concurrency))
         requested_scheduled = int(
             getattr(
@@ -79,14 +80,17 @@ class MessageBus:
         self._accepting = False
 
     def _get_chat_sem(self, key: str) -> asyncio.Semaphore:
+        if not isinstance(self._chat_sems, OrderedDict):
+            self._chat_sems = OrderedDict(self._chat_sems)
         sem = self._chat_sems.get(key)
-        if sem is None:
-            # Evict oldest entries if at capacity
-            while len(self._chat_sems) >= 2000:
-                oldest_key = next(iter(self._chat_sems))
-                del self._chat_sems[oldest_key]
-            sem = asyncio.Semaphore(self._config.system.max_per_chat)
-            self._chat_sems[key] = sem
+        if sem is not None:
+            self._chat_sems.move_to_end(key)
+            return sem
+
+        while len(self._chat_sems) >= 2000:
+            self._chat_sems.popitem(last=False)
+        sem = asyncio.Semaphore(self._config.system.max_per_chat)
+        self._chat_sems[key] = sem
         return sem
 
     async def enqueue(self, msg: InboundMessage) -> None:

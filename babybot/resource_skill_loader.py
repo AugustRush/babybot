@@ -95,11 +95,11 @@ class SkillLoader:
                         runtime=runtime,
                     )
                 )
-            except BaseException as exc:
+            except Exception as exc:
                 logger.warning("Failed to load configured skill %s: %s", name, exc)
 
     def discover_skills(self) -> None:
-        roots = [self._owner.config.builtin_skills_dir, self._owner.config.workspace_skills_dir]
+        roots = [self._owner.config.workspace_skills_dir, self._owner.config.builtin_skills_dir]
         for root in roots:
             if not root.exists() or not root.is_dir():
                 continue
@@ -158,7 +158,7 @@ class SkillLoader:
                             runtime=runtime,
                         )
                     )
-                except BaseException as exc:
+                except Exception as exc:
                     logger.warning("Failed to auto-load skill %s: %s", child, exc)
 
     def register_skill_tools(
@@ -230,7 +230,7 @@ class SkillLoader:
                             func_name=tool_name,
                         )
                         tool_names.append(tool_name)
-                except BaseException as exc:
+                except Exception as exc:
                     logger.warning(
                         "Failed to import skill script %s: %s",
                         py_file,
@@ -256,7 +256,7 @@ class SkillLoader:
         return group_name, tuple(sorted(set(tool_names)))
 
     @staticmethod
-    def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         if not text.startswith("---\n"):
             return {}, text.strip()
         end = text.find("\n---", 4)
@@ -264,12 +264,36 @@ class SkillLoader:
             return {}, text.strip()
         header = text[4:end].strip()
         body = text[end + 4 :].strip()
-        meta: dict[str, str] = {}
-        for line in header.splitlines():
+        meta: dict[str, Any] = {}
+        current_key: str | None = None
+        list_buffer: list[str] = []
+
+        def _flush_list_buffer() -> None:
+            nonlocal current_key, list_buffer
+            if current_key is not None and list_buffer:
+                meta[current_key] = list_buffer[:]
+            current_key = None
+            list_buffer = []
+
+        for raw_line in header.splitlines():
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if current_key is not None and stripped.startswith("- "):
+                list_buffer.append(stripped[2:].strip().strip("'\""))
+                continue
+            _flush_list_buffer()
             if ":" not in line:
                 continue
             key, value = line.split(":", 1)
-            meta[key.strip()] = value.strip().strip("'\"")
+            key = key.strip()
+            value = value.strip()
+            if value:
+                meta[key] = value.strip("'\"")
+            else:
+                current_key = key
+        _flush_list_buffer()
         return meta, body
 
     @staticmethod
@@ -545,15 +569,51 @@ class SkillLoader:
     def schema_for_ast_annotation(annotation: ast.AST | None) -> dict[str, Any]:
         if annotation is None:
             return {"type": "string"}
-        text = ast.unparse(annotation).strip().lower()
-        if "bool" in text:
+
+        def _base_name(node: ast.AST | None) -> str:
+            if node is None:
+                return ""
+            if isinstance(node, ast.Name):
+                return node.id.lower()
+            if isinstance(node, ast.Attribute):
+                return node.attr.lower()
+            if isinstance(node, ast.Subscript):
+                return _base_name(node.value)
+            return ast.unparse(node).strip().lower()
+
+        def _literal_type(node: ast.AST | None) -> str | None:
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, bool):
+                    return "boolean"
+                if isinstance(node.value, int) and not isinstance(node.value, bool):
+                    return "integer"
+                if isinstance(node.value, float):
+                    return "number"
+                if isinstance(node.value, str):
+                    return "string"
+            if isinstance(node, ast.Tuple):
+                item_types = {
+                    inferred
+                    for inferred in (_literal_type(item) for item in node.elts)
+                    if inferred is not None
+                }
+                if len(item_types) == 1:
+                    return next(iter(item_types))
+            return None
+
+        base_name = _base_name(annotation)
+        if base_name == "bool":
             return {"type": "boolean"}
-        if any(token in text for token in {"int", "long"}):
+        if base_name in {"int", "long"}:
             return {"type": "integer"}
-        if any(token in text for token in {"float", "decimal"}):
+        if base_name in {"float", "decimal"}:
             return {"type": "number"}
-        if any(token in text for token in {"dict", "mapping"}):
+        if base_name in {"dict", "mapping"}:
             return {"type": "object"}
-        if any(token in text for token in {"list", "tuple", "set", "sequence"}):
+        if base_name in {"list", "tuple", "set", "sequence"}:
             return {"type": "array"}
+        if base_name == "literal":
+            inferred = _literal_type(getattr(annotation, "slice", None))
+            if inferred is not None:
+                return {"type": inferred}
         return {"type": "string"}

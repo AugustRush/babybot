@@ -120,9 +120,10 @@ class OpenAICompatibleGateway(ModelProvider):
             "max_tokens": self._config.model.max_tokens,
             "stream": True,
         }
-        pieces: list[str] = []
+        accumulated_text = ""
 
         async def _consume() -> None:
+            nonlocal accumulated_text
             stream = await client.chat.completions.create(**kwargs)
             async for chunk in stream:
                 for choice in getattr(chunk, "choices", []) or []:
@@ -132,15 +133,15 @@ class OpenAICompatibleGateway(ModelProvider):
                     piece = self._extract_stream_delta_text(delta)
                     if not piece:
                         continue
-                    pieces.append(piece)
-                    await self._call_stream_callback(on_stream_text, "".join(pieces))
+                    accumulated_text += piece
+                    await self._call_stream_callback(on_stream_text, accumulated_text)
 
         if heartbeat is not None:
             async with heartbeat.keep_alive():
                 await asyncio.wait_for(_consume(), timeout=per_call_timeout)
         else:
             await asyncio.wait_for(_consume(), timeout=per_call_timeout)
-        return "".join(pieces).strip()
+        return accumulated_text.strip()
 
     @staticmethod
     def _delta_tool_calls(delta: Any) -> list[Any]:
@@ -252,13 +253,13 @@ class OpenAICompatibleGateway(ModelProvider):
         step: Any,
         per_call_timeout: float,
     ) -> ModelResponse:
-        content_pieces: list[str] = []
         streamed_text = ""
+        saw_content_text = False
         finish_reason = "stop"
         tool_calls: dict[int, dict[str, str]] = {}
 
         async def _consume() -> None:
-            nonlocal streamed_text, finish_reason
+            nonlocal streamed_text, finish_reason, saw_content_text
             stream = await client.chat.completions.create(**kwargs, stream=True)
             async for chunk in stream:
                 for choice in getattr(chunk, "choices", []) or []:
@@ -269,7 +270,8 @@ class OpenAICompatibleGateway(ModelProvider):
 
                     piece = self._extract_stream_delta_text(delta)
                     if piece:
-                        content_pieces.append(piece)
+                        saw_content_text = True
+                        streamed_text += piece
 
                     for item in self._delta_tool_calls(delta):
                         index = self._read_delta_field(item, "index")
@@ -292,11 +294,13 @@ class OpenAICompatibleGateway(ModelProvider):
                         if isinstance(arguments, str) and arguments:
                             acc["arguments"] += arguments
 
-                    next_text = "".join(content_pieces)
-                    if not next_text:
+                    next_text = streamed_text
+                    if not saw_content_text:
                         next_text = self._extract_reply_text_from_stream_tool_calls(tool_calls)
                     if next_text and next_text != streamed_text:
                         streamed_text = next_text
+                        await self._call_stream_callback(on_stream_text, streamed_text)
+                    elif piece:
                         await self._call_stream_callback(on_stream_text, streamed_text)
 
         if heartbeat is not None:
@@ -318,7 +322,7 @@ class OpenAICompatibleGateway(ModelProvider):
             step=step,
         )
         return ModelResponse(
-            text="".join(content_pieces).strip(),
+            text=(streamed_text.strip() if saw_content_text else ""),
             tool_calls=tuple(parsed_tool_calls),
             finish_reason=finish_reason or "stop",
             metadata={

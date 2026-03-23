@@ -11,6 +11,15 @@ def build_create_worker_tool(owner: Any) -> Any:
         lease: dict[str, Any] | None = None,
         skill_ids: list[str] | None = None,
     ) -> str:
+        system_conf = getattr(getattr(owner, "config", None), "system", None)
+        max_depth = max(1, int(getattr(system_conf, "worker_max_depth", 3) or 3))
+        depth_var = getattr(owner, "_get_current_worker_depth_var", None)
+        current_depth = int(depth_var().get()) if callable(depth_var) else 0
+        if current_depth >= max_depth:
+            return (
+                f"Max worker depth reached ({current_depth}/{max_depth}). "
+                "Finish in the current worker instead of creating another nested worker."
+            )
         inherited_lease = lease
         if inherited_lease is None:
             current_lease = owner._get_current_task_lease_var().get()
@@ -37,11 +46,23 @@ def build_dispatch_workers_tool(owner: Any) -> Any:
         max_concurrency: int = 3,
         lease: dict[str, Any] | None = None,
         skill_ids: list[str] | None = None,
+        timeout_s: float | None = None,
     ) -> str:
         normalized = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
         if not normalized:
             return "No valid tasks were provided."
         limit = max(1, min(int(max_concurrency), len(normalized), 8))
+        system_conf = getattr(getattr(owner, "config", None), "system", None)
+        effective_timeout = timeout_s
+        if effective_timeout is None:
+            effective_timeout = getattr(system_conf, "worker_subtask_timeout", None)
+        if effective_timeout is not None:
+            try:
+                effective_timeout = float(effective_timeout)
+            except (TypeError, ValueError):
+                effective_timeout = None
+            if effective_timeout is not None and effective_timeout <= 0:
+                effective_timeout = None
         semaphore = asyncio.Semaphore(limit)
         inherited_lease = lease
         if inherited_lease is None:
@@ -57,13 +78,23 @@ def build_dispatch_workers_tool(owner: Any) -> Any:
         async def run_one(index: int, task: str) -> dict[str, Any]:
             async with semaphore:
                 try:
-                    text, _ = await owner.run_subagent_task(
+                    coro = owner.run_subagent_task(
                         task_description=task,
                         lease=inherited_lease,
                         agent_name=f"Worker-{index}",
                         skill_ids=inherited_skill_ids,
                     )
+                    if effective_timeout is not None:
+                        text, _ = await asyncio.wait_for(coro, timeout=effective_timeout)
+                    else:
+                        text, _ = await coro
                     return {"index": index, "task": task, "result": text}
+                except asyncio.TimeoutError:
+                    return {
+                        "index": index,
+                        "task": task,
+                        "error": f"Timeout after {effective_timeout:.2f}s",
+                    }
                 except Exception as exc:
                     return {"index": index, "task": task, "error": str(exc)}
 

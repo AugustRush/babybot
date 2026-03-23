@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import contextvars
 import json
 import sys
@@ -17,6 +18,7 @@ _AUTO_SKILL_CREATOR_SCRIPTS = Path("skills/auto_skill_creator/scripts").resolve(
 if str(_AUTO_SKILL_CREATOR_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_AUTO_SKILL_CREATOR_SCRIPTS))
 auto_init_skill = importlib.import_module("init_skill")
+from babybot.builtin_tools.workers import build_create_worker_tool, build_dispatch_workers_tool
 
 
 def test_resource_manager_exposes_expected_registration_and_runtime_entrypoints() -> None:
@@ -39,6 +41,25 @@ Do something.
     meta, body = ResourceManager._parse_frontmatter(text)
     assert meta["name"] == "sample-skill"
     assert meta["description"] == "test skill"
+    assert "Do something." in body
+
+
+def test_parse_frontmatter_supports_colons_and_yaml_lists() -> None:
+    text = """---
+name: sample-skill
+description: "Use when: parsing data"
+include_groups:
+  - code
+  - browser
+---
+
+# Title
+
+Do something.
+"""
+    meta, body = ResourceManager._parse_frontmatter(text)
+    assert meta["description"] == "Use when: parsing data"
+    assert meta["include_groups"] == ["code", "browser"]
     assert "Do something." in body
 
 
@@ -69,7 +90,7 @@ def test_select_skill_packs_returns_all_active_skills() -> None:
     }
     packs = asyncio.run(manager._select_skill_packs("请使用 $text-to-image 画一只兔子"))
     names = sorted(p.name for p in packs)
-    assert names == ["code-review", "text-to-image"]
+    assert names == ["text-to-image"]
 
 
 def test_tokenize_supports_cjk_and_latin_terms() -> None:
@@ -270,6 +291,50 @@ def test_discovered_skill_frontmatter_can_extend_include_groups(tmp_path: Path) 
     skill = manager.skills["creator-helper"]
 
     assert skill.lease.include_groups == ("code",)
+
+
+def test_workspace_skill_overrides_builtin_skill_with_same_name(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    workspace_skills_dir = workspace_dir / "skills"
+    builtin_skills_dir = tmp_path / "builtin" / "skills"
+    workspace_skill_dir = workspace_skills_dir / "shared-skill"
+    builtin_skill_dir = builtin_skills_dir / "shared-skill"
+    workspace_skill_dir.mkdir(parents=True, exist_ok=True)
+    builtin_skill_dir.mkdir(parents=True, exist_ok=True)
+
+    (builtin_skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: shared-skill\n"
+        "description: Use when loading the builtin variant.\n"
+        "---\n\n"
+        "# Builtin Shared Skill\n\n"
+        "## Example Requests\n\n"
+        "- Use the builtin version.\n",
+        encoding="utf-8",
+    )
+    (workspace_skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: shared-skill\n"
+        "description: Use when loading the workspace override.\n"
+        "---\n\n"
+        "# Workspace Shared Skill\n\n"
+        "## Example Requests\n\n"
+        "- Use the workspace version.\n",
+        encoding="utf-8",
+    )
+
+    cfg = Config()
+    cfg.workspace_dir = workspace_dir
+    cfg.workspace_skills_dir = workspace_skills_dir
+    cfg.builtin_skills_dir = builtin_skills_dir
+    cfg.workspace_tools_dir = workspace_dir / "tools"
+    cfg.scheduled_tasks_file = workspace_dir / "scheduled_tasks.json"
+
+    manager = ResourceManager(cfg)
+    skill = manager.skills["shared-skill"]
+
+    assert skill.description == "Use when loading the workspace override."
+    assert Path(skill.directory) == workspace_skill_dir.resolve()
 
 
 def test_register_skill_tools_avoids_import_side_effects_for_function_scripts(
@@ -572,6 +637,34 @@ def test_select_skill_packs_loads_all_active_skills() -> None:
     assert sorted(p.name for p in packs) == ["a", "b", "c"]
 
 
+def test_select_skill_packs_prefers_keyword_and_phrase_matches() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="Check weather forecasts",
+            directory="/tmp/weather-query",
+            prompt="weather prompt",
+            active=True,
+            keywords=("weather", "forecast", "天气"),
+            phrases=("weather forecast", "查天气"),
+        ),
+        "image-gen": LoadedSkill(
+            name="image-gen",
+            description="Generate images",
+            directory="/tmp/image-gen",
+            prompt="image prompt",
+            active=True,
+            keywords=("image", "draw", "画图"),
+            phrases=("generate image",),
+        ),
+    }
+
+    packs = asyncio.run(manager._select_skill_packs("请帮我查天气并给出 weather forecast"))
+
+    assert [pack.name for pack in packs] == ["weather-query"]
+
+
 def test_select_skill_packs_with_explicit_ids_filters_result() -> None:
     manager = object.__new__(ResourceManager)
     manager.skills = {
@@ -744,6 +837,69 @@ def test_get_resource_briefs_keeps_prompt_only_skill_active_without_unrelated_to
     assert prompt_brief["tools_preview"] == []
 
 
+def test_get_resource_briefs_reuses_single_registry_snapshot() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "basic": ToolGroup(name="basic", description="Core tools", active=True),
+        "skill_weather_query": ToolGroup(
+            name="skill_weather_query",
+            description="Weather tools",
+            active=True,
+        ),
+        "map_services": ToolGroup(
+            name="map_services",
+            description="Map MCP tools",
+            active=True,
+        ),
+    }
+    manager.mcp_server_groups = {"gaode_map": "map_services"}
+    manager.skills = {
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="用于查询天气",
+            directory="/tmp/weather-query",
+            prompt="weather prompt",
+            active=True,
+            lease=ToolLease(include_groups=("skill_weather_query",)),
+            tool_group="skill_weather_query",
+        )
+    }
+
+    class _Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _Registered:
+        def __init__(self, name: str, group: str) -> None:
+            self.tool = _Tool(name)
+            self.group = group
+
+    class _Registry:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.items = [
+                _Registered("weather_query__fetch_weather", "skill_weather_query"),
+                _Registered("gaode_map__search", "map_services"),
+                _Registered("list_files", "basic"),
+            ]
+
+        def list(self, lease=None):
+            self.calls += 1
+            if lease is None:
+                return list(self.items)
+            include_groups = set(getattr(lease, "include_groups", ()) or ())
+            if include_groups:
+                return [item for item in self.items if item.group in include_groups]
+            return list(self.items)
+
+    manager.registry = _Registry()
+
+    briefs = manager.get_resource_briefs()
+
+    assert briefs
+    assert manager.registry.calls == 1
+
+
 def test_json_schema_for_callable_handles_collections_and_kwargs() -> None:
     def dispatch_workers(
         tasks: list[str],
@@ -758,6 +914,14 @@ def test_json_schema_for_callable_handles_collections_and_kwargs() -> None:
     assert schema["properties"]["max_concurrency"]["type"] == "integer"
     assert schema["properties"]["lease"]["type"] == "object"
     assert "kwargs" not in schema["properties"]
+
+
+def test_schema_for_ast_annotation_does_not_misclassify_literal_strings() -> None:
+    node = ast.parse("def demo(value: Literal['internal']):\n    pass\n").body[0]
+
+    schema = ResourceManager._schema_for_ast_annotation(node.args.args[0].annotation)
+
+    assert schema["type"] == "string"
 
 
 def test_load_tool_module_raises_when_script_calls_sys_exit(tmp_path: Path) -> None:
@@ -972,6 +1136,64 @@ def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_
     assert isinstance(executor_skill_packs, list)
     assert [pack.name for pack in executor_skill_packs] == ["weather-query"]
     assert all(pack.tool_lease == ToolLease() for pack in executor_skill_packs)
+
+
+def test_create_worker_tool_enforces_max_depth() -> None:
+    class _Owner:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(system=SimpleNamespace(worker_max_depth=2))
+            self._lease_var = contextvars.ContextVar("lease_var", default=None)
+            self._skill_ids_var = contextvars.ContextVar("skill_ids_var", default=None)
+            self._worker_depth_var = contextvars.ContextVar("worker_depth_var", default=2)
+            self.called = False
+
+        def _get_current_task_lease_var(self):
+            return self._lease_var
+
+        def _get_current_skill_ids_var(self):
+            return self._skill_ids_var
+
+        def _get_current_worker_depth_var(self):
+            return self._worker_depth_var
+
+        async def run_subagent_task(self, *args, **kwargs):
+            del args, kwargs
+            self.called = True
+            return "done", []
+
+    owner = _Owner()
+    tool = build_create_worker_tool(owner)
+
+    result = asyncio.run(tool("nested task"))
+
+    assert "max worker depth" in result.lower()
+    assert owner.called is False
+
+
+def test_dispatch_workers_tool_applies_timeout_to_hung_subtasks() -> None:
+    class _Owner:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(system=SimpleNamespace(worker_subtask_timeout=0.01))
+            self._lease_var = contextvars.ContextVar("lease_var", default=None)
+            self._skill_ids_var = contextvars.ContextVar("skill_ids_var", default=None)
+
+        def _get_current_task_lease_var(self):
+            return self._lease_var
+
+        def _get_current_skill_ids_var(self):
+            return self._skill_ids_var
+
+        async def run_subagent_task(self, *args, **kwargs):
+            del args, kwargs
+            await asyncio.sleep(60)
+            return "done", []
+
+    owner = _Owner()
+    tool = build_dispatch_workers_tool(owner)
+
+    payload = json.loads(asyncio.run(tool(["slow task"])))
+
+    assert payload["results"][0]["error"].lower().startswith("timeout")
 
 
 def test_run_subagent_task_includes_current_channel_scope_for_live_delivery(monkeypatch, tmp_path: Path) -> None:

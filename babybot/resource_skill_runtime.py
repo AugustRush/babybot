@@ -6,15 +6,44 @@ from .agent_kernel import SkillPack, ToolLease
 
 
 class ResourceSkillRuntime:
+    MAX_MATCHED_SKILLS = 6
+
     def __init__(self, owner: Any) -> None:
         self._owner = owner
+
+    def _match_score(self, skill: Any, task_description: str) -> int:
+        query = (task_description or "").strip().lower()
+        if not query:
+            return 0
+        skill_name = skill.name.strip().lower()
+        resource_id = self._owner._skill_resource_id(skill).strip().lower()
+        score = 0
+        if f"${skill_name}" in query or resource_id in query:
+            score += 100
+        elif len(skill_name) >= 3 and skill_name in query:
+            score += 50
+
+        phrases = {
+            phrase.strip().lower()
+            for phrase in getattr(skill, "phrases", ())
+            if str(phrase).strip()
+        }
+        score += 10 * sum(1 for phrase in phrases if phrase in query)
+
+        query_terms = self._owner._tokenize(task_description)
+        keywords = {
+            str(keyword).strip().lower()
+            for keyword in getattr(skill, "keywords", ())
+            if str(keyword).strip()
+        }
+        score += sum(1 for keyword in keywords if keyword in query_terms)
+        return score
 
     async def select_skill_packs(
         self,
         task_description: str,
         skill_ids: list[str] | None = None,
     ) -> list[SkillPack]:
-        del task_description
         active = [skill for skill in self._owner.skills.values() if skill.active]
         if not active:
             return []
@@ -30,6 +59,21 @@ class ResourceSkillRuntime:
                 if skill.name.strip().lower() in wanted
                 or self._owner._skill_resource_id(skill) in wanted
             ]
+        else:
+            scored = [
+                (self._match_score(skill, task_description), skill)
+                for skill in active
+            ]
+            matched = [
+                skill
+                for score, skill in sorted(
+                    scored,
+                    key=lambda item: (-item[0], item[1].name.lower()),
+                )
+                if score > 0
+            ]
+            if matched:
+                active = matched[: self.MAX_MATCHED_SKILLS]
         return [
             SkillPack(
                 name=skill.name,

@@ -301,7 +301,25 @@ class SingleAgentExecutor:
                             list(tc.arguments.keys()),
                         )
                         started = time.perf_counter()
-                        result = await reg.tool.invoke(tc.arguments, tool_context)
+                        try:
+                            result = await reg.tool.invoke(tc.arguments, tool_context)
+                        except Exception as exc:
+                            elapsed = time.perf_counter() - started
+                            logger.exception(
+                                "Executor tool crashed task=%s tool=%s elapsed=%.2fs",
+                                task.task_id,
+                                tc.name,
+                                elapsed,
+                            )
+                            return (
+                                tc,
+                                (
+                                    f"Tool error: {exc}"
+                                    "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
+                                ),
+                                [],
+                            )
+
                         elapsed = time.perf_counter() - started
                         output = result.content if result.ok else (
                             f"Tool error: {result.error}"

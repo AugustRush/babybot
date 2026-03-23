@@ -786,6 +786,13 @@ class ResourceManager:
             self._current_skill_ids = current
         return current
 
+    def _get_current_worker_depth_var(self) -> contextvars.ContextVar[int]:
+        current = getattr(self, "_current_worker_depth", None)
+        if current is None:
+            current = contextvars.ContextVar("current_worker_depth", default=0)
+            self._current_worker_depth = current
+        return current
+
     def _get_current_tool_context_var(self) -> contextvars.ContextVar[Any | None]:
         current = getattr(self, "_current_tool_context", None)
         if current is None:
