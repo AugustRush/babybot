@@ -127,18 +127,6 @@ class OrchestratorAgent:
         task.add_done_callback(_on_done)
         return task
 
-    def _resolve_agent_profiles_dir(self) -> str | None:
-        """Return the agent profiles directory if configured or default exists."""
-        configured = getattr(self.config.system, "agent_profiles_dir", "")
-        if configured:
-            p = Path(configured).expanduser()
-            return str(p) if p.is_dir() else None
-        home_dir = getattr(self.config, "home_dir", None)
-        if home_dir is None:
-            return None
-        default = Path(home_dir) / "agents"
-        return str(default) if default.is_dir() else None
-
     async def _answer_with_dag(
         self,
         user_input: str,
@@ -165,7 +153,6 @@ class OrchestratorAgent:
             "task_heartbeat_registry": getattr(self, "_task_heartbeat_registry", None),
             "task_stale_after_s": float(self.config.system.idle_timeout),
             "max_steps": getattr(self.config.system, "orchestrator_max_steps", 30),
-            "agent_profiles_dir": self._resolve_agent_profiles_dir(),
         }
         for key, value in optional_kwargs.items():
             if key not in parameters or value is None:

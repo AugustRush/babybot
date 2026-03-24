@@ -63,6 +63,7 @@ class SkillLoader:
                         description=description or f"Skill: {name}",
                         directory=str(skill_dir.resolve()),
                         prompt=prompt,
+                        role=meta.get("role", ""),
                         keywords=keywords,
                         phrases=phrases,
                         lease=ToolLease(
@@ -137,6 +138,7 @@ class SkillLoader:
                             description=description,
                             directory=str(child.resolve()),
                             prompt=prompt,
+                            role=meta.get("role", ""),
                             keywords=keywords,
                             phrases=phrases,
                             source="auto",

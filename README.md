@@ -6,7 +6,7 @@
 
 - `ResourceManager` 对外仍是统一 facade
 - 技能加载、工具注册、资源作用域、宿主 Python 执行、workspace 工具、subagent runtime 等内部职责已拆到独立模块
-- `ExecutorRegistry` 管理可插拔执行后端（Gateway / Claude Code），`DynamicOrchestrator` 负责子任务编排和团队协作调度
+- `ExecutorRegistry` 管理可插拔执行后端（Gateway / Claude Code），`DynamicOrchestrator` 负责子任务编排和团队协作调度（通过 `skill_id` 引用 prompt-only skill 定义角色）
 - 只有主 agent 负责最终向通道发送消息；子 agent 只执行任务并返回文本/文件路径
 
 ## 快速开始
@@ -75,7 +75,6 @@ uv run gateway
 | **ExecutorRegistry** | `agent_kernel/executors/__init__.py` | 可插拔执行后端注册与路由（按 backend 名称分发） |
 | **ClaudeCodeExecutor** | `agent_kernel/executors/claude_code.py` | 通过 `claude` CLI 子进程驱动 Claude Code |
 | **TeamRunner** | `agent_kernel/team.py` | 结构化多 Agent 交互（辩论模式），支持 per-agent executor |
-| **AgentProfileLoader** | `agent_kernel/agent_profile.py` | 解析 AGENT.md（YAML frontmatter + Markdown body）为 AgentProfile |
 | **ResourceManager** | `resource.py` | 对外资源 facade；聚合工具/MCP/技能/子任务运行时 |
 | **SingleAgentExecutor** | `agent_kernel/executor.py` | model → tool_calls → tool_results 执行循环 |
 | **OpenAICompatibleGateway** | `model_gateway.py` | OpenAI 兼容 API 封装，支持图片 vision 格式 |
@@ -227,7 +226,6 @@ uv run gateway
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
     "context_max_chats": 500,
-    "agent_profiles_dir": ""
   }
 }
 ```
@@ -248,7 +246,6 @@ uv run gateway
 | `context_history_tokens` | 2000 | 历史上下文 token 预算 |
 | `context_compact_threshold` | 3000 | 触发锚点压缩的 token 阈值 |
 | `context_max_chats` | 500 | 内存中 LRU 缓存的最大会话数 |
-| `agent_profiles_dir` | `""` | Agent Profile 目录路径；为空则自动检查 `~/.babybot/agents/` |
 
 ### MCP 服务
 
@@ -293,7 +290,7 @@ uv run gateway
 
 当前项目中的工具入口以 `builtin_tools/` 为主，主要分为：
 
-- `basic`：worker 调度、定时任务、观测工具
+- `basic`：worker 调度、定时任务、观测工具、技能热加载（`reload_skill`）
 - `code`：workspace 文件读写、Python / shell 执行
 - `channel_*`：由通道在运行时注册的发送类工具
 
@@ -317,38 +314,17 @@ uv run gateway
 
 技能目录需包含 `SKILL.md`（frontmatter 定义元数据 + 正文作为 system prompt），可选 `scripts/` 子目录放置技能专属工具脚本。
 
-### Agent Profile
+### Prompt-only Skill（团队角色技能）
 
-Agent Profile 使用与技能相同的 `YAML frontmatter + Markdown body` 格式，文件命名为 `AGENT.md`，用于持久化和复用 team agent 的配置。
+Skill 同时承担两种用途：**工具路由**（带 `scripts/` 的常规技能）和**团队角色定义**（prompt-only 技能）。一个不含 `scripts/` 目录、仅有 SKILL.md 的技能就是 prompt-only skill，可在 `dispatch_team` 中通过 `skill_id` 引用，为团队辩论 / 协作 Agent 提供预定义的角色和 system prompt。
 
-**目录结构：**
-
-```
-~/.babybot/agents/          ← 默认 profile 目录（自动检测）
-  code-reviewer/
-    AGENT.md
-  security-expert/
-    AGENT.md
-```
-
-也可以在 `config.json` 中显式指定：
-
-```json
-{
-  "system": {
-    "agent_profiles_dir": "~/my-agents"
-  }
-}
-```
-
-**AGENT.md 示例：**
+**SKILL.md 示例（prompt-only 团队角色）：**
 
 ```markdown
 ---
 name: code-reviewer
 role: 代码评审专家
 description: 擅长发现代码质量问题和潜在 bug
-resource_id: code_tools
 ---
 
 你是一个严谨的代码评审专家。在评审时请关注：
@@ -362,14 +338,13 @@ resource_id: code_tools
 
 | 字段 | 必需 | 说明 |
 |------|------|------|
-| `name` | 是 | Agent 唯一标识，对应 `dispatch_team` 中的 `profile_id` |
-| `role` | 是 | Agent 角色描述，用于 TeamRunner 中的角色标注 |
-| `description` | 否 | 简短功能描述 |
-| `resource_id` | 否 | 关联的资源 ID，使该 agent 具备工具调用能力 |
+| `name` | 是 | 技能唯一标识 |
+| `description` | 是 | 技能用途描述，同时用于路由匹配 |
+| `role` | 否 | 团队角色标注，用于 `dispatch_team` 中自动填充 agent 的 `role` |
 
-Markdown body 作为 `system_prompt`，在 TeamRunner 执行时通过 `exec_ctx` 传递给 executor。
+Markdown body 作为 `prompt`（即 system_prompt），在 TeamRunner 执行时传递给 executor。
 
-`dispatch_team` 的 agent 定义中使用 `profile_id` 引用预定义的 profile，profile 提供默认值，agent dict 中的显式字段会 override。
+`dispatch_team` 的 agent 定义中使用 `skill_id` 引用已加载的 skill，skill 提供 `role` / `description` / `prompt` 的默认值，agent dict 中的显式字段会覆盖。
 
 ### 多 Agent 团队协作
 
@@ -391,8 +366,8 @@ BabyBot 支持通过 `dispatch_team` 组织多个 Agent 进行结构化多轮协
   → MessageBus → OrchestratorAgent → DynamicOrchestrator
     → LLM 决策：调用 dispatch_team
       → TeamRunner.run_debate()
-        → Agent A 发言 (Round 1)
-        → Agent B 发言 (Round 1)
+        → Agent A 发言 (Round 1) → on_turn 回调 → 独立消息卡片 + heartbeat
+        → Agent B 发言 (Round 1) → on_turn 回调 → 独立消息卡片 + heartbeat
         → Agent A 发言 (Round 2)
         → ...（最多 max_rounds 轮，或 judge 判定收敛后提前结束）
       → 返回讨论记录和总结
@@ -400,21 +375,23 @@ BabyBot 支持通过 `dispatch_team` 组织多个 Agent 进行结构化多轮协
   → Channel 发送最终结果给用户
 ```
 
+每轮辩论发言通过 `on_turn` 回调实时推送为独立飞书消息卡片（而非覆盖同一张卡片），同时保持 heartbeat 活跃，避免长时间辩论因空闲超时被终止。
+
 **高级用法 — 带工具能力的 Agent：**
 
 如果 agent 指定了 `resource_id`，该 agent 在辩论中可以调用对应资源的工具（如搜索、代码执行、数据分析），而不仅仅是纯文本讨论。这通过 `ResourceBridgeExecutor` 实现，agent 的每次发言都会经过完整的 executor 链路。
 
-**高级用法 — 引用预定义 Profile：**
+**高级用法 — 引用预定义 Skill：**
 
-在 `~/.babybot/agents/` 下预先定义好 AGENT.md 后，LLM 在调用 `dispatch_team` 时可以通过 `profile_id` 引用这些 agent，无需每次在 tool call 参数中重复写完整的 role / description / system_prompt。
+在 `skills/` 目录下创建 prompt-only 的 SKILL.md 后，LLM 在调用 `dispatch_team` 时可以通过 `skill_id` 引用这些角色定义，无需每次在 tool call 参数中重复写完整的 role / description / system_prompt。
 
 **快速体验步骤：**
 
 1. 确保已配置好模型 API（`~/.babybot/config.json`）
-2. （可选）创建 Agent Profile：
+2. （可选）创建 prompt-only 角色技能：
    ```bash
-   mkdir -p ~/.babybot/agents/pro-analyst
-   cat > ~/.babybot/agents/pro-analyst/AGENT.md << 'EOF'
+   mkdir -p ~/.babybot/workspace/skills/pro-analyst
+   cat > ~/.babybot/workspace/skills/pro-analyst/SKILL.md << 'EOF'
    ---
    name: pro-analyst
    role: 正方分析师
@@ -637,7 +614,6 @@ babybot/
 │   │   ├── executor.py          # SingleAgentExecutor
 │   │   ├── dynamic_orchestrator.py # DynamicOrchestrator（子任务编排 + team dispatch）
 │   │   ├── team.py              # TeamRunner（多 Agent 辩论 / 协作）
-│   │   ├── agent_profile.py     # AgentProfile / AgentProfileLoader
 │   │   ├── protocols.py         # ExecutorPort protocol
 │   │   ├── types.py             # TaskContract / ExecutionContext / TaskResult
 │   │   ├── executors/           # 可插拔执行后端
@@ -670,11 +646,12 @@ babybot/
 - **轻量内核** — 最小抽象、低耦合执行内核
 - **可插拔执行后端** — `ExecutorRegistry` 按 backend 名称路由，内置 `ResourceBridgeExecutor`（Gateway 链路）和 `ClaudeCodeExecutor`（claude CLI），实现 `ExecutorPort` 即可扩展
 - **多 Agent 团队协作** — `dispatch_team` + `TeamRunner` 支持结构化辩论模式，agent 可携带独立 executor 和 resource_id
-- **声明式 Agent Profile** — AGENT.md（YAML frontmatter + Markdown body）持久化 agent 配置，`dispatch_team` 通过 `profile_id` 引用
+- **统一 Skill 模型** — SKILL.md 同时支持工具路由和团队角色定义，`dispatch_team` 通过 `skill_id` 引用 prompt-only skill
 - **分层记忆** — Tape + Hybrid Memory + Hot/Warm/Cold 三层上下文
 - **多模态** — 图片从通道到 LLM 全链路支持（延迟 base64 编码）
 - **MCP 支持** — stdio / HTTP 两种传输，动态注册工具
 - **技能路由** — 技能 prompt、工具脚本、lease 与 worker prompt 解耦
+- **技能热加载** — 创建或更新技能后调用 `reload_skill` 即时生效，无需重启进程
 - **宿主 Python fallback** — 技能脚本可在独立本地 Python 环境运行，并支持多级回退
 - **运行时可观测性** — flow / chat context 只读观测工具，稳定分段输出
 - **更轻量阶段反馈** — progress 去重、阶段完成摘要、stdout/stderr 驱动 heartbeat

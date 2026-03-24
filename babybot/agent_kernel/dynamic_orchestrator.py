@@ -159,9 +159,9 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                                     "type": "string",
                                     "description": "可选：指定该Agent使用的资源ID",
                                 },
-                                "profile_id": {
+                                "skill_id": {
                                     "type": "string",
-                                    "description": "可选：引用预定义的 AGENT.md profile name",
+                                    "description": "可选：引用预定义的 skill name，自动继承其 role/description/prompt",
                                 },
                             },
                             "required": ["id", "role", "description"],
@@ -1007,7 +1007,6 @@ class DynamicOrchestrator:
         max_steps: int | None = None,
         default_task_timeout_s: float | None = 300.0,
         executor_registry: "ExecutorPort | None" = None,
-        agent_profiles_dir: str | None = None,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
@@ -1022,12 +1021,6 @@ class DynamicOrchestrator:
         self._task_stale_after_s = task_stale_after_s
         self._max_steps = max(1, int(max_steps or self.MAX_STEPS))
         self._default_task_timeout_s = default_task_timeout_s
-        self._agent_profiles: dict[str, Any] = {}
-        if agent_profiles_dir:
-            from .agent_profile import AgentProfileLoader
-
-            for profile in AgentProfileLoader.load_dir(agent_profiles_dir):
-                self._agent_profiles[profile.name] = profile
 
     @property
     def _executor(self) -> ExecutorPort:
@@ -1353,21 +1346,21 @@ class DynamicOrchestrator:
                 return f"[error: {result.error}]"
             return result.output
 
-        # Resolve profiles and prepare per-agent executors
+        # Resolve skill_id references and prepare per-agent executors
         enriched_agents: list[dict[str, Any]] = []
+        skills = getattr(self._rm, "skills", {})
         for agent in agents:
             agent_copy = dict(agent)
-            profile_id = agent_copy.pop("profile_id", None)
-            if profile_id and profile_id in self._agent_profiles:
-                profile = self._agent_profiles[profile_id]
-                if not agent_copy.get("role"):
-                    agent_copy["role"] = profile.role
-                if not agent_copy.get("description"):
-                    agent_copy["description"] = profile.description
-                if not agent_copy.get("resource_id") and profile.resource_id:
-                    agent_copy["resource_id"] = profile.resource_id
-                if not agent_copy.get("system_prompt") and profile.system_prompt:
-                    agent_copy["system_prompt"] = profile.system_prompt
+            skill_id = agent_copy.pop("skill_id", None) or agent_copy.pop("profile_id", None)
+            if skill_id:
+                skill = skills.get(skill_id) or skills.get(skill_id.strip().lower())
+                if skill is not None:
+                    if not agent_copy.get("role") and skill.role:
+                        agent_copy["role"] = skill.role
+                    if not agent_copy.get("description"):
+                        agent_copy["description"] = skill.description
+                    if not agent_copy.get("system_prompt") and skill.prompt:
+                        agent_copy["system_prompt"] = skill.prompt
             rid = agent_copy.get("resource_id")
             if rid:
                 scope = self._rm.resolve_resource_scope(rid, require_tools=True)

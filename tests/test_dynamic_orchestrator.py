@@ -1526,60 +1526,53 @@ def test_team_dispatch_with_resource_id() -> None:
     assert "Reviews code" in rm.calls[0]["task_description"]
 
 
-def test_team_dispatch_with_profile_id() -> None:
-    """dispatch_team resolves profile_id to an agent profile."""
-    import tempfile
-    import os
+def test_team_dispatch_with_skill_id() -> None:
+    """dispatch_team resolves skill_id to a loaded skill for role/description/prompt."""
+    from babybot.resource_models import LoadedSkill
 
-    with tempfile.TemporaryDirectory() as profiles_dir:
-        alice_dir = os.path.join(profiles_dir, "alice")
-        os.makedirs(alice_dir)
-        with open(os.path.join(alice_dir, "AGENT.md"), "w") as f:
-            f.write(
-                "---\n"
-                "name: alice\n"
-                "role: proponent\n"
-                "description: Argues for the proposal\n"
-                "---\n\n"
-                "You always argue in favor.\n"
-            )
-
-        team_args = {
-            "topic": "Should we adopt TDD?",
-            "agents": [
-                {"id": "alice", "profile_id": "alice"},
-                {"id": "bob", "role": "opponent", "description": "Against TDD"},
-            ],
-            "max_rounds": 1,
-        }
-        gateway = DummyGateway(
-            [
-                ModelResponse(
-                    text="",
-                    tool_calls=(
-                        ModelToolCall(
-                            call_id="call_team",
-                            name="dispatch_team",
-                            arguments=team_args,
-                        ),
+    team_args = {
+        "topic": "Should we adopt TDD?",
+        "agents": [
+            {"id": "alice", "skill_id": "alice"},
+            {"id": "bob", "role": "opponent", "description": "Against TDD"},
+        ],
+        "max_rounds": 1,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
                     ),
-                    finish_reason="tool_calls",
                 ),
-                # Two agent turns (1 round x 2 agents)
-                ModelResponse(text="TDD improves confidence"),
-                ModelResponse(text="TDD slows initial dev"),
-                _reply_tool_call("Debate concluded."),
-            ]
+                finish_reason="tool_calls",
+            ),
+            # Two agent turns (1 round x 2 agents)
+            ModelResponse(text="TDD improves confidence"),
+            ModelResponse(text="TDD slows initial dev"),
+            _reply_tool_call("Debate concluded."),
+        ]
+    )
+    rm = DummyResourceManager()
+    rm.skills = {
+        "alice": LoadedSkill(
+            name="alice",
+            description="Argues for the proposal",
+            directory="/tmp/alice",
+            prompt="You always argue in favor.",
+            role="proponent",
         )
-        rm = DummyResourceManager()
-        orch = DynamicOrchestrator(
-            resource_manager=rm,
-            gateway=gateway,
-            agent_profiles_dir=profiles_dir,
-        )
-        result = asyncio.run(orch.run("Debate TDD", ExecutionContext()))
-        assert result.conclusion == "Debate concluded."
-
+    }
+    orch = DynamicOrchestrator(
+        resource_manager=rm,
+        gateway=gateway,
+    )
+    result = asyncio.run(orch.run("Debate TDD", ExecutionContext()))
+    assert result.conclusion == "Debate concluded."
 
 # ---- heartbeat + streaming during dispatch_team tests ----
 

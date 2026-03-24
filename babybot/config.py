@@ -65,7 +65,6 @@ class SystemConfig:
     context_history_tokens: int = 2000
     context_compact_threshold: int = 3000
     context_max_chats: int = 500
-    agent_profiles_dir: str = ""
 
 
 @dataclass
@@ -201,7 +200,6 @@ class Config:
                 "context_compact_threshold", 3000
             ),
             context_max_chats=system_conf.get("context_max_chats", 500),
-            agent_profiles_dir=system_conf.get("agent_profiles_dir", ""),
         )
 
         # Resource configuration — support both flat keys and legacy "resources" wrapper
@@ -453,7 +451,6 @@ class Config:
                 "context_history_tokens": self.system.context_history_tokens,
                 "context_compact_threshold": self.system.context_compact_threshold,
                 "context_max_chats": self.system.context_max_chats,
-                "agent_profiles_dir": self.system.agent_profiles_dir,
             },
             "channels": {
                 "feishu": {

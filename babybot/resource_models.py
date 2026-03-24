@@ -55,6 +55,7 @@ class LoadedSkill:
     description: str
     directory: str
     prompt: str = ""
+    role: str = ""
     keywords: tuple[str, ...] = ()
     phrases: tuple[str, ...] = ()
     lease: ToolLease = ToolLease()
