@@ -147,6 +147,7 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
         stream_callback: StreamTextCallback | None = None,
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
+        send_intermediate_message: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, list[str]]:
         orchestrator_kwargs: dict[str, Any] = {
             "resource_manager": self.resource_manager,
@@ -194,6 +195,7 @@ class OrchestratorAgent:
                     ),
                     ("stream_callback", stream_callback),
                     ("runtime_event_callback", runtime_event_callback),
+                    ("send_intermediate_message", send_intermediate_message),
                 ]
                 if v is not None
             },
@@ -293,6 +295,7 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
         stream_callback: StreamTextCallback | None = None,
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
+        send_intermediate_message: Callable[[str], Awaitable[None]] | None = None,
     ) -> TaskResponse:
         if not self._initialized:
             async with self._init_lock:
@@ -372,6 +375,7 @@ class OrchestratorAgent:
                 media_paths=media_paths,
                 stream_callback=stream_callback,
                 runtime_event_callback=wrapped_runtime_event_callback,
+                send_intermediate_message=send_intermediate_message,
             )
             if heartbeat is not None:
                 heartbeat.beat()

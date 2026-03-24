@@ -5,6 +5,7 @@ from typing import Any
 from .code import iter_code_tool_registrations
 from .observability import iter_observability_tool_registrations
 from .scheduled_tasks import iter_scheduled_task_tool_registrations
+from .skills import iter_skill_tool_registrations
 from .time import iter_time_tool_registrations
 from .workers import iter_worker_tool_registrations
 
@@ -16,4 +17,5 @@ def iter_builtin_tool_registrations(owner: Any) -> tuple[tuple[Any, str], ...]:
         *iter_observability_tool_registrations(owner),
         *iter_time_tool_registrations(owner),
         *iter_code_tool_registrations(owner),
+        *iter_skill_tool_registrations(owner),
     )

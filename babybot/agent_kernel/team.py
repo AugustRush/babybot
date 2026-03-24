@@ -164,7 +164,14 @@ class TeamRunner:
         topic: str,
         agents: list[dict[str, str]],
         judge: Any | None = None,
+        on_turn: Any | None = None,
     ) -> DebateResult:
+        """Run a structured debate.
+
+        *on_turn*, when provided, is called after each agent turn with
+        ``(agent_id, role, round_num, output_text)``.  It may be a
+        regular or async callable.
+        """
         transcript: list[dict[str, str]] = []
         last_output = ""
 
@@ -194,6 +201,12 @@ class TeamRunner:
                     }
                 )
                 last_output = output
+
+                if on_turn is not None:
+                    import inspect as _inspect
+                    _result = on_turn(agent["id"], agent["role"], round_num, output)
+                    if _inspect.isawaitable(_result):
+                        await _result
 
             # Check convergence via optional judge
             if judge is not None:

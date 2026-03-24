@@ -369,6 +369,25 @@ class MessageBus:
                 if ok:
                     stream_last_patched = text
 
+        async def _send_intermediate_message(text: str) -> None:
+            """Send an independent message card (not patching the stream card)."""
+            if not text or not text.strip() or channel is None:
+                return
+            try:
+                await channel.send_response(
+                    msg.chat_id,
+                    TaskResponse(text=text),
+                    sender_id=msg.sender_id,
+                    metadata=msg.metadata,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to send intermediate message channel=%s chat_id=%s",
+                    msg.channel,
+                    msg.chat_id,
+                    exc_info=True,
+                )
+
         process_kwargs: dict[str, Any] = {
             "chat_key": f"{msg.channel}:{msg.chat_id}",
             "heartbeat": heartbeat,
@@ -452,6 +471,13 @@ class MessageBus:
                 self._supports_runtime_event_callback = False
         if self._supports_runtime_event_callback:
             process_kwargs["runtime_event_callback"] = _runtime_event_callback
+        if channel is not None:
+            _supports_intermediate = (
+                "send_intermediate_message"
+                in inspect.signature(self._orchestrator.process_task).parameters
+            )
+            if _supports_intermediate:
+                process_kwargs["send_intermediate_message"] = _send_intermediate_message
         try:
             response = await heartbeat.watch(
                 self._orchestrator.process_task(

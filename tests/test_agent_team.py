@@ -176,3 +176,77 @@ async def test_team_runner_per_agent_executor() -> None:
     assert "special:agent_b" in call_log
     assert "global:agent_b" not in call_log
     assert result.rounds == 1
+
+
+# ---- on_turn callback tests ----
+
+
+@pytest.mark.asyncio
+async def test_team_runner_on_turn_fires_for_each_agent_turn() -> None:
+    """on_turn callback is invoked after each agent produces output."""
+    turn_log: list[tuple[str, str, int, str]] = []
+
+    async def fake_executor(agent_id: str, prompt: str, ctx: dict) -> str:
+        return f"response from {agent_id}"
+
+    async def on_turn(agent_id: str, role: str, round_num: int, text: str) -> None:
+        turn_log.append((agent_id, role, round_num, text))
+
+    runner = TeamRunner(executor=fake_executor, max_rounds=2)
+    result = await runner.run_debate(
+        topic="test",
+        agents=[
+            {"id": "a", "role": "Pro", "description": "For"},
+            {"id": "b", "role": "Con", "description": "Against"},
+        ],
+        on_turn=on_turn,
+    )
+
+    assert result.rounds == 2
+    # 2 rounds x 2 agents = 4 calls
+    assert len(turn_log) == 4
+    assert turn_log[0] == ("a", "Pro", 1, "response from a")
+    assert turn_log[1] == ("b", "Con", 1, "response from b")
+    assert turn_log[2] == ("a", "Pro", 2, "response from a")
+    assert turn_log[3] == ("b", "Con", 2, "response from b")
+
+
+@pytest.mark.asyncio
+async def test_team_runner_sync_on_turn_works() -> None:
+    """on_turn can be a sync callable."""
+    turn_count = {"n": 0}
+
+    async def fake_executor(agent_id: str, prompt: str, ctx: dict) -> str:
+        return "ok"
+
+    def on_turn_sync(agent_id: str, role: str, round_num: int, text: str) -> None:
+        turn_count["n"] += 1
+
+    runner = TeamRunner(executor=fake_executor, max_rounds=1)
+    await runner.run_debate(
+        topic="test",
+        agents=[
+            {"id": "a", "role": "X", "description": "x"},
+            {"id": "b", "role": "Y", "description": "y"},
+        ],
+        on_turn=on_turn_sync,
+    )
+    assert turn_count["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_team_runner_on_turn_not_required() -> None:
+    """Omitting on_turn still works (backward compatible)."""
+    async def fake_executor(agent_id: str, prompt: str, ctx: dict) -> str:
+        return "ok"
+
+    runner = TeamRunner(executor=fake_executor, max_rounds=1)
+    result = await runner.run_debate(
+        topic="test",
+        agents=[
+            {"id": "a", "role": "X", "description": "x"},
+            {"id": "b", "role": "Y", "description": "y"},
+        ],
+    )
+    assert result.rounds == 1
+    assert len(result.transcript) == 2

@@ -1579,3 +1579,80 @@ def test_team_dispatch_with_profile_id() -> None:
         )
         result = asyncio.run(orch.run("Debate TDD", ExecutionContext()))
         assert result.conclusion == "Debate concluded."
+
+
+# ---- heartbeat + streaming during dispatch_team tests ----
+
+
+def test_team_dispatch_beats_heartbeat_and_streams() -> None:
+    """dispatch_team emits heartbeats and sends per-turn independent messages."""
+    team_args = {
+        "topic": "Tabs vs Spaces",
+        "agents": [
+            {"id": "tabs", "role": "tabs-advocate", "description": "Tabs are better"},
+            {"id": "spaces", "role": "spaces-advocate", "description": "Spaces are better"},
+        ],
+        "max_rounds": 1,
+    }
+    gateway = DummyGateway(
+        [
+            # Step 1: orchestrator dispatches team
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            # Steps 2-3: team agent turns (1 round x 2 agents)
+            ModelResponse(text="Tabs allow custom width"),
+            ModelResponse(text="Spaces ensure consistency"),
+            # Step 4: orchestrator replies
+            _reply_tool_call("Debate complete."),
+        ]
+    )
+
+    import contextlib
+
+    beat_count = {"n": 0}
+    intermediate_messages: list[str] = []
+
+    class FakeHeartbeat:
+        def beat(self) -> None:
+            beat_count["n"] += 1
+
+        @contextlib.asynccontextmanager
+        async def keep_alive(self, interval: float | None = None):
+            beat_count["n"] += 1
+            yield
+
+    async def send_msg(text: str) -> None:
+        intermediate_messages.append(text)
+
+    hb = FakeHeartbeat()
+    context = ExecutionContext(
+        state={
+            "heartbeat": hb,
+            "send_intermediate_message": send_msg,
+        }
+    )
+
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("Tabs vs spaces?", context))
+
+    assert result.conclusion == "Debate complete."
+    # Heartbeat should have been beat at least once per LLM call (2 agent turns)
+    assert beat_count["n"] >= 2, f"Expected >= 2 heartbeats, got {beat_count['n']}"
+    # Each agent turn should produce an independent message
+    assert len(intermediate_messages) == 2, (
+        f"Expected 2 independent messages, got {len(intermediate_messages)}"
+    )
+    assert "tabs-advocate" in intermediate_messages[0].lower()
+    assert "spaces-advocate" in intermediate_messages[1].lower()
+    # Each message is self-contained (not accumulated)
+    assert "spaces-advocate" not in intermediate_messages[0].lower()

@@ -61,6 +61,17 @@ class ToolRegistry:
     def register(self, tool: Tool, group: str = "basic") -> None:
         self._tools[tool.name] = RegisteredTool(tool=tool, group=group)
 
+    def unregister(self, name: str) -> bool:
+        """Remove a tool by name. Returns True if the tool existed."""
+        return self._tools.pop(name, None) is not None
+
+    def unregister_group(self, group: str) -> list[str]:
+        """Remove all tools in *group*. Returns the removed tool names."""
+        to_remove = [n for n, r in self._tools.items() if r.group == group]
+        for n in to_remove:
+            del self._tools[n]
+        return to_remove
+
     def get(self, name: str) -> RegisteredTool | None:
         return self._tools.get(name)
 

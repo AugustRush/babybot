@@ -2026,3 +2026,199 @@ def test_resource_manager_areset_awaits_client_close() -> None:
 
     assert closed["count"] == 1
     assert manager.mcp_clients == {}
+
+
+# ---- reload_skill hot-reload tests ----
+
+
+def test_reload_skill_loads_new_skill(tmp_path: Path) -> None:
+    """A brand-new skill directory is loaded into ResourceManager.skills."""
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: A test skill\n---\n\n# My Skill\n\nDo stuff.\n"
+    )
+
+    manager = object.__new__(ResourceManager)
+    manager.config = Config()
+    manager.registry = __import__(
+        "babybot.agent_kernel.tools", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager.mcp_clients = {}
+    manager.mcp_server_groups = {}
+    manager.channel_tools = {}
+    manager._python_probe_cache = {}
+
+    result = manager.reload_skill(str(skill_dir))
+    assert "reloaded successfully" in result
+    assert "my-skill" in manager.skills
+    loaded = manager.skills["my-skill"]
+    assert loaded.source == "hot-reload"
+    assert loaded.active is True
+    assert loaded.description == "A test skill"
+
+
+def test_reload_skill_replaces_existing_skill(tmp_path: Path) -> None:
+    """Re-loading an existing skill replaces the old entry and tools."""
+    from babybot.agent_kernel.tools import ToolRegistry
+
+    skill_dir = tmp_path / "updater"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: updater\ndescription: Version 1\n---\n\n# V1\n"
+    )
+
+    manager = object.__new__(ResourceManager)
+    manager.config = Config()
+    manager.registry = ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager.mcp_clients = {}
+    manager.mcp_server_groups = {}
+    manager.channel_tools = {}
+    manager._python_probe_cache = {}
+
+    result1 = manager.reload_skill(str(skill_dir))
+    assert "reloaded successfully" in result1
+    assert manager.skills["updater"].description == "Version 1"
+
+    # Update description.
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: updater\ndescription: Version 2\n---\n\n# V2\n"
+    )
+    result2 = manager.reload_skill(str(skill_dir))
+    assert "reloaded successfully" in result2
+    assert manager.skills["updater"].description == "Version 2"
+
+
+def test_reload_skill_registers_script_tools(tmp_path: Path) -> None:
+    """Scripts in scripts/ are registered as tools after reload."""
+    from babybot.agent_kernel.tools import ToolRegistry
+
+    skill_dir = tmp_path / "with-tools"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: with-tools\ndescription: Has scripts\n---\n\n# Tools\n"
+    )
+    scripts = skill_dir / "scripts"
+    scripts.mkdir()
+    (scripts / "helper.py").write_text(
+        'def greet(name: str) -> str:\n    """Say hello."""\n    return f"Hello {name}"\n'
+    )
+
+    manager = object.__new__(ResourceManager)
+    manager.config = Config()
+    manager.registry = ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager.mcp_clients = {}
+    manager.mcp_server_groups = {}
+    manager.channel_tools = {}
+    manager._python_probe_cache = {}
+
+    result = manager.reload_skill(str(skill_dir))
+    assert "with_tools__greet" in result
+    loaded = manager.skills["with-tools"]
+    assert "with_tools__greet" in loaded.tools
+    assert manager.registry.get("with_tools__greet") is not None
+
+
+def test_reload_skill_invalid_path_returns_error() -> None:
+    """Non-existent path returns a descriptive error."""
+    manager = object.__new__(ResourceManager)
+    manager.config = Config()
+    result = manager.reload_skill("/nonexistent/path")
+    assert "Not a valid skill directory" in result
+
+
+def test_reload_skill_removes_old_tools_on_update(tmp_path: Path) -> None:
+    """Old tools from a previous version are removed before re-registering."""
+    from babybot.agent_kernel.tools import ToolRegistry
+
+    skill_dir = tmp_path / "evolving"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: evolving\ndescription: Evolves\n---\n\n# E\n"
+    )
+    scripts = skill_dir / "scripts"
+    scripts.mkdir()
+    (scripts / "old_func.py").write_text(
+        'def old_func() -> str:\n    """Old."""\n    return "old"\n'
+    )
+
+    manager = object.__new__(ResourceManager)
+    manager.config = Config()
+    manager.registry = ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager.mcp_clients = {}
+    manager.mcp_server_groups = {}
+    manager.channel_tools = {}
+    manager._python_probe_cache = {}
+
+    manager.reload_skill(str(skill_dir))
+    assert manager.registry.get("evolving__old_func") is not None
+
+    # Replace old_func.py with new_func.py.
+    (scripts / "old_func.py").unlink()
+    (scripts / "new_func.py").write_text(
+        'def new_func() -> str:\n    """New."""\n    return "new"\n'
+    )
+
+    manager.reload_skill(str(skill_dir))
+    assert manager.registry.get("evolving__old_func") is None
+    assert manager.registry.get("evolving__new_func") is not None
+
+
+# ---- ToolRegistry.unregister / unregister_group tests ----
+
+
+def test_tool_registry_unregister_removes_tool() -> None:
+    from babybot.agent_kernel.tools import ToolRegistry
+
+    class _FakeTool:
+        name = "foo"
+        description = "foo tool"
+        schema = {}
+        async def invoke(self, args, context):
+            pass
+
+    reg = ToolRegistry()
+    reg.register(_FakeTool(), group="test")
+    assert reg.get("foo") is not None
+
+    removed = reg.unregister("foo")
+    assert removed is True
+    assert reg.get("foo") is None
+
+
+def test_tool_registry_unregister_nonexistent_returns_false() -> None:
+    from babybot.agent_kernel.tools import ToolRegistry
+
+    reg = ToolRegistry()
+    assert reg.unregister("nope") is False
+
+
+def test_tool_registry_unregister_group_removes_all_group_tools() -> None:
+    from babybot.agent_kernel.tools import ToolRegistry
+
+    class _FakeTool:
+        def __init__(self, name):
+            self.name = name
+            self.description = f"{name} tool"
+            self.schema = {}
+        async def invoke(self, args, context):
+            pass
+
+    reg = ToolRegistry()
+    reg.register(_FakeTool("a"), group="grp")
+    reg.register(_FakeTool("b"), group="grp")
+    reg.register(_FakeTool("c"), group="other")
+
+    removed = reg.unregister_group("grp")
+    assert set(removed) == {"a", "b"}
+    assert reg.get("a") is None
+    assert reg.get("b") is None
+    assert reg.get("c") is not None

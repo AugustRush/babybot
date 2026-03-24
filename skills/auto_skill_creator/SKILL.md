@@ -87,9 +87,13 @@ python skills/auto_skill_creator/scripts/init_skill.py "<skill name>" \
 python skills/auto_skill_creator/scripts/quick_validate.py <skill-directory>
 ```
 
-7. Smoke-test the actual public tool entrypoints, not just the folder structure.
+7. Hot-reload the skill so it is available immediately (no restart needed):
+   - Call the `reload_skill` tool with the skill directory path.
+   - This re-registers the skill and its tools into the current session.
+   - Only call this after validation passes.
+8. Smoke-test the actual public tool entrypoints, not just the folder structure.
    - If the skill talks to an external API or CLI, run the public wrapper with representative arguments and capture the real failure or success mode.
-8. Do not claim completion until validation passes and the public tool entrypoints have been exercised.
+9. Do not claim completion until validation passes, the skill is hot-reloaded, and the public tool entrypoints have been exercised.
 
 ## Skill Shapes
 

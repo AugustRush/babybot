@@ -469,8 +469,9 @@ def test_process_task_persists_runtime_events_to_tape(tmp_path: Path) -> None:
         media_paths=None,
         stream_callback=None,
         runtime_event_callback=None,
+        send_intermediate_message=None,
     ):
-        del user_input, tape, heartbeat, media_paths, stream_callback
+        del user_input, tape, heartbeat, media_paths, stream_callback, send_intermediate_message
         if runtime_event_callback is not None:
             await runtime_event_callback(
                 {
@@ -529,8 +530,9 @@ def test_process_task_updates_memory_from_assistant_reply_and_success_events(tmp
         media_paths=None,
         stream_callback=None,
         runtime_event_callback=None,
+        send_intermediate_message=None,
     ):
-        del user_input, tape, heartbeat, media_paths, stream_callback
+        del user_input, tape, heartbeat, media_paths, stream_callback, send_intermediate_message
         if runtime_event_callback is not None:
             await runtime_event_callback(
                 {

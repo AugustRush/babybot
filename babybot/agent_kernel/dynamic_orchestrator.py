@@ -1316,6 +1316,9 @@ class DynamicOrchestrator:
         if len(agents) < 2:
             return "error: dispatch_team requires at least 2 agents"
 
+        heartbeat = context.state.get("heartbeat")
+        send_intermediate = context.state.get("send_intermediate_message")
+
         async def gateway_executor(
             agent_id: str, prompt: str, ctx: dict[str, Any]
         ) -> str:
@@ -1329,7 +1332,11 @@ class DynamicOrchestrator:
                 ModelMessage(role="user", content=prompt),
             ]
             request = ModelRequest(messages=tuple(messages))
-            response = await self._gateway.generate(request, ExecutionContext())
+            if heartbeat is not None:
+                async with heartbeat.keep_alive():
+                    response = await self._gateway.generate(request, ExecutionContext())
+            else:
+                response = await self._gateway.generate(request, ExecutionContext())
             return response.text
 
         async def resource_executor(
@@ -1368,8 +1375,17 @@ class DynamicOrchestrator:
                     agent_copy["executor"] = functools.partial(resource_executor, rid)
             enriched_agents.append(agent_copy)
 
+        async def on_turn(agent_id: str, role: str, round_num: int, text: str) -> None:
+            if heartbeat is not None:
+                heartbeat.beat()
+            if send_intermediate is not None:
+                header = f"**[{role} — Round {round_num}]**"
+                await send_intermediate(header + "\n" + text)
+
         runner = TeamRunner(executor=gateway_executor, max_rounds=max_rounds)
-        result = await runner.run_debate(topic=topic, agents=enriched_agents)
+        result = await runner.run_debate(
+            topic=topic, agents=enriched_agents, on_turn=on_turn,
+        )
 
         return json.dumps(
             {

@@ -73,6 +73,9 @@ class _DummyOwner:
     def _inspect_chat_context(self, chat_key: str = "", query: str = "") -> str:
         return chat_key or query or "context"
 
+    def reload_skill(self, skill_path: str) -> str:
+        return f"reloaded {skill_path}"
+
 
 def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> None:
     items = list(iter_builtin_tool_registrations(_DummyOwner()))
@@ -93,6 +96,7 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("code", "_workspace_view_text_file"),
         ("code", "_workspace_write_text_file"),
         ("code", "_workspace_insert_text_file"),
+        ("basic", "reload_skill"),
     ]
 
 

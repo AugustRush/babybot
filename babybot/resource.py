@@ -591,6 +591,74 @@ class ResourceManager:
     def _upsert_skill(self, skill: LoadedSkill) -> None:
         self.skills[skill.name.strip().lower()] = skill
 
+    def reload_skill(self, skill_path: str) -> str:
+        """Re-discover and register a single skill from *skill_path*.
+
+        This allows a newly created or updated skill to become available
+        without restarting the process.  If the skill was previously loaded
+        its tools are removed first.
+        """
+        skill_dir = Path(skill_path).expanduser().resolve()
+        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
+            return f"Not a valid skill directory: {skill_dir}"
+
+        loader = self._skill_loader_view()
+        meta, prompt = loader.read_skill_document(skill_dir)
+        name = meta.get("name", skill_dir.name)
+        key = name.strip().lower()
+
+        # Remove previous version if present.
+        old = self.skills.get(key)
+        if old and old.tool_group:
+            removed = self.registry.unregister_group(old.tool_group)
+            self.groups.pop(old.tool_group, None)
+            logger.info(
+                "Unregistered %d old tools for skill %s", len(removed), name,
+            )
+
+        runtime = self._build_skill_runtime(meta)
+        tool_group, tool_names = self._register_skill_tools(
+            name, skill_dir, runtime=runtime,
+        )
+
+        meta_include_groups = loader._parse_frontmatter_list(meta.get("include_groups"))
+        meta_include_tools = loader._parse_frontmatter_list(meta.get("include_tools"))
+        meta_exclude_tools = loader._parse_frontmatter_list(meta.get("exclude_tools"))
+
+        description = meta.get("description", f"Skill: {name}")
+        keywords = loader.normalize_keywords(None, fallback=(description, name, prompt[:400]))
+        phrases = loader.normalize_phrases(None, fallback=(description, name))
+
+        self._upsert_skill(
+            LoadedSkill(
+                name=name,
+                description=description,
+                directory=str(skill_dir),
+                prompt=prompt,
+                keywords=keywords,
+                phrases=phrases,
+                source="hot-reload",
+                active=True,
+                lease=ToolLease(
+                    include_groups=tuple(
+                        dict.fromkeys(
+                            [*meta_include_groups, *(([tool_group] if tool_group else []))]
+                        )
+                    ),
+                    include_tools=tuple(meta_include_tools),
+                    exclude_tools=tuple(meta_exclude_tools),
+                ),
+                tool_group=tool_group,
+                tools=tool_names,
+                runtime=runtime,
+            )
+        )
+        logger.info("Hot-reloaded skill %s with %d tools", name, len(tool_names))
+        parts = [f"Skill '{name}' reloaded successfully."]
+        if tool_names:
+            parts.append(f"Registered tools: {', '.join(tool_names)}")
+        return " ".join(parts)
+
     def _register_skill_tools(
         self,
         skill_name: str,
