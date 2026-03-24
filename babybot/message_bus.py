@@ -369,6 +369,13 @@ class MessageBus:
                 if ok:
                     stream_last_patched = text
 
+        async def _reset_stream() -> None:
+            """Detach the current stream card so the next stream_callback creates a new one."""
+            nonlocal stream_message_id, stream_last_patched
+            async with stream_lock:
+                stream_message_id = None
+                stream_last_patched = ""
+
         async def _send_intermediate_message(text: str) -> None:
             """Send an independent message card (not patching the stream card)."""
             if not text or not text.strip() or channel is None:
@@ -460,6 +467,7 @@ class MessageBus:
                 except (TypeError, ValueError):
                     self._supports_stream_callback = False
             if self._supports_stream_callback:
+                _stream_callback.reset = _reset_stream  # type: ignore[attr-defined]
                 process_kwargs["stream_callback"] = _stream_callback
         if self._supports_runtime_event_callback is None:
             try:

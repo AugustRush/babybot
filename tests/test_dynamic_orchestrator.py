@@ -1649,3 +1649,128 @@ def test_team_dispatch_beats_heartbeat_and_streams() -> None:
     assert "spaces-advocate" in intermediate_messages[1].lower()
     # Each message is self-contained (not accumulated)
     assert "spaces-advocate" not in intermediate_messages[0].lower()
+
+
+def test_team_dispatch_streams_per_turn_and_resets() -> None:
+    """dispatch_team streams each agent turn and resets between turns."""
+    team_args = {
+        "topic": "Vim vs Emacs",
+        "agents": [
+            {"id": "vim", "role": "vim-fan", "description": "Vim is better"},
+            {"id": "emacs", "role": "emacs-fan", "description": "Emacs is better"},
+        ],
+        "max_rounds": 1,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Vim has modal editing"),
+            ModelResponse(text="Emacs is extensible"),
+            _reply_tool_call("Debate done."),
+        ]
+    )
+
+    import contextlib
+
+    streamed_texts: list[str] = []
+    reset_count = {"n": 0}
+
+    async def fake_stream_callback(accumulated_text: str) -> None:
+        streamed_texts.append(accumulated_text)
+
+    async def fake_reset() -> None:
+        reset_count["n"] += 1
+
+    fake_stream_callback.reset = fake_reset  # type: ignore[attr-defined]
+
+    class FakeHeartbeat:
+        def beat(self) -> None:
+            pass
+
+        @contextlib.asynccontextmanager
+        async def keep_alive(self, interval: float | None = None):
+            yield
+
+    context = ExecutionContext(
+        state={
+            "heartbeat": FakeHeartbeat(),
+            "stream_callback": fake_stream_callback,
+        }
+    )
+
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("Vim vs Emacs?", context))
+
+    assert result.conclusion == "Debate done."
+    # reset_stream called: once before debate, once per turn (2), once after debate = 4
+    assert reset_count["n"] == 4, f"Expected 4 resets, got {reset_count['n']}"
+    # stream_callback should have been invoked (gateway passes it through)
+    # DummyGateway doesn't actually call stream_callback, so we just verify
+    # the wiring didn't break and no send_intermediate_message was called
+
+
+def test_team_dispatch_no_stream_falls_back_to_intermediate() -> None:
+    """Without stream_callback, dispatch_team uses send_intermediate_message."""
+    team_args = {
+        "topic": "Tabs vs Spaces",
+        "agents": [
+            {"id": "tabs", "role": "tabs-fan", "description": "Tabs"},
+            {"id": "spaces", "role": "spaces-fan", "description": "Spaces"},
+        ],
+        "max_rounds": 1,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Tabs rock"),
+            ModelResponse(text="Spaces rule"),
+            _reply_tool_call("Done."),
+        ]
+    )
+
+    intermediate_messages: list[str] = []
+
+    async def send_msg(text: str) -> None:
+        intermediate_messages.append(text)
+
+    # stream_callback without .reset attribute — should NOT activate team_streaming
+    async def plain_stream(text: str) -> None:
+        pass
+
+    context = ExecutionContext(
+        state={
+            "stream_callback": plain_stream,
+            "send_intermediate_message": send_msg,
+        }
+    )
+
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("Tabs vs spaces?", context))
+
+    assert result.conclusion == "Done."
+    # Should fall back to send_intermediate_message since stream_callback has no .reset
+    assert len(intermediate_messages) == 2
+    assert "tabs-fan" in intermediate_messages[0].lower()
+    assert "spaces-fan" in intermediate_messages[1].lower()

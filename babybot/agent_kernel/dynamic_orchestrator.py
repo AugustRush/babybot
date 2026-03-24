@@ -1311,6 +1311,9 @@ class DynamicOrchestrator:
 
         heartbeat = context.state.get("heartbeat")
         send_intermediate = context.state.get("send_intermediate_message")
+        stream_callback = context.state.get("stream_callback")
+        reset_stream = getattr(stream_callback, "reset", None) if stream_callback else None
+        team_streaming = stream_callback is not None and reset_stream is not None
 
         async def gateway_executor(
             agent_id: str, prompt: str, ctx: dict[str, Any]
@@ -1325,11 +1328,14 @@ class DynamicOrchestrator:
                 ModelMessage(role="user", content=prompt),
             ]
             request = ModelRequest(messages=tuple(messages))
+            gen_ctx = ExecutionContext(
+                state={"stream_callback": stream_callback} if team_streaming else {},
+            )
             if heartbeat is not None:
                 async with heartbeat.keep_alive():
-                    response = await self._gateway.generate(request, ExecutionContext())
+                    response = await self._gateway.generate(request, gen_ctx)
             else:
-                response = await self._gateway.generate(request, ExecutionContext())
+                response = await self._gateway.generate(request, gen_ctx)
             return response.text
 
         async def resource_executor(
@@ -1371,14 +1377,22 @@ class DynamicOrchestrator:
         async def on_turn(agent_id: str, role: str, round_num: int, text: str) -> None:
             if heartbeat is not None:
                 heartbeat.beat()
-            if send_intermediate is not None:
+            if team_streaming:
+                await reset_stream()
+            elif send_intermediate is not None:
                 header = f"**[{role} — Round {round_num}]**"
                 await send_intermediate(header + "\n" + text)
+
+        if team_streaming:
+            await reset_stream()
 
         runner = TeamRunner(executor=gateway_executor, max_rounds=max_rounds)
         result = await runner.run_debate(
             topic=topic, agents=enriched_agents, on_turn=on_turn,
         )
+
+        if team_streaming:
+            await reset_stream()
 
         return json.dumps(
             {
