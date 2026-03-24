@@ -4,7 +4,7 @@
 from __future__ import annotations
 import asyncio
 import pytest
-from babybot.agent_kernel.team import Mailbox, SharedTaskList, TeamTask
+from babybot.agent_kernel.team import Mailbox, SharedTaskList, TeamTask, TeamRunner
 
 
 @pytest.mark.asyncio
@@ -83,3 +83,63 @@ def test_task_list_dependencies() -> None:
     claimed2 = tl.claim("agent_b")
     assert claimed2 is not None
     assert claimed2.task_id == "t2"
+
+
+# ── TeamRunner tests ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_team_runner_debate() -> None:
+    """TeamRunner executes a multi-round debate between two agents."""
+    round_count = 0
+
+    async def mock_executor(agent_id: str, prompt: str, context: dict) -> str:
+        nonlocal round_count
+        round_count += 1
+        if "agent_a" in agent_id:
+            return f"A's argument round {round_count}: I disagree because X"
+        return f"B's counter round {round_count}: Actually Y"
+
+    runner = TeamRunner(executor=mock_executor, max_rounds=3)
+    result = await runner.run_debate(
+        topic="Should we use microservices?",
+        agents=[
+            {
+                "id": "agent_a",
+                "role": "proponent",
+                "description": "Argues for microservices",
+            },
+            {
+                "id": "agent_b",
+                "role": "opponent",
+                "description": "Argues against microservices",
+            },
+        ],
+    )
+
+    assert result.rounds >= 2
+    assert result.rounds <= 3
+    assert len(result.transcript) > 0
+    assert result.summary  # non-empty summary
+
+
+@pytest.mark.asyncio
+async def test_team_runner_convergence() -> None:
+    """TeamRunner stops early when judge signals convergence."""
+
+    async def mock_executor(agent_id: str, prompt: str, context: dict) -> str:
+        return "I agree with the previous point."
+
+    runner = TeamRunner(executor=mock_executor, max_rounds=10)
+    result = await runner.run_debate(
+        topic="Test topic",
+        agents=[
+            {"id": "a", "role": "proponent", "description": "Pro"},
+            {"id": "b", "role": "opponent", "description": "Con"},
+        ],
+        judge=lambda transcript: (True, "Agents reached consensus"),
+    )
+
+    # Should stop before max_rounds due to convergence
+    assert result.rounds < 10
+    assert "consensus" in result.summary.lower()

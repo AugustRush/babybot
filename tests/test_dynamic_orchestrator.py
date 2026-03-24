@@ -1398,3 +1398,85 @@ def test_orchestrator_accepts_executor_registry() -> None:
     )
     result = asyncio.run(orch.run("hi", ExecutionContext()))
     assert result.conclusion == "done"
+
+
+def test_dispatch_team_tool_recognized() -> None:
+    """DynamicOrchestrator recognizes dispatch_team as a valid tool."""
+    from babybot.agent_kernel.dynamic_orchestrator import _ORCHESTRATION_TOOLS
+
+    tool_names = [t["function"]["name"] for t in _ORCHESTRATION_TOOLS]
+    assert "dispatch_team" in tool_names
+
+
+def test_team_dispatch_and_reply() -> None:
+    """Orchestrator dispatches a team debate and replies with the result."""
+    team_args = {
+        "topic": "Should we refactor?",
+        "agents": [
+            {"id": "pro", "role": "proponent", "description": "For refactoring"},
+            {"id": "con", "role": "opponent", "description": "Against refactoring"},
+        ],
+        "max_rounds": 2,
+    }
+    # The gateway will be called:
+    # 1. By the orchestrator main loop (returns dispatch_team tool call)
+    # 2. By _run_team for each agent turn (2 rounds x 2 agents = 4 calls)
+    # 3. By the orchestrator main loop again (returns reply_to_user)
+    gateway = DummyGateway(
+        [
+            # Step 1: model dispatches a team
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            # Steps 2-5: team runner calls gateway for each agent turn
+            ModelResponse(text="Microservices allow better scaling"),
+            ModelResponse(text="Monoliths are simpler to deploy"),
+            ModelResponse(text="But independent scaling is crucial"),
+            ModelResponse(text="Complexity cost outweighs benefits"),
+            # Step 6: model replies with conclusion
+            _reply_tool_call("Refactoring is recommended based on the debate."),
+        ]
+    )
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("Should we refactor?", ExecutionContext()))
+    assert "refactor" in result.conclusion.lower()
+
+
+def test_dispatch_team_too_few_agents() -> None:
+    """dispatch_team returns error when fewer than 2 agents are provided."""
+    team_args = {
+        "topic": "Solo topic",
+        "agents": [
+            {"id": "only", "role": "solo", "description": "Only one"},
+        ],
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            _reply_tool_call("Failed to dispatch team."),
+        ]
+    )
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("test", ExecutionContext()))
+    # The orchestrator should continue even after team error
+    assert result.conclusion is not None

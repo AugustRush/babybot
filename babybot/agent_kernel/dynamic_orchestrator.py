@@ -131,6 +131,48 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "dispatch_team",
+            "description": (
+                "启动一组Agent进行多轮协作讨论（如辩论、评审、头脑风暴）。"
+                "Agent之间会交替发言，支持可选的judge函数来判断是否达成共识。"
+                "返回完整讨论记录和总结。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "讨论主题",
+                    },
+                    "agents": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "role": {"type": "string"},
+                                "description": {"type": "string"},
+                                "resource_id": {
+                                    "type": "string",
+                                    "description": "可选：指定该Agent使用的资源ID",
+                                },
+                            },
+                            "required": ["id", "role", "description"],
+                        },
+                        "description": "参与讨论的Agent列表，至少2个",
+                    },
+                    "max_rounds": {
+                        "type": "integer",
+                        "description": "最大讨论轮数，默认5",
+                    },
+                },
+                "required": ["topic", "agents"],
+            },
+        },
+    },
 )
 
 
@@ -1247,7 +1289,54 @@ class DynamicOrchestrator:
             return runtime.get_task_result(args.get("task_id", ""))
         if name == "reply_to_user":
             return args.get("text", "")
+        if name == "dispatch_team":
+            return await self._run_team(args, context)
         return f"error: unknown tool: {name}"
+
+    async def _run_team(self, args: dict[str, Any], context: ExecutionContext) -> str:
+        from .team import TeamRunner
+
+        topic = args.get("topic", "")
+        agents = args.get("agents", [])
+        max_rounds = int(args.get("max_rounds", 5))
+
+        if len(agents) < 2:
+            return "error: dispatch_team requires at least 2 agents"
+
+        async def agent_executor(
+            agent_id: str, prompt: str, ctx: dict[str, Any]
+        ) -> str:
+            messages = [
+                ModelMessage(
+                    role="system",
+                    content="你是讨论参与者。根据你的角色，针对主题发表观点。",
+                ),
+                ModelMessage(role="user", content=prompt),
+            ]
+            request = ModelRequest(messages=tuple(messages))
+            response = await self._gateway.generate(request, ExecutionContext())
+            return response.text
+
+        runner = TeamRunner(executor=agent_executor, max_rounds=max_rounds)
+        result = await runner.run_debate(topic=topic, agents=agents)
+
+        return json.dumps(
+            {
+                "topic": result.topic,
+                "rounds": result.rounds,
+                "summary": result.summary,
+                "transcript_length": len(result.transcript),
+                "last_arguments": [
+                    {
+                        "agent": e["agent"],
+                        "role": e["role"],
+                        "content": e["content"][:500],
+                    }
+                    for e in result.transcript[-len(agents) :]
+                ],
+            },
+            ensure_ascii=False,
+        )
 
     async def _forward_runtime_events(
         self,

@@ -10,7 +10,14 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Mailbox", "MailMessage", "SharedTaskList", "TeamTask"]
+__all__ = [
+    "Mailbox",
+    "MailMessage",
+    "SharedTaskList",
+    "TeamTask",
+    "TeamRunner",
+    "DebateResult",
+]
 
 
 @dataclass
@@ -125,3 +132,86 @@ class SharedTaskList:
             }
             lines.append(f"[{marker.get(t.status, '?')}] {t.task_id}: {t.description}")
         return "\n".join(lines)
+
+
+@dataclass
+class DebateResult:
+    """Outcome of a structured multi-agent debate."""
+
+    topic: str
+    rounds: int
+    transcript: list[dict[str, str]]
+    summary: str
+
+
+class TeamRunner:
+    """Runs structured multi-agent interactions (e.g., debates).
+
+    The runner alternates between agents, passing each agent the previous
+    agent's output.  An optional judge function can signal early convergence.
+    """
+
+    def __init__(
+        self,
+        executor: Any,  # async callable(agent_id, prompt, context) -> str
+        max_rounds: int = 5,
+    ) -> None:
+        self._executor = executor
+        self._max_rounds = max_rounds
+
+    async def run_debate(
+        self,
+        topic: str,
+        agents: list[dict[str, str]],
+        judge: Any | None = None,
+    ) -> DebateResult:
+        transcript: list[dict[str, str]] = []
+        last_output = ""
+
+        for round_num in range(1, self._max_rounds + 1):
+            for agent in agents:
+                prompt_parts = [
+                    f"Topic: {topic}",
+                    f"Your role: {agent['role']} \u2014 {agent['description']}",
+                    f"Round: {round_num}/{self._max_rounds}",
+                ]
+                if last_output:
+                    prompt_parts.append(f"Previous argument:\n{last_output}")
+                prompt_parts.append("Present your argument:")
+
+                prompt = "\n".join(prompt_parts)
+                output = await self._executor(agent["id"], prompt, {})
+                transcript.append(
+                    {
+                        "round": str(round_num),
+                        "agent": agent["id"],
+                        "role": agent["role"],
+                        "content": output,
+                    }
+                )
+                last_output = output
+
+            # Check convergence via optional judge
+            if judge is not None:
+                converged, reason = judge(transcript)
+                if converged:
+                    return DebateResult(
+                        topic=topic,
+                        rounds=round_num,
+                        transcript=transcript,
+                        summary=reason,
+                    )
+
+        # Max rounds reached -- summarize
+        summary_parts = [
+            f"Debate on '{topic}' completed after {self._max_rounds} rounds."
+        ]
+        for entry in transcript[-len(agents) :]:
+            summary_parts.append(f"- {entry['role']}: {entry['content'][:200]}")
+
+        return DebateResult(
+            topic=topic,
+            rounds=self._max_rounds,
+            transcript=transcript,
+            summary="\n".join(summary_parts),
+        )
