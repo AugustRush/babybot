@@ -226,7 +226,8 @@ uv run gateway
     "orchestrator_max_steps": 30,
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
-    "context_max_chats": 500
+    "context_max_chats": 500,
+    "agent_profiles_dir": ""
   }
 }
 ```
@@ -247,6 +248,7 @@ uv run gateway
 | `context_history_tokens` | 2000 | 历史上下文 token 预算 |
 | `context_compact_threshold` | 3000 | 触发锚点压缩的 token 阈值 |
 | `context_max_chats` | 500 | 内存中 LRU 缓存的最大会话数 |
+| `agent_profiles_dir` | `""` | Agent Profile 目录路径；为空则自动检查 `~/.babybot/agents/` |
 
 ### MCP 服务
 
@@ -319,6 +321,28 @@ uv run gateway
 
 Agent Profile 使用与技能相同的 `YAML frontmatter + Markdown body` 格式，文件命名为 `AGENT.md`，用于持久化和复用 team agent 的配置。
 
+**目录结构：**
+
+```
+~/.babybot/agents/          ← 默认 profile 目录（自动检测）
+  code-reviewer/
+    AGENT.md
+  security-expert/
+    AGENT.md
+```
+
+也可以在 `config.json` 中显式指定：
+
+```json
+{
+  "system": {
+    "agent_profiles_dir": "~/my-agents"
+  }
+}
+```
+
+**AGENT.md 示例：**
+
 ```markdown
 ---
 name: code-reviewer
@@ -345,7 +369,64 @@ resource_id: code_tools
 
 Markdown body 作为 `system_prompt`，在 TeamRunner 执行时通过 `exec_ctx` 传递给 executor。
 
-Profile 目录可在 `DynamicOrchestrator` 初始化时通过 `agent_profiles_dir` 参数指定。`dispatch_team` 的 agent 定义中使用 `profile_id` 引用预定义的 profile，profile 提供默认值，agent dict 中的显式字段会 override。
+`dispatch_team` 的 agent 定义中使用 `profile_id` 引用预定义的 profile，profile 提供默认值，agent dict 中的显式字段会 override。
+
+### 多 Agent 团队协作
+
+BabyBot 支持通过 `dispatch_team` 组织多个 Agent 进行结构化多轮协作（辩论、评审、头脑风暴）。该能力已完全接入 Channel 链路，用户通过飞书、微信或 CLI 发送消息即可触发。
+
+**触发方式：**
+
+编排 Agent（DynamicOrchestrator）会根据用户请求自动判断是否需要多 Agent 协作。以下类型的请求会触发 `dispatch_team`：
+
+- "请从正反两面分析这个方案的优缺点"
+- "组织一场关于 Python vs Rust 的辩论"
+- "让代码评审专家和安全专家一起审查这段代码"
+- "请几个不同角色的专家讨论这个架构设计"
+
+**工作流程：**
+
+```
+用户消息 (Channel)
+  → MessageBus → OrchestratorAgent → DynamicOrchestrator
+    → LLM 决策：调用 dispatch_team
+      → TeamRunner.run_debate()
+        → Agent A 发言 (Round 1)
+        → Agent B 发言 (Round 1)
+        → Agent A 发言 (Round 2)
+        → ...（最多 max_rounds 轮，或 judge 判定收敛后提前结束）
+      → 返回讨论记录和总结
+    → LLM 调用 reply_to_user 汇总回复
+  → Channel 发送最终结果给用户
+```
+
+**高级用法 — 带工具能力的 Agent：**
+
+如果 agent 指定了 `resource_id`，该 agent 在辩论中可以调用对应资源的工具（如搜索、代码执行、数据分析），而不仅仅是纯文本讨论。这通过 `ResourceBridgeExecutor` 实现，agent 的每次发言都会经过完整的 executor 链路。
+
+**高级用法 — 引用预定义 Profile：**
+
+在 `~/.babybot/agents/` 下预先定义好 AGENT.md 后，LLM 在调用 `dispatch_team` 时可以通过 `profile_id` 引用这些 agent，无需每次在 tool call 参数中重复写完整的 role / description / system_prompt。
+
+**快速体验步骤：**
+
+1. 确保已配置好模型 API（`~/.babybot/config.json`）
+2. （可选）创建 Agent Profile：
+   ```bash
+   mkdir -p ~/.babybot/agents/pro-analyst
+   cat > ~/.babybot/agents/pro-analyst/AGENT.md << 'EOF'
+   ---
+   name: pro-analyst
+   role: 正方分析师
+   description: 从积极角度分析问题
+   ---
+
+   你是一个乐观的分析师，擅长发现方案的优势和机会。
+   EOF
+   ```
+3. 启动 CLI 或 Gateway：`uv run babybot` 或 `uv run gateway`
+4. 发送消息："请从多个角度分析远程办公的利弊"
+5. BabyBot 会自动组织多 Agent 辩论，最终汇总回复
 
 技能脚本执行说明：
 

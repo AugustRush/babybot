@@ -65,6 +65,7 @@ class SystemConfig:
     context_history_tokens: int = 2000
     context_compact_threshold: int = 3000
     context_max_chats: int = 500
+    agent_profiles_dir: str = ""
 
 
 @dataclass
@@ -196,8 +197,11 @@ class Config:
             worker_max_steps=system_conf.get("worker_max_steps", 14),
             orchestrator_max_steps=system_conf.get("orchestrator_max_steps", 30),
             context_history_tokens=system_conf.get("context_history_tokens", 2000),
-            context_compact_threshold=system_conf.get("context_compact_threshold", 3000),
+            context_compact_threshold=system_conf.get(
+                "context_compact_threshold", 3000
+            ),
             context_max_chats=system_conf.get("context_max_chats", 500),
+            agent_profiles_dir=system_conf.get("agent_profiles_dir", ""),
         )
 
         # Resource configuration — support both flat keys and legacy "resources" wrapper
@@ -231,7 +235,9 @@ class Config:
         self.weixin = WeixinConfig(
             enabled=weixin_conf.get("enabled", False),
             base_url=weixin_conf.get("base_url", "https://ilinkai.weixin.qq.com"),
-            cdn_base_url=weixin_conf.get("cdn_base_url", "https://novac2c.cdn.weixin.qq.com/c2c"),
+            cdn_base_url=weixin_conf.get(
+                "cdn_base_url", "https://novac2c.cdn.weixin.qq.com/c2c"
+            ),
             token=weixin_conf.get("token", ""),
             state_dir=weixin_conf.get("state_dir", ""),
             media_dir=weixin_conf.get("media_dir", ""),
@@ -368,7 +374,7 @@ class Config:
                     "media_dir": "",
                     "poll_timeout": 35,
                     "allow_from": [],
-                }
+                },
             },
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
@@ -447,6 +453,7 @@ class Config:
                 "context_history_tokens": self.system.context_history_tokens,
                 "context_compact_threshold": self.system.context_compact_threshold,
                 "context_max_chats": self.system.context_max_chats,
+                "agent_profiles_dir": self.system.agent_profiles_dir,
             },
             "channels": {
                 "feishu": {
@@ -472,7 +479,7 @@ class Config:
                     "media_dir": self.weixin.media_dir,
                     "poll_timeout": self.weixin.poll_timeout,
                     "allow_from": list(self.weixin.allow_from),
-                }
+                },
             },
             "scheduled_tasks_count": len(self.scheduled_tasks),
         }
