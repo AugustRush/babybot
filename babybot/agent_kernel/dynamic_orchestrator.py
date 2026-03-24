@@ -323,7 +323,7 @@ class InProcessChildTaskRuntime:
         max_tasks: int,
         max_retries: int = 0,
         retry_delay_seconds: Callable[[int], float] = default_retry_delay_seconds,
-        default_timeout_s: float | None = 120.0,
+        default_timeout_s: float | None = 300.0,
         stale_after_s: float | None = None,
         progress_poll_interval_s: float = 0.05,
     ) -> None:
@@ -1005,7 +1005,7 @@ class DynamicOrchestrator:
         task_heartbeat_registry: "TaskHeartbeatRegistry | None" = None,
         task_stale_after_s: float | None = None,
         max_steps: int | None = None,
-        default_task_timeout_s: float | None = 120.0,
+        default_task_timeout_s: float | None = 300.0,
         executor_registry: "ExecutorPort | None" = None,
         agent_profiles_dir: str | None = None,
     ) -> None:

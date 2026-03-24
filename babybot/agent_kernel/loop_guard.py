@@ -17,7 +17,7 @@ class LoopGuardConfig:
     enabled: bool = True
     max_identical_calls: int = 3
     ping_pong_window: int = 6
-    per_tool_call_budget: int = 8
+    per_tool_call_budget: int = 20
     max_context_messages: int = 100
 
 
@@ -70,7 +70,7 @@ class LoopGuard:
                 ),
             )
 
-        self._tool_sequence.append(tool_name)
+        self._tool_sequence.append(f"{tool_name}:{digest}")
         if len(self._tool_sequence) >= max(4, self._config.ping_pong_window):
             if self._detect_ping_pong():
                 return LoopVerdict(
