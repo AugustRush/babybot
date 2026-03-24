@@ -1,11 +1,12 @@
 # BabyBot
 
-轻量级多通道对话 Agent 框架。支持工具调用、MCP 服务、技能路由、分层长期记忆、多模态图片，以及飞书等即时通讯平台接入。
+轻量级多通道对话 Agent 框架。支持可插拔执行后端、多 Agent 团队协作、工具调用、MCP 服务、技能路由、分层长期记忆、多模态图片，以及飞书 / 微信等即时通讯平台接入。
 
 当前实现已经形成比较清晰的分层：
 
 - `ResourceManager` 对外仍是统一 facade
 - 技能加载、工具注册、资源作用域、宿主 Python 执行、workspace 工具、subagent runtime 等内部职责已拆到独立模块
+- `ExecutorRegistry` 管理可插拔执行后端（Gateway / Claude Code），`DynamicOrchestrator` 负责子任务编排和团队协作调度
 - 只有主 agent 负责最终向通道发送消息；子 agent 只执行任务并返回文本/文件路径
 
 ## 快速开始
@@ -34,7 +35,7 @@ uv run gateway
 ## 架构概览
 
 ```
-                        Channel (Feishu, ...)
+                        Channel (Feishu, Weixin, ...)
                               │
                     InboundMessage (text + media_paths)
                               │
@@ -44,14 +45,23 @@ uv run gateway
                       OrchestratorAgent
                     (Tape 记忆 + 上下文压缩)
                               │
-                      ResourceManager
-                    (工具注册 + 技能路由)
+                  DynamicOrchestrator ── dispatch_team ──► TeamRunner
+                  (动态子任务编排)        (多 Agent 辩论/协作)
                               │
-                    SingleAgentExecutor
-                  (model ↔ tool_calls 循环)
-                              │
-                  OpenAICompatibleGateway
-                    (OpenAI API 调用)
+                      ExecutorRegistry
+                    (可插拔执行后端路由)
+                       ╱           ╲
+            ResourceBridge     ClaudeCodeExecutor
+          (内置 Gateway 链路)   (claude CLI 子进程)
+                  │
+            ResourceManager
+          (工具注册 + 技能路由)
+                  │
+          SingleAgentExecutor
+        (model ↔ tool_calls 循环)
+                  │
+        OpenAICompatibleGateway
+          (OpenAI API 调用)
 ```
 
 ### 核心组件
@@ -61,6 +71,11 @@ uv run gateway
 | **MessageBus** | `message_bus.py` | 异步消息队列，全局 + 单聊并发信号量 |
 | **Heartbeat** | `heartbeat.py` | 空闲超时检测 + 硬超时保护 |
 | **OrchestratorAgent** | `orchestrator.py` | 接收用户输入，管理 Tape + Hybrid Memory，调度子任务 |
+| **DynamicOrchestrator** | `agent_kernel/dynamic_orchestrator.py` | 动态子任务编排；支持 `dispatch_task` 和 `dispatch_team` |
+| **ExecutorRegistry** | `agent_kernel/executors/__init__.py` | 可插拔执行后端注册与路由（按 backend 名称分发） |
+| **ClaudeCodeExecutor** | `agent_kernel/executors/claude_code.py` | 通过 `claude` CLI 子进程驱动 Claude Code |
+| **TeamRunner** | `agent_kernel/team.py` | 结构化多 Agent 交互（辩论模式），支持 per-agent executor |
+| **AgentProfileLoader** | `agent_kernel/agent_profile.py` | 解析 AGENT.md（YAML frontmatter + Markdown body）为 AgentProfile |
 | **ResourceManager** | `resource.py` | 对外资源 facade；聚合工具/MCP/技能/子任务运行时 |
 | **SingleAgentExecutor** | `agent_kernel/executor.py` | model → tool_calls → tool_results 执行循环 |
 | **OpenAICompatibleGateway** | `model_gateway.py` | OpenAI 兼容 API 封装，支持图片 vision 格式 |
@@ -300,6 +315,38 @@ uv run gateway
 
 技能目录需包含 `SKILL.md`（frontmatter 定义元数据 + 正文作为 system prompt），可选 `scripts/` 子目录放置技能专属工具脚本。
 
+### Agent Profile
+
+Agent Profile 使用与技能相同的 `YAML frontmatter + Markdown body` 格式，文件命名为 `AGENT.md`，用于持久化和复用 team agent 的配置。
+
+```markdown
+---
+name: code-reviewer
+role: 代码评审专家
+description: 擅长发现代码质量问题和潜在 bug
+resource_id: code_tools
+---
+
+你是一个严谨的代码评审专家。在评审时请关注：
+1. 逻辑正确性
+2. 边界条件处理
+3. 错误处理完整性
+4. 代码可读性
+```
+
+**Frontmatter 字段**
+
+| 字段 | 必需 | 说明 |
+|------|------|------|
+| `name` | 是 | Agent 唯一标识，对应 `dispatch_team` 中的 `profile_id` |
+| `role` | 是 | Agent 角色描述，用于 TeamRunner 中的角色标注 |
+| `description` | 否 | 简短功能描述 |
+| `resource_id` | 否 | 关联的资源 ID，使该 agent 具备工具调用能力 |
+
+Markdown body 作为 `system_prompt`，在 TeamRunner 执行时通过 `exec_ctx` 传递给 executor。
+
+Profile 目录可在 `DynamicOrchestrator` 初始化时通过 `agent_profiles_dir` 参数指定。`dispatch_team` 的 agent 定义中使用 `profile_id` 引用预定义的 profile，profile 提供默认值，agent dict 中的显式字段会 override。
+
 技能脚本执行说明：
 
 - 技能脚本优先在“宿主 Python”环境执行，而不是项目当前 venv
@@ -504,21 +551,29 @@ babybot/
 │   ├── heartbeat.py             # 心跳 / 超时监控
 │   ├── context.py               # Tape 长期记忆 + TapeStore
 │   ├── mcp_runtime.py           # MCP stdio/HTTP 客户端
-│   ├── scheduler.py             # DAG 任务调度器
+│   ├── cron.py                  # 定时任务调度
 │   ├── agent_kernel/            # 轻量执行内核
 │   │   ├── executor.py          # SingleAgentExecutor
+│   │   ├── dynamic_orchestrator.py # DynamicOrchestrator（子任务编排 + team dispatch）
+│   │   ├── team.py              # TeamRunner（多 Agent 辩论 / 协作）
+│   │   ├── agent_profile.py     # AgentProfile / AgentProfileLoader
+│   │   ├── protocols.py         # ExecutorPort protocol
+│   │   ├── types.py             # TaskContract / ExecutionContext / TaskResult
+│   │   ├── executors/           # 可插拔执行后端
+│   │   │   ├── __init__.py      # ExecutorRegistry
+│   │   │   └── claude_code.py   # ClaudeCodeExecutor
+│   │   ├── dag_ports.py         # ResourceBridgeExecutor
 │   │   ├── model.py             # ModelMessage / ModelRequest / ModelResponse
 │   │   ├── tools.py             # Tool / ToolRegistry / ToolLease
-│   │   ├── types.py             # TaskContract / ExecutionContext
 │   │   ├── skills.py            # SkillPack 合并逻辑
 │   │   └── mcp.py               # MCP 工具适配器
-│   ├── cron.py                  # 定时任务调度
 │   └── channels/                # 通道集成
 │       ├── base.py              # BaseChannel / InboundMessage
 │       ├── manager.py           # ChannelManager（自动发现）
 │       ├── registry.py          # 通道类自动注册
 │       ├── tools.py             # ChannelToolContext / ChannelCapabilities
-│       └── feishu.py            # 飞书通道实现
+│       ├── feishu.py            # 飞书通道实现
+│       └── weixin.py            # 微信通道实现
 ├── skills/                      # 技能目录
 ├── config.json                  # 配置文件
 ├── config.json.example          # 配置模板
@@ -532,6 +587,9 @@ babybot/
 - **配置与工作区分离** — 主配置在 `config.json`，定时任务在 workspace 独立文件，支持 `${VAR}` 环境变量
 - **双运行模式** — CLI 交互调试 + Gateway 多通道生产部署
 - **轻量内核** — 最小抽象、低耦合执行内核
+- **可插拔执行后端** — `ExecutorRegistry` 按 backend 名称路由，内置 `ResourceBridgeExecutor`（Gateway 链路）和 `ClaudeCodeExecutor`（claude CLI），实现 `ExecutorPort` 即可扩展
+- **多 Agent 团队协作** — `dispatch_team` + `TeamRunner` 支持结构化辩论模式，agent 可携带独立 executor 和 resource_id
+- **声明式 Agent Profile** — AGENT.md（YAML frontmatter + Markdown body）持久化 agent 配置，`dispatch_team` 通过 `profile_id` 引用
 - **分层记忆** — Tape + Hybrid Memory + Hot/Warm/Cold 三层上下文
 - **多模态** — 图片从通道到 LLM 全链路支持（延迟 base64 编码）
 - **MCP 支持** — stdio / HTTP 两种传输，动态注册工具
@@ -543,7 +601,7 @@ babybot/
 - **主/子 Agent 边界清晰** — 只有主 agent 负责通道发送，子 agent 只返回结果与产物路径
 - **可配置执行轮数** — orchestrator / worker 的最大步数可配置
 - **并发控制** — 全局 + 单聊信号量，心跳空闲超时检测
-- **通道扩展** — 实现 `BaseChannel` 即可接入新平台
+- **通道扩展** — 实现 `BaseChannel` 即可接入新平台（已支持飞书、微信）
 
 ## License
 
