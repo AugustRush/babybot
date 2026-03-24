@@ -174,8 +174,14 @@ class TeamRunner:
         """
         transcript: list[dict[str, str]] = []
         last_output = ""
+        agent_ids = [a["id"] for a in agents]
+        logger.info(
+            "Debate started: topic=%r agents=%s max_rounds=%d",
+            topic, agent_ids, self._max_rounds,
+        )
 
         for round_num in range(1, self._max_rounds + 1):
+            logger.info("Debate round %d/%d started", round_num, self._max_rounds)
             for agent in agents:
                 prompt_parts = [
                     f"Topic: {topic}",
@@ -192,6 +198,10 @@ class TeamRunner:
                 if agent.get("system_prompt"):
                     exec_ctx["system_prompt"] = agent["system_prompt"]
                 output = await agent_exec(agent["id"], prompt, exec_ctx)
+                logger.info(
+                    "Debate turn: round=%d agent=%s role=%s output_len=%d",
+                    round_num, agent["id"], agent["role"], len(output),
+                )
                 transcript.append(
                     {
                         "round": str(round_num),
@@ -212,6 +222,10 @@ class TeamRunner:
             if judge is not None:
                 converged, reason = judge(transcript)
                 if converged:
+                    logger.info(
+                        "Debate converged at round %d: %s",
+                        round_num, reason[:200],
+                    )
                     return DebateResult(
                         topic=topic,
                         rounds=round_num,
@@ -220,6 +234,10 @@ class TeamRunner:
                     )
 
         # Max rounds reached -- summarize
+        logger.info(
+            "Debate completed: topic=%r rounds=%d total_turns=%d",
+            topic, self._max_rounds, len(transcript),
+        )
         summary_parts = [
             f"Debate on '{topic}' completed after {self._max_rounds} rounds."
         ]

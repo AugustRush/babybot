@@ -1309,6 +1309,11 @@ class DynamicOrchestrator:
         if len(agents) < 2:
             return "error: dispatch_team requires at least 2 agents"
 
+        logger.info(
+            "Team dispatch: topic=%r agents=%d max_rounds=%d",
+            topic[:80], len(agents), max_rounds,
+        )
+
         heartbeat = context.state.get("heartbeat")
         send_intermediate = context.state.get("send_intermediate_message")
         stream_callback = context.state.get("stream_callback")
@@ -1374,6 +1379,14 @@ class DynamicOrchestrator:
                     agent_copy["executor"] = functools.partial(resource_executor, rid)
             enriched_agents.append(agent_copy)
 
+        for ea in enriched_agents:
+            logger.info(
+                "Team agent resolved: id=%s role=%s skill=%s resource=%s",
+                ea.get("id"), ea.get("role", ""),
+                ea.get("skill_id", ea.get("profile_id", "")),
+                ea.get("resource_id", ""),
+            )
+
         async def on_turn(agent_id: str, role: str, round_num: int, text: str) -> None:
             if heartbeat is not None:
                 heartbeat.beat()
@@ -1383,12 +1396,24 @@ class DynamicOrchestrator:
                 header = f"**[{role} — Round {round_num}]**"
                 await send_intermediate(header + "\n" + text)
 
+        logger.info(
+            "Team streaming=%s intermediate=%s heartbeat=%s",
+            team_streaming,
+            send_intermediate is not None,
+            heartbeat is not None,
+        )
+
         if team_streaming:
             await reset_stream()
 
         runner = TeamRunner(executor=gateway_executor, max_rounds=max_rounds)
         result = await runner.run_debate(
             topic=topic, agents=enriched_agents, on_turn=on_turn,
+        )
+
+        logger.info(
+            "Team debate finished: topic=%r rounds=%d transcript_len=%d",
+            result.topic[:80], result.rounds, len(result.transcript),
         )
 
         if team_streaming:
