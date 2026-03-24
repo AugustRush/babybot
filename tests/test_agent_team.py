@@ -143,3 +143,36 @@ async def test_team_runner_convergence() -> None:
     # Should stop before max_rounds due to convergence
     assert result.rounds < 10
     assert "consensus" in result.summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_team_runner_per_agent_executor() -> None:
+    """TeamRunner routes each agent to its own executor when provided."""
+    call_log: list[str] = []
+
+    async def global_exec(agent_id: str, prompt: str, context: dict) -> str:
+        call_log.append(f"global:{agent_id}")
+        return f"global response from {agent_id}"
+
+    async def special_exec(agent_id: str, prompt: str, context: dict) -> str:
+        call_log.append(f"special:{agent_id}")
+        return f"special response from {agent_id}"
+
+    runner = TeamRunner(executor=global_exec, max_rounds=1)
+    result = await runner.run_debate(
+        topic="Test routing",
+        agents=[
+            {"id": "agent_a", "role": "pro", "description": "Uses global"},
+            {
+                "id": "agent_b",
+                "role": "con",
+                "description": "Uses special",
+                "executor": special_exec,
+            },
+        ],
+    )
+
+    assert "global:agent_a" in call_log
+    assert "special:agent_b" in call_log
+    assert "global:agent_b" not in call_log
+    assert result.rounds == 1

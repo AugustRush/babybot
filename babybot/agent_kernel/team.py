@@ -180,7 +180,11 @@ class TeamRunner:
                 prompt_parts.append("Present your argument:")
 
                 prompt = "\n".join(prompt_parts)
-                output = await self._executor(agent["id"], prompt, {})
+                agent_exec = agent.get("executor", self._executor)
+                exec_ctx: dict[str, Any] = {}
+                if agent.get("system_prompt"):
+                    exec_ctx["system_prompt"] = agent["system_prompt"]
+                output = await agent_exec(agent["id"], prompt, exec_ctx)
                 transcript.append(
                     {
                         "round": str(round_num),

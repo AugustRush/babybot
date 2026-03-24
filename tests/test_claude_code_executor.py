@@ -97,3 +97,61 @@ async def test_allowed_tools_passed() -> None:
     assert "--allowedTools" in call_args
     idx = call_args.index("--allowedTools")
     assert call_args[idx + 1] == "Read,Grep"
+
+
+# ---------------------------------------------------------------------------
+# E2E integration tests (skipped when `claude` CLI is not installed)
+# ---------------------------------------------------------------------------
+import shutil
+
+_CLAUDE_AVAILABLE = shutil.which("claude") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _CLAUDE_AVAILABLE, reason="claude CLI not found in PATH")
+async def test_integration_basic_prompt() -> None:
+    """E2E: ClaudeCodeExecutor sends a real prompt to claude CLI."""
+    executor = ClaudeCodeExecutor(workdir="/tmp", default_timeout_s=60.0)
+    task = TaskContract(
+        task_id="e2e_1",
+        description="Reply with exactly the word HELLO and nothing else.",
+    )
+    result = await executor.execute(task, ExecutionContext())
+
+    assert result.status == "succeeded", f"Expected success, got: {result.error}"
+    assert result.task_id == "e2e_1"
+    assert "HELLO" in result.output.upper()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _CLAUDE_AVAILABLE, reason="claude CLI not found in PATH")
+async def test_integration_session_id_returned() -> None:
+    """E2E: ClaudeCodeExecutor returns a session_id in metadata."""
+    executor = ClaudeCodeExecutor(workdir="/tmp", default_timeout_s=60.0)
+    task = TaskContract(
+        task_id="e2e_2",
+        description="Say OK.",
+    )
+    result = await executor.execute(task, ExecutionContext())
+
+    assert result.status == "succeeded", f"Expected success, got: {result.error}"
+    assert result.metadata.get("session_id"), "Expected session_id in metadata"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _CLAUDE_AVAILABLE, reason="claude CLI not found in PATH")
+async def test_integration_timeout_enforcement() -> None:
+    """E2E: ClaudeCodeExecutor enforces timeout on real subprocess."""
+    executor = ClaudeCodeExecutor(workdir="/tmp")
+    task = TaskContract(
+        task_id="e2e_3",
+        description=(
+            "Write a Python script that computes the first 10 million prime numbers "
+            "and prints each one. Do not stop until all are printed."
+        ),
+        timeout_s=3.0,
+    )
+    result = await executor.execute(task, ExecutionContext())
+
+    assert result.status == "failed"
+    assert "timeout" in result.error.lower()

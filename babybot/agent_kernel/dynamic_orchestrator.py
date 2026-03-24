@@ -159,6 +159,10 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                                     "type": "string",
                                     "description": "可选：指定该Agent使用的资源ID",
                                 },
+                                "profile_id": {
+                                    "type": "string",
+                                    "description": "可选：引用预定义的 AGENT.md profile name",
+                                },
                             },
                             "required": ["id", "role", "description"],
                         },
@@ -1002,6 +1006,7 @@ class DynamicOrchestrator:
         max_steps: int | None = None,
         default_task_timeout_s: float | None = 120.0,
         executor_registry: "ExecutorPort | None" = None,
+        agent_profiles_dir: str | None = None,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
@@ -1016,6 +1021,12 @@ class DynamicOrchestrator:
         self._task_stale_after_s = task_stale_after_s
         self._max_steps = max(1, int(max_steps or self.MAX_STEPS))
         self._default_task_timeout_s = default_task_timeout_s
+        self._agent_profiles: dict[str, Any] = {}
+        if agent_profiles_dir:
+            from .agent_profile import AgentProfileLoader
+
+            for profile in AgentProfileLoader.load_dir(agent_profiles_dir):
+                self._agent_profiles[profile.name] = profile
 
     @property
     def _executor(self) -> ExecutorPort:
@@ -1294,6 +1305,7 @@ class DynamicOrchestrator:
         return f"error: unknown tool: {name}"
 
     async def _run_team(self, args: dict[str, Any], context: ExecutionContext) -> str:
+        import functools
         from .team import TeamRunner
 
         topic = args.get("topic", "")
@@ -1303,22 +1315,60 @@ class DynamicOrchestrator:
         if len(agents) < 2:
             return "error: dispatch_team requires at least 2 agents"
 
-        async def agent_executor(
+        async def gateway_executor(
             agent_id: str, prompt: str, ctx: dict[str, Any]
         ) -> str:
+            """Fallback executor: calls gateway directly (no tools)."""
+            sys_prompt = ctx.get(
+                "system_prompt",
+                "你是讨论参与者。根据你的角色，针对主题发表观点。",
+            )
             messages = [
-                ModelMessage(
-                    role="system",
-                    content="你是讨论参与者。根据你的角色，针对主题发表观点。",
-                ),
+                ModelMessage(role="system", content=sys_prompt),
                 ModelMessage(role="user", content=prompt),
             ]
             request = ModelRequest(messages=tuple(messages))
             response = await self._gateway.generate(request, ExecutionContext())
             return response.text
 
-        runner = TeamRunner(executor=agent_executor, max_rounds=max_rounds)
-        result = await runner.run_debate(topic=topic, agents=agents)
+        async def resource_executor(
+            resource_id: str, agent_id: str, prompt: str, ctx: dict[str, Any]
+        ) -> str:
+            """Resource-backed executor: runs through bridge with full tool access."""
+            task = TaskContract(
+                task_id=f"team_{agent_id}",
+                description=prompt,
+                metadata={"resource_id": resource_id},
+            )
+            result = await self._executor.execute(task, context)
+            if result.status != "succeeded":
+                return f"[error: {result.error}]"
+            return result.output
+
+        # Resolve profiles and prepare per-agent executors
+        enriched_agents: list[dict[str, Any]] = []
+        for agent in agents:
+            agent_copy = dict(agent)
+            profile_id = agent_copy.pop("profile_id", None)
+            if profile_id and profile_id in self._agent_profiles:
+                profile = self._agent_profiles[profile_id]
+                if not agent_copy.get("role"):
+                    agent_copy["role"] = profile.role
+                if not agent_copy.get("description"):
+                    agent_copy["description"] = profile.description
+                if not agent_copy.get("resource_id") and profile.resource_id:
+                    agent_copy["resource_id"] = profile.resource_id
+                if not agent_copy.get("system_prompt") and profile.system_prompt:
+                    agent_copy["system_prompt"] = profile.system_prompt
+            rid = agent_copy.get("resource_id")
+            if rid:
+                scope = self._rm.resolve_resource_scope(rid, require_tools=True)
+                if scope is not None:
+                    agent_copy["executor"] = functools.partial(resource_executor, rid)
+            enriched_agents.append(agent_copy)
+
+        runner = TeamRunner(executor=gateway_executor, max_rounds=max_rounds)
+        result = await runner.run_debate(topic=topic, agents=enriched_agents)
 
         return json.dumps(
             {
