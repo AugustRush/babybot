@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ..heartbeat import TaskHeartbeatRegistry
     from ..model_gateway import OpenAICompatibleGateway
     from ..resource import ResourceManager
+    from .protocols import ExecutorPort
 
 logger = logging.getLogger(__name__)
 
@@ -958,12 +959,14 @@ class DynamicOrchestrator:
         task_stale_after_s: float | None = None,
         max_steps: int | None = None,
         default_task_timeout_s: float | None = 120.0,
+        executor_registry: "ExecutorPort | None" = None,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
         self._rm = resource_manager
         self._gateway = gateway
         self._bridge = ResourceBridgeExecutor(resource_manager, gateway)
+        self._executor_registry = executor_registry
         self._child_task_bus = child_task_bus or InMemoryChildTaskBus()
         self._task_heartbeat_registry = (
             task_heartbeat_registry or TaskHeartbeatRegistry()
@@ -971,6 +974,13 @@ class DynamicOrchestrator:
         self._task_stale_after_s = task_stale_after_s
         self._max_steps = max(1, int(max_steps or self.MAX_STEPS))
         self._default_task_timeout_s = default_task_timeout_s
+
+    @property
+    def _executor(self) -> ExecutorPort:
+        """Return the executor registry if provided, otherwise fall back to the bridge."""
+        if self._executor_registry is not None:
+            return self._executor_registry
+        return self._bridge
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
@@ -981,7 +991,7 @@ class DynamicOrchestrator:
         runtime = InProcessChildTaskRuntime(
             flow_id=flow_id,
             resource_manager=self._rm,
-            bridge=self._bridge,
+            bridge=self._executor,
             child_task_bus=self._child_task_bus,
             task_heartbeat_registry=self._task_heartbeat_registry,
             max_parallel=4,

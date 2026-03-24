@@ -9,8 +9,17 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from babybot.agent_kernel import ExecutionContext, ModelRequest, ModelResponse, ModelToolCall
-from babybot.agent_kernel.dynamic_orchestrator import DynamicOrchestrator, InMemoryChildTaskBus, _build_resource_catalog
+from babybot.agent_kernel import (
+    ExecutionContext,
+    ModelRequest,
+    ModelResponse,
+    ModelToolCall,
+)
+from babybot.agent_kernel.dynamic_orchestrator import (
+    DynamicOrchestrator,
+    InMemoryChildTaskBus,
+    _build_resource_catalog,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -24,7 +33,9 @@ class DummyGateway:
         self._call_idx = 0
 
     async def generate(
-        self, request: ModelRequest, context: ExecutionContext,
+        self,
+        request: ModelRequest,
+        context: ExecutionContext,
     ) -> ModelResponse:
         if self._call_idx >= len(self._responses):
             # Fallback: plain text to avoid infinite loop
@@ -76,7 +87,9 @@ class DummyResourceManager:
         ]
 
     def resolve_resource_scope(
-        self, resource_id: str, require_tools: bool = False,
+        self,
+        resource_id: str,
+        require_tools: bool = False,
     ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
         if resource_id == "skill.weather":
             return {"include_groups": ["skill_weather"]}, ("weather",)
@@ -97,10 +110,12 @@ class DummyResourceManager:
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
     ) -> tuple[str, list[str]]:
-        self.calls.append({
-            "task_description": task_description,
-            "agent_name": agent_name,
-        })
+        self.calls.append(
+            {
+                "task_description": task_description,
+                "agent_name": agent_name,
+            }
+        )
         if any(kw in task_description for kw in self._fail_tasks):
             raise RuntimeError("sub-agent failed")
         return f"result for: {task_description}", []
@@ -110,14 +125,18 @@ def _reply_tool_call(text: str, call_id: str = "call_reply") -> ModelResponse:
     return ModelResponse(
         text="",
         tool_calls=(
-            ModelToolCall(call_id=call_id, name="reply_to_user", arguments={"text": text}),
+            ModelToolCall(
+                call_id=call_id, name="reply_to_user", arguments={"text": text}
+            ),
         ),
         finish_reason="tool_calls",
     )
 
 
 def _dispatch_tool_call(
-    resource_id: str, description: str, deps: list[str] | None = None,
+    resource_id: str,
+    description: str,
+    deps: list[str] | None = None,
     call_id: str = "call_dispatch",
 ) -> ModelToolCall:
     args: dict[str, Any] = {"resource_id": resource_id, "description": description}
@@ -127,7 +146,9 @@ def _dispatch_tool_call(
 
 
 def _wait_tool_call(task_ids: list[str], call_id: str = "call_wait") -> ModelToolCall:
-    return ModelToolCall(call_id=call_id, name="wait_for_tasks", arguments={"task_ids": task_ids})
+    return ModelToolCall(
+        call_id=call_id, name="wait_for_tasks", arguments={"task_ids": task_ids}
+    )
 
 
 # ── Tests ────────────────────────────────────────────────────────────────
@@ -167,7 +188,9 @@ def test_system_prompt_adds_future_task_guard_for_deferred_requests() -> None:
     assert "未来一次性任务的描述必须自包含" in system_prompt
 
 
-def test_system_prompt_adds_multi_resource_guidance_for_skill_creation_with_url() -> None:
+def test_system_prompt_adds_multi_resource_guidance_for_skill_creation_with_url() -> (
+    None
+):
     gateway = DummyGateway([])
     rm = DummyResourceManager()
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
@@ -199,7 +222,9 @@ def test_single_task() -> None:
             super().__init__(responses)
             self._dispatched_id: str = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 resp = await super().generate(request, context)
                 return resp
@@ -212,9 +237,7 @@ def test_single_task() -> None:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
-                    tool_calls=(
-                        _wait_tool_call([self._dispatched_id], call_id="c2"),
-                    ),
+                    tool_calls=(_wait_tool_call([self._dispatched_id], call_id="c2"),),
                     finish_reason="tool_calls",
                 )
             # Step 3: reply
@@ -237,7 +260,9 @@ def test_parallel_tasks() -> None:
             super().__init__([])
             self._task_ids: list[str] = []
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
@@ -279,12 +304,16 @@ def test_dependent_tasks() -> None:
             self._task_a_id = ""
             self._task_b_id = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
-                    tool_calls=(_dispatch_tool_call("skill.weather", "任务A", call_id="c1"),),
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务A", call_id="c1"),
+                    ),
                     finish_reason="tool_calls",
                 )
             if self._call_idx == 1:
@@ -296,7 +325,10 @@ def test_dependent_tasks() -> None:
                     text="",
                     tool_calls=(
                         _dispatch_tool_call(
-                            "skill.weather", "任务B", deps=[self._task_a_id], call_id="c2",
+                            "skill.weather",
+                            "任务B",
+                            deps=[self._task_a_id],
+                            call_id="c2",
                         ),
                     ),
                     finish_reason="tool_calls",
@@ -330,13 +362,17 @@ def test_sequential_waits_do_not_leak_previous_wait_results_into_later_rounds() 
             self._wait_a_payload = ""
             self.final_messages: tuple[ModelMessage, ...] = ()
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             del context
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
-                    tool_calls=(_dispatch_tool_call("skill.weather", "任务A", call_id="c1"),),
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务A", call_id="c1"),
+                    ),
                     finish_reason="tool_calls",
                 )
             if self._call_idx == 1:
@@ -356,7 +392,9 @@ def test_sequential_waits_do_not_leak_previous_wait_results_into_later_rounds() 
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
-                    tool_calls=(_dispatch_tool_call("skill.weather", "任务B", call_id="c3"),),
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务B", call_id="c3"),
+                    ),
                     finish_reason="tool_calls",
                 )
             if self._call_idx == 3:
@@ -382,9 +420,7 @@ def test_sequential_waits_do_not_leak_previous_wait_results_into_later_rounds() 
     assert result.conclusion == "顺序任务完成"
     assert gw._wait_a_payload
     final_tool_payloads = [
-        msg.content
-        for msg in gw.final_messages
-        if msg.role == "tool"
+        msg.content for msg in gw.final_messages if msg.role == "tool"
     ]
     assert gw._wait_a_payload not in final_tool_payloads
     assert any("任务B" in payload for payload in final_tool_payloads)
@@ -416,12 +452,16 @@ def test_dependent_task_receives_upstream_output() -> None:
             self._task_a_id = ""
             self._task_b_id = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
-                    tool_calls=(_dispatch_tool_call("skill.weather", "任务A", call_id="c1"),),
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务A", call_id="c1"),
+                    ),
                     finish_reason="tool_calls",
                 )
             if self._call_idx == 1:
@@ -433,7 +473,10 @@ def test_dependent_task_receives_upstream_output() -> None:
                     text="",
                     tool_calls=(
                         _dispatch_tool_call(
-                            "skill.weather", "任务B", deps=[self._task_a_id], call_id="c2",
+                            "skill.weather",
+                            "任务B",
+                            deps=[self._task_a_id],
+                            call_id="c2",
                         ),
                     ),
                     finish_reason="tool_calls",
@@ -468,7 +511,9 @@ def test_max_steps_fallback() -> None:
     noop = ModelResponse(
         text="",
         tool_calls=(
-            ModelToolCall(call_id="c_noop", name="get_task_result", arguments={"task_id": "xxx"}),
+            ModelToolCall(
+                call_id="c_noop", name="get_task_result", arguments={"task_id": "xxx"}
+            ),
         ),
         finish_reason="tool_calls",
     )
@@ -509,7 +554,9 @@ def test_failed_task_handling() -> None:
             super().__init__([])
             self._task_id = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
@@ -549,13 +596,17 @@ def test_unknown_resource() -> None:
         def __init__(self) -> None:
             super().__init__([])
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
                     tool_calls=(
-                        _dispatch_tool_call("skill.nonexistent", "不存在的资源", call_id="c1"),
+                        _dispatch_tool_call(
+                            "skill.nonexistent", "不存在的资源", call_id="c1"
+                        ),
                     ),
                     finish_reason="tool_calls",
                 )
@@ -582,7 +633,9 @@ def test_unknown_task_id_in_wait() -> None:
         def __init__(self) -> None:
             super().__init__([step1])
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 return await super().generate(request, context)
             # Check that the wait result contains not_found
@@ -598,7 +651,10 @@ def test_unknown_task_id_in_wait() -> None:
 
 def test_wait_for_tasks_reports_collected_media_ready_for_final_reply() -> None:
     from babybot.agent_kernel import TaskResult
-    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.agent_kernel.dynamic_orchestrator import (
+        InMemoryChildTaskBus,
+        InProcessChildTaskRuntime,
+    )
     from babybot.heartbeat import TaskHeartbeatRegistry
 
     class _DummyRM(DummyResourceManager):
@@ -647,7 +703,10 @@ def test_wait_for_tasks_reports_collected_media_ready_for_final_reply() -> None:
 
 def test_get_task_result_reports_collected_media_ready_for_final_reply() -> None:
     from babybot.agent_kernel import TaskResult
-    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.agent_kernel.dynamic_orchestrator import (
+        InMemoryChildTaskBus,
+        InProcessChildTaskRuntime,
+    )
     from babybot.heartbeat import TaskHeartbeatRegistry
 
     class _DummyRM(DummyResourceManager):
@@ -696,7 +755,10 @@ def test_get_task_result_reports_collected_media_ready_for_final_reply() -> None
 
 def test_dispatch_emits_primary_resource_id_for_multi_resource_task() -> None:
     from babybot.agent_kernel import TaskResult
-    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.agent_kernel.dynamic_orchestrator import (
+        InMemoryChildTaskBus,
+        InProcessChildTaskRuntime,
+    )
     from babybot.heartbeat import TaskHeartbeatRegistry
 
     child_bus = InMemoryChildTaskBus()
@@ -730,17 +792,24 @@ def test_dispatch_emits_primary_resource_id_for_multi_resource_task() -> None:
             context=ExecutionContext(session_id="flow-primary-resource"),
         )
         await runtime.wait_for_tasks([task_id])
-        return [event.payload for event in child_bus.events_for("flow-primary-resource")]
+        return [
+            event.payload for event in child_bus.events_for("flow-primary-resource")
+        ]
 
     payloads = asyncio.run(_run())
-    resource_ids = [payload.get("resource_id") for payload in payloads if "resource_id" in payload]
+    resource_ids = [
+        payload.get("resource_id") for payload in payloads if "resource_id" in payload
+    ]
 
     assert resource_ids
     assert set(resource_ids) == {"skill.weather"}
 
 
 def test_dispatch_times_out_hung_child_task() -> None:
-    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.agent_kernel.dynamic_orchestrator import (
+        InMemoryChildTaskBus,
+        InProcessChildTaskRuntime,
+    )
     from babybot.heartbeat import TaskHeartbeatRegistry
 
     cancelled = asyncio.Event()
@@ -788,14 +857,18 @@ def test_orchestrator_reply_waits_for_child_task_cancellation_cleanup() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             del request, context
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(
                     text="",
                     tool_calls=(
-                        _dispatch_tool_call("skill.weather", "后台慢任务", call_id="c1"),
+                        _dispatch_tool_call(
+                            "skill.weather", "后台慢任务", call_id="c1"
+                        ),
                     ),
                     finish_reason="tool_calls",
                 )
@@ -821,10 +894,14 @@ def test_orchestrator_reply_waits_for_child_task_cancellation_cleanup() -> None:
             finally:
                 cleaned_up.set()
 
-    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=_Gateway())
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(), gateway=_Gateway()
+    )
     orch._bridge = _Bridge()  # type: ignore[assignment]
 
-    result = asyncio.run(orch.run("先回复我", ExecutionContext(session_id="cancel-cleanup")))
+    result = asyncio.run(
+        orch.run("先回复我", ExecutionContext(session_id="cancel-cleanup"))
+    )
 
     assert result.conclusion == "先给用户回复"
     assert started.is_set() is True
@@ -870,7 +947,9 @@ def test_call_model_passes_stream_callback_and_resource_catalog_to_router() -> N
             self.messages: tuple[Any, ...] = ()
 
         async def generate(
-            self, request: ModelRequest, context: ExecutionContext,
+            self,
+            request: ModelRequest,
+            context: ExecutionContext,
         ) -> ModelResponse:
             self.stream_callback = context.state.get("stream_callback")
             self.messages = request.messages
@@ -881,10 +960,12 @@ def test_call_model_passes_stream_callback_and_resource_catalog_to_router() -> N
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
 
     stream_callback = AsyncMock()
-    asyncio.run(orch.run(
-        "请发送一张天气图",
-        ExecutionContext(state={"stream_callback": stream_callback}),
-    ))
+    asyncio.run(
+        orch.run(
+            "请发送一张天气图",
+            ExecutionContext(state={"stream_callback": stream_callback}),
+        )
+    )
 
     assert gateway.stream_callback is stream_callback
     assert "skill.weather: weather" in gateway.messages[0].content
@@ -894,48 +975,54 @@ def test_call_model_passes_stream_callback_and_resource_catalog_to_router() -> N
 
 
 def test_build_resource_catalog_includes_tool_previews() -> None:
-    catalog = _build_resource_catalog([
-        {
-            "id": "group.channel-feishu",
-            "type": "tool_group",
-            "name": "channel_feishu",
-            "purpose": "飞书渠道工具",
-            "tool_count": 3,
-            "tools_preview": ["send_text", "send_image", "send_file"],
-            "active": True,
-        },
-    ])
+    catalog = _build_resource_catalog(
+        [
+            {
+                "id": "group.channel-feishu",
+                "type": "tool_group",
+                "name": "channel_feishu",
+                "purpose": "飞书渠道工具",
+                "tool_count": 3,
+                "tools_preview": ["send_text", "send_image", "send_file"],
+                "active": True,
+            },
+        ]
+    )
     assert "send_image" in catalog
 
 
 def test_build_resource_catalog_hides_mcp_tool_previews() -> None:
-    catalog = _build_resource_catalog([
-        {
-            "id": "mcp.gaode-map",
-            "type": "mcp",
-            "name": "gaode_map",
-            "purpose": "地图查询",
-            "tool_count": 8,
-            "tools_preview": ["poi_search", "route_plan", "geocode"],
-            "active": True,
-        },
-    ])
+    catalog = _build_resource_catalog(
+        [
+            {
+                "id": "mcp.gaode-map",
+                "type": "mcp",
+                "name": "gaode_map",
+                "purpose": "地图查询",
+                "tool_count": 8,
+                "tools_preview": ["poi_search", "route_plan", "geocode"],
+                "active": True,
+            },
+        ]
+    )
     assert "工具数: 8" in catalog
     assert "poi_search" not in catalog
 
 
 def test_build_resource_catalog_hides_skill_tool_previews() -> None:
-    catalog = _build_resource_catalog([
-        {
-            "id": "skill.weather",
-            "type": "skill",
-            "name": "weather",
-            "purpose": "天气查询",
-            "tool_count": 3,
-            "tools_preview": ["get_weather", "resolve_city", "format_report"],
-            "active": True,
-        },
-    ])
+    catalog = _build_resource_catalog(
+        [
+            {
+                "id": "skill.weather",
+                "type": "skill",
+                "name": "weather",
+                "purpose": "天气查询",
+                "tool_count": 3,
+                "tools_preview": ["get_weather", "resolve_city", "format_report"],
+                "active": True,
+            },
+        ]
+    )
     assert "工具数: 3" in catalog
     assert "get_weather" not in catalog
 
@@ -946,14 +1033,18 @@ def test_runtime_event_callback_receives_child_task_lifecycle_events() -> None:
             super().__init__([])
             self._task_id = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             del context
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
                     tool_calls=(
-                        _dispatch_tool_call("skill.weather", "查询杭州天气", call_id="c1"),
+                        _dispatch_tool_call(
+                            "skill.weather", "查询杭州天气", call_id="c1"
+                        ),
                     ),
                     finish_reason="tool_calls",
                 )
@@ -978,10 +1069,14 @@ def test_runtime_event_callback_receives_child_task_lifecycle_events() -> None:
     gw = RuntimeEventGateway()
     rm = DummyResourceManager()
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
-    result = asyncio.run(orch.run(
-        "查询天气",
-        ExecutionContext(session_id="flow-1", state={"runtime_event_callback": _capture}),
-    ))
+    result = asyncio.run(
+        orch.run(
+            "查询天气",
+            ExecutionContext(
+                session_id="flow-1", state={"runtime_event_callback": _capture}
+            ),
+        )
+    )
 
     assert result.conclusion == "完成"
     assert [event["event"] for event in events] == ["queued", "started", "succeeded"]
@@ -989,7 +1084,9 @@ def test_runtime_event_callback_receives_child_task_lifecycle_events() -> None:
     assert all(event["payload"]["resource_id"] == "skill.weather" for event in events)
 
 
-def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds() -> None:
+def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds() -> (
+    None
+):
     class SchedulerBoundaryGateway(DummyGateway):
         def __init__(self) -> None:
             super().__init__([])
@@ -997,14 +1094,18 @@ def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds()
             self._scheduler_task_id = ""
             self.dispatch_error_seen = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             del context
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
                     tool_calls=(
-                        _dispatch_tool_call("skill.weather", "查询杭州天气", call_id="c1"),
+                        _dispatch_tool_call(
+                            "skill.weather", "查询杭州天气", call_id="c1"
+                        ),
                         _dispatch_tool_call(
                             "group.scheduler",
                             "两分钟后发送一段画作描述",
@@ -1049,12 +1150,16 @@ def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds()
                 if msg.role == "tool" and msg.tool_call_id == "c4":
                     self.dispatch_error_seen = msg.content
             self._call_idx += 1
-            return _reply_tool_call("已返回当前阶段结果，并等待定时任务触发", call_id="c5")
+            return _reply_tool_call(
+                "已返回当前阶段结果，并等待定时任务触发", call_id="c5"
+            )
 
     gw = SchedulerBoundaryGateway()
     rm = DummyResourceManager()
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
-    result = asyncio.run(orch.run("先查天气，两分钟后发描述，再按描述画图", ExecutionContext()))
+    result = asyncio.run(
+        orch.run("先查天气，两分钟后发描述，再按描述画图", ExecutionContext())
+    )
 
     assert result.conclusion == "已返回当前阶段结果，并等待定时任务触发"
     assert "scheduled" in gw.dispatch_error_seen.lower()
@@ -1064,20 +1169,26 @@ def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds()
     assert "根据那条两分钟后的描述立即生成图片" not in dispatched
 
 
-def test_scheduler_dispatch_inherits_prior_live_task_results_and_original_goal() -> None:
+def test_scheduler_dispatch_inherits_prior_live_task_results_and_original_goal() -> (
+    None
+):
     class SchedulerAfterWeatherGateway(DummyGateway):
         def __init__(self) -> None:
             super().__init__([])
             self._scheduler_task_id = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             del context
             if self._call_idx == 0:
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
                     tool_calls=(
-                        _dispatch_tool_call("skill.weather", "查询杭州天气", call_id="c1"),
+                        _dispatch_tool_call(
+                            "skill.weather", "查询杭州天气", call_id="c1"
+                        ),
                         _dispatch_tool_call(
                             "group.scheduler",
                             "两分钟后处理剩余任务",
@@ -1093,7 +1204,9 @@ def test_scheduler_dispatch_inherits_prior_live_task_results_and_original_goal()
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
-                    tool_calls=(_wait_tool_call([self._scheduler_task_id], call_id="c3"),),
+                    tool_calls=(
+                        _wait_tool_call([self._scheduler_task_id], call_id="c3"),
+                    ),
                     finish_reason="tool_calls",
                 )
             self._call_idx += 1
@@ -1102,10 +1215,17 @@ def test_scheduler_dispatch_inherits_prior_live_task_results_and_original_goal()
     gw = SchedulerAfterWeatherGateway()
     rm = DummyResourceManager()
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
-    result = asyncio.run(orch.run(
-        "先查询杭州今天的天气，然后过两分钟后给我发条消息，消息的主题是一副画的描述，然后以这个描述画一幅画发送给我",
-        ExecutionContext(session_id="flow-1", state={"original_goal": "先查询杭州今天的天气，然后过两分钟后给我发条消息，消息的主题是一副画的描述，然后以这个描述画一幅画发送给我"}),
-    ))
+    result = asyncio.run(
+        orch.run(
+            "先查询杭州今天的天气，然后过两分钟后给我发条消息，消息的主题是一副画的描述，然后以这个描述画一幅画发送给我",
+            ExecutionContext(
+                session_id="flow-1",
+                state={
+                    "original_goal": "先查询杭州今天的天气，然后过两分钟后给我发条消息，消息的主题是一副画的描述，然后以这个描述画一幅画发送给我"
+                },
+            ),
+        )
+    )
 
     assert result.conclusion == "已安排后续阶段"
     assert len(rm.calls) == 2
@@ -1116,14 +1236,18 @@ def test_scheduler_dispatch_inherits_prior_live_task_results_and_original_goal()
     assert "以这个描述画一幅画发送给我" in scheduler_description
 
 
-def test_scheduler_stage_blocks_mixed_scheduler_and_live_dispatches_in_same_turn() -> None:
+def test_scheduler_stage_blocks_mixed_scheduler_and_live_dispatches_in_same_turn() -> (
+    None
+):
     class MixedDispatchGateway(DummyGateway):
         def __init__(self) -> None:
             super().__init__([])
             self.scheduler_dispatch_result = ""
             self.image_dispatch_result = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             del context
             if self._call_idx == 0:
                 self._call_idx += 1
@@ -1163,7 +1287,10 @@ def test_scheduler_stage_blocks_mixed_scheduler_and_live_dispatches_in_same_turn
 
 def test_wait_for_tasks_preserves_skill_context_for_failed_tasks() -> None:
     from babybot.agent_kernel import TaskResult
-    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus, InProcessChildTaskRuntime
+    from babybot.agent_kernel.dynamic_orchestrator import (
+        InMemoryChildTaskBus,
+        InProcessChildTaskRuntime,
+    )
     from babybot.heartbeat import TaskHeartbeatRegistry
 
     class _DummyRM(DummyResourceManager):
@@ -1210,7 +1337,6 @@ def test_wait_for_tasks_preserves_skill_context_for_failed_tasks() -> None:
     assert payload["description"] == "查询天气"
 
 
-
 def test_child_task_bus_clears_events_after_flow_completion() -> None:
     step1 = ModelResponse(
         text="",
@@ -1223,12 +1349,18 @@ def test_child_task_bus_clears_events_after_flow_completion() -> None:
             super().__init__([step1])
             self._task_id = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             if self._call_idx == 0:
                 return await super().generate(request, context)
             if self._call_idx == 1:
                 for msg in reversed(request.messages):
-                    if msg.role == "tool" and msg.content and not msg.content.startswith("error:"):
+                    if (
+                        msg.role == "tool"
+                        and msg.content
+                        and not msg.content.startswith("error:")
+                    ):
                         self._task_id = msg.content
                         break
                 self._call_idx += 1
@@ -1251,3 +1383,18 @@ def test_child_task_bus_clears_events_after_flow_completion() -> None:
 
     assert result.conclusion == "done"
     assert bus.events_for("flow-test") == []
+
+
+def test_orchestrator_accepts_executor_registry() -> None:
+    """DynamicOrchestrator uses ExecutorRegistry when provided."""
+    from babybot.agent_kernel.executors import ExecutorRegistry
+
+    gateway = DummyGateway([_reply_tool_call("done")])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(
+        resource_manager=rm,
+        gateway=gateway,
+        executor_registry=None,  # None means use default bridge
+    )
+    result = asyncio.run(orch.run("hi", ExecutionContext()))
+    assert result.conclusion == "done"
