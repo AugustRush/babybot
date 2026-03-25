@@ -41,7 +41,8 @@
     "orchestrator_max_steps": 30,
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
-    "context_max_chats": 500
+    "context_max_chats": 500,
+    "interactive_session_max_age_seconds": 7200
   },
   "channels": {
     "feishu": {

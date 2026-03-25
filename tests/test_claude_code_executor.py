@@ -4,9 +4,11 @@
 from __future__ import annotations
 import asyncio
 import json
+import os
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from babybot.agent_kernel.types import ExecutionContext, TaskContract
+from babybot.agent_kernel.executors import claude_code as claude_code_module
 from babybot.agent_kernel.executors.claude_code import ClaudeCodeExecutor
 
 
@@ -104,7 +106,19 @@ async def test_allowed_tools_passed() -> None:
 # ---------------------------------------------------------------------------
 import shutil
 
-_CLAUDE_AVAILABLE = shutil.which("claude") is not None
+
+def _should_run_claude_e2e() -> bool:
+    return shutil.which("claude") is not None and os.getenv("BABYBOT_RUN_CLAUDE_E2E") == "1"
+
+
+_CLAUDE_AVAILABLE = _should_run_claude_e2e()
+
+
+def test_claude_e2e_is_opt_in_even_when_cli_is_installed(monkeypatch) -> None:
+    monkeypatch.delenv("BABYBOT_RUN_CLAUDE_E2E", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/claude")
+
+    assert _should_run_claude_e2e() is False
 
 
 @pytest.mark.asyncio

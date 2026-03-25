@@ -11,7 +11,6 @@ import logging
 import os
 import re
 import shutil
-import threading
 import time
 from pathlib import Path
 from typing import (
@@ -67,6 +66,9 @@ from .worker import create_worker_executor
 from .context_views import build_context_view
 
 logger = logging.getLogger(__name__)
+_CURRENT_CALLABLE_TOOL_WRITE_ROOT: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("current_callable_tool_write_root", default=None)
+)
 
 if TYPE_CHECKING:
     from .channels.tools import ChannelTools, ChannelToolContext
@@ -78,8 +80,6 @@ if TYPE_CHECKING:
 
 class CallableTool:
     """Wrap a python callable into kernel Tool protocol."""
-
-    _workspace_cwd_lock = threading.Lock()
 
     def __init__(
         self,
@@ -113,12 +113,20 @@ class CallableTool:
 
     async def invoke(self, args: dict[str, Any], context: Any) -> ToolResult:
         tool_context_token: contextvars.Token[Any | None] | None = None
+        write_root_token: contextvars.Token[str | None] | None = None
         try:
             kwargs = dict(self._preset_kwargs)
             kwargs.update(args or {})
             artifact_base = self._current_write_root()
+            write_root = artifact_base
+            state = getattr(context, "state", None)
+            if isinstance(state, dict):
+                state.setdefault("write_root", str(write_root))
             if self._resource_manager is not None:
-                tool_context_token = self._resource_manager._get_current_tool_context_var().set(context)
+                tool_context_token = (
+                    self._resource_manager._get_current_tool_context_var().set(context)
+                )
+            write_root_token = _CURRENT_CALLABLE_TOOL_WRITE_ROOT.set(str(write_root))
             if inspect.iscoroutinefunction(self._func):
                 value = await self._func(**kwargs)
             else:
@@ -126,26 +134,13 @@ class CallableTool:
                 # Use contextvars.copy_context() so channel context etc.
                 # are visible inside the thread (Python <3.12 doesn't copy
                 # context automatically in run_in_executor).
-                # Also chdir to the active write root so relative paths
-                # (e.g. result_image.jpg) resolve inside the workspace.
                 loop = asyncio.get_running_loop()
                 ctx = contextvars.copy_context()
-                if self._resource_manager is not None:
-                    write_root = self._resource_manager._get_active_write_root()
-                else:
-                    write_root = Path.cwd().resolve()
-                artifact_base = write_root
-
-                def _run_in_workspace() -> Any:
-                    with self._workspace_cwd_lock:
-                        saved_cwd = os.getcwd()
-                        try:
-                            os.chdir(str(write_root))
-                            return self._func(**kwargs)
-                        finally:
-                            os.chdir(saved_cwd)
-
-                value = await loop.run_in_executor(None, ctx.run, _run_in_workspace)
+                value = await loop.run_in_executor(
+                    None,
+                    ctx.run,
+                    lambda: self._func(**kwargs),
+                )
             return ToolResult(
                 ok=True,
                 content=self._normalize_result(value),
@@ -158,8 +153,12 @@ class CallableTool:
         except Exception as exc:
             return ToolResult(ok=False, error=str(exc))
         finally:
+            if write_root_token is not None:
+                _CURRENT_CALLABLE_TOOL_WRITE_ROOT.reset(write_root_token)
             if tool_context_token is not None and self._resource_manager is not None:
-                self._resource_manager._get_current_tool_context_var().reset(tool_context_token)
+                self._resource_manager._get_current_tool_context_var().reset(
+                    tool_context_token
+                )
 
     @staticmethod
     def _normalize_result(value: Any) -> str:
@@ -306,6 +305,13 @@ class CallableTool:
             counter += 1
         shutil.copy2(resolved, target)
         return target.resolve()
+
+
+def get_current_write_root() -> Path:
+    raw = _CURRENT_CALLABLE_TOOL_WRITE_ROOT.get()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()
 
 
 class ResourceCatalog:

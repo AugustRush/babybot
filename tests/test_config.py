@@ -70,6 +70,26 @@ def test_to_dict_includes_system_context_fields(tmp_path, monkeypatch):
     assert payload["context_max_chats"] == 9
     assert payload["worker_max_steps"] == 18
     assert payload["orchestrator_max_steps"] == 28
+    assert payload["interactive_session_max_age_seconds"] == 7200
+
+
+def test_interactive_session_max_age_loaded_from_system(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "home" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "system": {"interactive_session_max_age_seconds": 1800},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config(str(config_path))
+
+    assert cfg.system.interactive_session_max_age_seconds == 1800
 
 
 def test_scheduled_tasks_migrated_to_workspace_file(tmp_path, monkeypatch):

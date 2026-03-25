@@ -22,6 +22,8 @@ from .context import Tape, TapeStore, _extract_keywords
 from .context_views import build_context_view
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
+from .interactive_sessions import InteractiveSessionManager
+from .interactive_sessions.backends import ClaudeInteractiveBackend
 from .model_gateway import OpenAICompatibleGateway
 from .resource import ResourceManager
 
@@ -64,6 +66,7 @@ class OrchestratorAgent:
         self.config.model.validate()
         self.resource_manager = ResourceManager(self.config)
         self.gateway = OpenAICompatibleGateway(self.config)
+        self._interactive_sessions = self._build_interactive_session_manager()
         self.tape_store = TapeStore(
             db_path=self.config.home_dir / "memory" / "context.db",
             max_chats=self.config.system.context_max_chats,
@@ -82,6 +85,16 @@ class OrchestratorAgent:
         self._initialized = False
         self._recent_flow_ids_by_chat: OrderedDict[str, str] = OrderedDict()
         self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    def _build_interactive_session_manager(self) -> InteractiveSessionManager:
+        return InteractiveSessionManager(
+            backends={
+                "claude": ClaudeInteractiveBackend(
+                    workspace_root=self.config.workspace_dir,
+                )
+            },
+            max_age_seconds=self.config.system.interactive_session_max_age_seconds,
+        )
 
     def _remember_flow_id(self, chat_key: str, flow_id: str) -> None:
         if not isinstance(self._recent_flow_ids_by_chat, OrderedDict):
@@ -294,6 +307,17 @@ class OrchestratorAgent:
         if heartbeat is not None:
             heartbeat.beat()
 
+        if chat_key and getattr(self, "_interactive_sessions", None) is not None:
+            control = self._parse_interactive_session_command(user_input)
+            if control is not None:
+                return await self._handle_interactive_session_command(
+                    chat_key, control
+                )
+            if self._interactive_sessions.has_active_session(chat_key):
+                return await self._handle_interactive_session_message(
+                    chat_key, user_input
+                )
+
         # --- Tape context ---
         tape: Tape | None = None
         if chat_key:
@@ -373,8 +397,6 @@ class OrchestratorAgent:
                     "message", {"role": "assistant", "content": text}
                 )
                 self.tape_store.save_entry(chat_key, asst_entry)
-                if hasattr(self, "memory_store"):
-                    self.memory_store.observe_assistant_message(chat_key, text)
                 # Fire-and-forget async handoff check
                 self._spawn_background_task(
                     self._maybe_handoff(tape, chat_key),
@@ -511,14 +533,92 @@ class OrchestratorAgent:
         except Exception:
             logger.exception("Error in _maybe_handoff for chat_key=%s", chat_key)
 
+    @staticmethod
+    def _parse_interactive_session_command(
+        user_input: str,
+    ) -> dict[str, str] | None:
+        text = (user_input or "").strip()
+        if not text.lower().startswith("@session"):
+            return None
+        parts = text.split()
+        action = parts[1].lower() if len(parts) >= 2 else "status"
+        backend_name = parts[2].lower() if len(parts) >= 3 else ""
+        return {"action": action, "backend_name": backend_name}
+
+    async def _handle_interactive_session_command(
+        self, chat_key: str, control: dict[str, str]
+    ) -> TaskResponse:
+        manager = self._interactive_sessions
+        action = control.get("action", "")
+        backend_name = control.get("backend_name", "")
+
+        if action == "start":
+            if not backend_name:
+                return TaskResponse(text="用法：@session start <backend>")
+            session = await manager.start(chat_key=chat_key, backend_name=backend_name)
+            label = session.backend_name.capitalize()
+            return TaskResponse(
+                text=(
+                    f"{label} 会话已启动（session_id={session.session_id}）。"
+                    "后续消息将直接发送到该交互会话。"
+                )
+            )
+        if action == "stop":
+            stopped = await manager.stop(chat_key, reason="user_stop")
+            return TaskResponse(
+                text="交互会话已关闭。" if stopped else "当前没有活动中的交互会话。"
+            )
+        if action == "status":
+            status = manager.status(chat_key)
+            if status is None:
+                return TaskResponse(text="当前没有活动中的交互会话。")
+            return TaskResponse(
+                text=(
+                    f"当前交互会话：{status.backend_name} "
+                    f"(session_id={status.session_id})"
+                )
+            )
+        return TaskResponse(text="支持的命令：@session start <backend> / status / stop")
+
+    async def _handle_interactive_session_message(
+        self, chat_key: str, user_input: str
+    ) -> TaskResponse:
+        reply = await self._interactive_sessions.send(chat_key, user_input)
+        return TaskResponse(
+            text=reply.text,
+            media_paths=list(reply.media_paths or []),
+        )
+
     def reset(self) -> None:
-        self.resource_manager.reset()
-        self.tape_store.clear()
+        manager = getattr(self, "_interactive_sessions", None)
+        if manager is not None:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(manager.stop_all(reason="reset"))
+            else:
+                self._spawn_background_task(
+                    manager.stop_all(reason="reset"),
+                    label="interactive-reset",
+                )
+        if self.resource_manager is not None:
+            self.resource_manager.reset()
+        if self.tape_store is not None:
+            self.tape_store.clear()
         self._initialized = False
 
     def get_status(self) -> dict[str, Any]:
-        return {
+        resource_manager = getattr(self, "resource_manager", None)
+        interactive_manager = getattr(self, "_interactive_sessions", None)
+        status = {
             "resource_manager": "initialized",
-            "available_tools": len(self.resource_manager.get_available_tools()),
-            "resources": self.resource_manager.search_resources(),
+            "available_tools": len(resource_manager.get_available_tools())
+            if resource_manager is not None
+            else 0,
+            "resources": resource_manager.search_resources()
+            if resource_manager is not None
+            else [],
         }
+        if interactive_manager is not None:
+            status["interactive_sessions"] = interactive_manager.summary()
+        return status

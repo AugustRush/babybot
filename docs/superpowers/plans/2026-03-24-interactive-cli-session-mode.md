@@ -17,7 +17,7 @@
 - Modify: `config.json.example`
 - Test: `tests/test_config.py`
 
-- [ ] **Step 1: Write the failing config test**
+- [x] **Step 1: Write the failing config test**
 
 ```python
 def test_interactive_session_max_age_loaded_from_system(tmp_path, monkeypatch):
@@ -37,12 +37,12 @@ def test_interactive_session_max_age_loaded_from_system(tmp_path, monkeypatch):
     assert cfg.system.interactive_session_max_age_seconds == 1800
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `pytest tests/test_config.py -k interactive_session_max_age -v`
 Expected: FAIL because `SystemConfig` does not define `interactive_session_max_age_seconds`
 
-- [ ] **Step 3: Add the minimal config field**
+- [x] **Step 3: Add the minimal config field**
 
 ```python
 @dataclass
@@ -58,17 +58,17 @@ Also thread the field through:
 - `to_dict()`
 - `config.json.example`
 
-- [ ] **Step 4: Run the focused config test**
+- [x] **Step 4: Run the focused config test**
 
 Run: `pytest tests/test_config.py -k interactive_session_max_age -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full config suite**
+- [x] **Step 5: Run the full config suite**
 
 Run: `pytest tests/test_config.py -v`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit (not executed: user did not request git commit)**
 
 ```bash
 git add babybot/config.py config.json.example tests/test_config.py
@@ -84,7 +84,7 @@ git commit -m "feat: add interactive session config"
 - Create: `babybot/interactive_sessions/manager.py`
 - Test: `tests/test_interactive_session_manager.py`
 
-- [ ] **Step 1: Write the failing manager tests**
+- [x] **Step 1: Write the failing manager tests**
 
 ```python
 @pytest.mark.asyncio
@@ -119,12 +119,12 @@ async def test_manager_stops_expired_session_before_send():
     assert backend.stop_calls == 1
 ```
 
-- [ ] **Step 2: Run the new manager tests to verify they fail**
+- [x] **Step 2: Run the new manager tests to verify they fail**
 
 Run: `pytest tests/test_interactive_session_manager.py -v`
 Expected: FAIL because the interactive session package and manager do not exist yet
 
-- [ ] **Step 3: Implement the minimal manager and data types**
+- [x] **Step 3: Implement the minimal manager and data types**
 
 ```python
 @dataclass
@@ -151,12 +151,12 @@ Implementation notes:
 - stop and delete expired sessions before forwarding
 - guard `start/send/stop` with per-chat `asyncio.Lock`
 
-- [ ] **Step 4: Run the manager test file**
+- [x] **Step 4: Run the manager test file**
 
 Run: `pytest tests/test_interactive_session_manager.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit (not executed: user did not request git commit)**
 
 ```bash
 git add babybot/interactive_sessions tests/test_interactive_session_manager.py
@@ -170,7 +170,7 @@ git commit -m "feat: add interactive session manager"
 - Create: `babybot/interactive_sessions/backends/claude.py`
 - Test: `tests/test_interactive_claude_backend.py`
 
-- [ ] **Step 1: Write the failing Claude backend tests**
+- [x] **Step 1: Write the failing Claude backend tests**
 
 ```python
 @pytest.mark.asyncio
@@ -197,12 +197,12 @@ async def test_claude_backend_send_returns_backend_reply():
     assert reply.text
 ```
 
-- [ ] **Step 2: Run the backend tests to verify they fail**
+- [x] **Step 2: Run the backend tests to verify they fail**
 
 Run: `pytest tests/test_interactive_claude_backend.py -v`
 Expected: FAIL because the backend implementation does not exist yet
 
-- [ ] **Step 3: Implement the minimal Claude backend**
+- [x] **Step 3: Implement the minimal Claude backend**
 
 ```python
 class ClaudeInteractiveBackend(InteractiveBackend):
@@ -228,12 +228,12 @@ Implementation boundaries:
 - return structured reply text to the manager
 - make real Claude CLI integration opt-in, not part of default test flow
 
-- [ ] **Step 4: Run the backend test file**
+- [x] **Step 4: Run the backend test file**
 
 Run: `pytest tests/test_interactive_claude_backend.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit (not executed: user did not request git commit)**
 
 ```bash
 git add babybot/interactive_sessions/backends tests/test_interactive_claude_backend.py
@@ -246,7 +246,7 @@ git commit -m "feat: add claude interactive backend"
 - Modify: `babybot/orchestrator.py`
 - Test: `tests/test_orchestrator_interactive_sessions.py`
 
-- [ ] **Step 1: Write the failing orchestrator routing tests**
+- [x] **Step 1: Write the failing orchestrator routing tests**
 
 ```python
 @pytest.mark.asyncio
@@ -268,12 +268,12 @@ async def test_process_task_routes_active_chat_messages_to_session_backend():
     assert agent.gateway_calls == 0
 ```
 
-- [ ] **Step 2: Run the new orchestrator routing tests to verify they fail**
+- [x] **Step 2: Run the new orchestrator routing tests to verify they fail**
 
 Run: `pytest tests/test_orchestrator_interactive_sessions.py -v`
 Expected: FAIL because `OrchestratorAgent` does not parse `@session` commands or route to the manager
 
-- [ ] **Step 3: Implement the routing hooks in `OrchestratorAgent`**
+- [x] **Step 3: Implement the routing hooks in `OrchestratorAgent`**
 
 ```python
 async def process_task(...):
@@ -294,17 +294,17 @@ Integration requirements:
 - stop all active sessions from `reset()`
 - include interactive session info in `get_status()`
 
-- [ ] **Step 4: Run the new orchestrator routing tests**
+- [x] **Step 4: Run the new orchestrator routing tests**
 
 Run: `pytest tests/test_orchestrator_interactive_sessions.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the existing orchestrator routing suite**
+- [x] **Step 5: Run the existing orchestrator routing suite**
 
 Run: `pytest tests/test_orchestrator_routing.py -v`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit (not executed: user did not request git commit)**
 
 ```bash
 git add babybot/orchestrator.py tests/test_orchestrator_interactive_sessions.py
@@ -318,7 +318,7 @@ git commit -m "feat: route chats through interactive sessions"
 - Modify: `tests/test_config.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write the failing stop/status/cleanup tests**
+- [x] **Step 1: Write the failing stop/status/cleanup tests**
 
 ```python
 @pytest.mark.asyncio
@@ -339,12 +339,12 @@ def test_get_status_includes_interactive_session_summary():
     assert "interactive_sessions" in status
 ```
 
-- [ ] **Step 2: Run the stop/status tests to verify they fail**
+- [x] **Step 2: Run the stop/status tests to verify they fail**
 
 Run: `pytest tests/test_orchestrator_interactive_sessions.py -k "stop or status or cleanup" -v`
 Expected: FAIL until cleanup/status behavior is fully wired
 
-- [ ] **Step 3: Implement the minimal cleanup and docs**
+- [x] **Step 3: Implement the minimal cleanup and docs**
 
 Update:
 
@@ -352,17 +352,17 @@ Update:
 - `OrchestratorAgent.get_status()` to include session summary
 - `README.md` with `@session start claude`, `@session status`, `@session stop`
 
-- [ ] **Step 4: Run the focused tests**
+- [x] **Step 4: Run the focused tests**
 
 Run: `pytest tests/test_orchestrator_interactive_sessions.py -k "stop or status or cleanup" -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the relevant combined suite**
+- [x] **Step 5: Run the relevant combined suite**
 
 Run: `pytest tests/test_config.py tests/test_interactive_session_manager.py tests/test_interactive_claude_backend.py tests/test_orchestrator_interactive_sessions.py tests/test_orchestrator_routing.py -q`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit (not executed: user did not request git commit)**
 
 ```bash
 git add README.md tests/test_config.py tests/test_orchestrator_interactive_sessions.py
@@ -374,22 +374,22 @@ git commit -m "docs: document interactive session commands"
 **Files:**
 - No code changes expected
 
-- [ ] **Step 1: Run the targeted regression suite**
+- [x] **Step 1: Run the targeted regression suite**
 
 Run: `pytest tests/test_config.py tests/test_orchestrator_routing.py tests/test_interactive_session_manager.py tests/test_interactive_claude_backend.py tests/test_orchestrator_interactive_sessions.py -q`
 Expected: PASS
 
-- [ ] **Step 2: Run the full default test suite**
+- [x] **Step 2: Run the full default test suite**
 
 Run: `pytest -q`
 Expected: PASS except for any pre-existing opt-in or environment-dependent Claude CLI integration cases that remain intentionally outside the default path
 
-- [ ] **Step 3: Review the diff**
+- [x] **Step 3: Review the diff**
 
 Run: `git diff --stat`
 Expected: only the planned files changed
 
-- [ ] **Step 4: Final commit if verification required follow-up edits**
+- [ ] **Step 4: Final commit if verification required follow-up edits (not executed: user did not request git commit)**
 
 ```bash
 git add babybot README.md config.json.example tests docs/superpowers/plans/2026-03-24-interactive-cli-session-mode.md

@@ -1938,30 +1938,21 @@ def test_inspect_runtime_flow_uses_provider_snapshot(tmp_path: Path) -> None:
 
 
 
-def test_callable_tool_serializes_workspace_chdir_for_sync_tools(tmp_path: Path, monkeypatch) -> None:
+def test_callable_tool_runs_sync_tools_concurrently_without_workspace_chdir(tmp_path: Path, monkeypatch) -> None:
     dir_a = tmp_path / "a"
     dir_b = tmp_path / "b"
     dir_a.mkdir()
     dir_b.mkdir()
 
-    active_workspace_switches = 0
-    overlap_detected: list[str] = []
+    active_calls = 0
+    overlap_detected: list[bool] = []
     started = threading.Event()
-    real_chdir = resource_module.os.chdir
+    counter_lock = threading.Lock()
 
-    def fake_chdir(path: str) -> None:
-        nonlocal active_workspace_switches
-        target = str(Path(path))
-        if target in {str(dir_a), str(dir_b)}:
-            active_workspace_switches += 1
-            if active_workspace_switches > 1:
-                overlap_detected.append(target)
-            started.set()
-        else:
-            active_workspace_switches = max(0, active_workspace_switches - 1)
-        real_chdir(path)
+    def fail_chdir(path: str) -> None:
+        raise AssertionError(f"os.chdir should not be called: {path}")
 
-    monkeypatch.setattr(resource_module.os, "chdir", fake_chdir)
+    monkeypatch.setattr(resource_module.os, "chdir", fail_chdir)
 
     class _Manager:
         def __init__(self, root: Path):
@@ -1975,8 +1966,17 @@ def test_callable_tool_serializes_workspace_chdir_for_sync_tools(tmp_path: Path,
             return self._root
 
     def slow_tool() -> str:
+        nonlocal active_calls
+        with counter_lock:
+            active_calls += 1
+            if active_calls > 1:
+                overlap_detected.append(True)
+            started.set()
         time.sleep(0.15)
-        return str(Path.cwd())
+        root = resource_module.get_current_write_root()
+        with counter_lock:
+            active_calls = max(0, active_calls - 1)
+        return str(root)
 
     tool_a = CallableTool(
         func=slow_tool,
@@ -1993,15 +1993,20 @@ def test_callable_tool_serializes_workspace_chdir_for_sync_tools(tmp_path: Path,
         resource_manager=_Manager(dir_b),
     )
 
-    async def _run() -> None:
+    async def _run() -> tuple[str, str]:
         first = asyncio.create_task(tool_a.invoke({}, ToolContext(session_id="s1", state={})))
         await asyncio.to_thread(started.wait, 1.0)
         second = asyncio.create_task(tool_b.invoke({}, ToolContext(session_id="s2", state={})))
-        await asyncio.gather(first, second)
+        result_a, result_b = await asyncio.gather(first, second)
+        assert result_a.ok is True
+        assert result_b.ok is True
+        return result_a.content, result_b.content
 
-    asyncio.run(_run())
+    output_a, output_b = asyncio.run(_run())
 
-    assert overlap_detected == []
+    assert output_a == str(dir_a.resolve())
+    assert output_b == str(dir_b.resolve())
+    assert overlap_detected == [True]
 
 
 

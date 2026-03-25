@@ -87,7 +87,7 @@ def test_hybrid_memory_store_updates_task_state_from_anchor_and_failures(tmp_pat
     assert "tts timeout" in summaries
 
 
-def test_hybrid_memory_store_updates_from_assistant_reply_and_success_event(tmp_path) -> None:
+def test_hybrid_memory_store_ignores_assistant_reply_for_long_term_preferences_but_tracks_success_event(tmp_path) -> None:
     store = HybridMemoryStore(
         db_path=tmp_path / "context.db",
         memory_dir=tmp_path / "memory",
@@ -114,9 +114,9 @@ def test_hybrid_memory_store_updates_from_assistant_reply_and_success_event(tmp_
     keys = {(record.memory_type, record.key, str(record.value)) for record in records}
     summaries = "\n".join(record.summary for record in records)
 
-    assert ("relationship_policy", "default_language", "zh-CN") in keys
-    assert ("relationship_policy", "response_style", "concise") in keys
-    assert ("relationship_policy", "assistant_role", "代码架构助手") in keys
+    assert ("relationship_policy", "default_language", "zh-CN") not in keys
+    assert ("relationship_policy", "response_style", "concise") not in keys
+    assert ("relationship_policy", "assistant_role", "代码架构助手") not in keys
     assert "生成语音" in summaries
     assert "speech.wav" in summaries
 

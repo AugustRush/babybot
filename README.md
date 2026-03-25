@@ -108,6 +108,18 @@ uv run babybot
 
 本地 REPL，用于调试。支持 `status`、`reset`、`quit` 命令。
 
+也支持按会话进入交互式 CLI backend 模式：
+
+```text
+@session start claude
+@session status
+@session stop
+```
+
+- `@session start claude`：在当前 `chat_key` 下启动 Claude 交互会话
+- `@session status`：查看当前会话是否已启动及 session_id
+- `@session stop`：关闭当前交互会话，后续消息恢复走默认 DAG 编排路径
+
 ### 网关模式
 
 ```bash

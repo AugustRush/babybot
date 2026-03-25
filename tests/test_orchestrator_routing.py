@@ -495,7 +495,7 @@ def test_process_task_persists_runtime_events_to_tape(tmp_path: Path) -> None:
     assert event_entries[0].payload["payload"]["resource_id"] == "skill.weather"
 
 
-def test_process_task_updates_memory_from_assistant_reply_and_success_events(tmp_path: Path) -> None:
+def test_process_task_ignores_assistant_reply_for_long_term_preferences_but_tracks_success_events(tmp_path: Path) -> None:
     agent = object.__new__(OrchestratorAgent)
     agent._initialized = True
     agent._init_lock = asyncio.Lock()
@@ -557,9 +557,9 @@ def test_process_task_updates_memory_from_assistant_reply_and_success_events(tmp
     summaries = "\n".join(record.summary for record in records)
     keys = {(record.memory_type, record.key, str(record.value)) for record in records}
 
-    assert ("relationship_policy", "default_language", "zh-CN") in keys
-    assert ("relationship_policy", "response_style", "concise") in keys
-    assert ("relationship_policy", "assistant_role", "代码架构助手") in keys
+    assert ("relationship_policy", "default_language", "zh-CN") not in keys
+    assert ("relationship_policy", "response_style", "concise") not in keys
+    assert ("relationship_policy", "assistant_role", "代码架构助手") not in keys
     assert "生成语音" in summaries
     assert "speech.wav" in summaries
 

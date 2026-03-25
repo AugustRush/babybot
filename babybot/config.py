@@ -65,6 +65,7 @@ class SystemConfig:
     context_history_tokens: int = 2000
     context_compact_threshold: int = 3000
     context_max_chats: int = 500
+    interactive_session_max_age_seconds: int = 7200
 
 
 @dataclass
@@ -200,6 +201,9 @@ class Config:
                 "context_compact_threshold", 3000
             ),
             context_max_chats=system_conf.get("context_max_chats", 500),
+            interactive_session_max_age_seconds=system_conf.get(
+                "interactive_session_max_age_seconds", 7200
+            ),
         )
 
         # Resource configuration — support both flat keys and legacy "resources" wrapper
@@ -349,6 +353,7 @@ class Config:
                 "context_history_tokens": 2000,
                 "context_compact_threshold": 3000,
                 "context_max_chats": 500,
+                "interactive_session_max_age_seconds": 7200,
             },
             "channels": {
                 "feishu": {
@@ -451,6 +456,7 @@ class Config:
                 "context_history_tokens": self.system.context_history_tokens,
                 "context_compact_threshold": self.system.context_compact_threshold,
                 "context_max_chats": self.system.context_max_chats,
+                "interactive_session_max_age_seconds": self.system.interactive_session_max_age_seconds,
             },
             "channels": {
                 "feishu": {
