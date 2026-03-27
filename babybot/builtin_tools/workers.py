@@ -5,6 +5,58 @@ import json
 from typing import Any
 
 
+def _worker_policy_features(
+    *,
+    task_description: str = "",
+    task_count: int = 1,
+) -> dict[str, Any]:
+    text = str(task_description or "").strip()
+    return {
+        "task_shape": "multi_step"
+        if task_count > 1 or any(token in text for token in ("然后", "再", "并且", "同时", "先"))
+        else "single_step",
+        "task_count": max(1, int(task_count)),
+        "independent_subtasks": max(1, int(task_count)),
+        "input_length": len(text),
+    }
+
+
+def _normalize_policy_action(payload: Any) -> tuple[str, str]:
+    if isinstance(payload, dict):
+        action_name = str(payload.get("action_name") or payload.get("name") or "").strip()
+        hint = str(payload.get("hint") or "").strip()
+        return action_name, hint
+    action_name = str(
+        getattr(payload, "action_name", "") or getattr(payload, "name", "") or ""
+    ).strip()
+    hint = str(getattr(payload, "hint", "") or "").strip()
+    return action_name, hint
+
+
+def _policy_denial_message(
+    owner: Any,
+    *,
+    task_description: str,
+    task_count: int,
+    operation: str,
+) -> str | None:
+    provider = getattr(owner, "_observability_provider", None)
+    chooser = getattr(provider, "choose_worker_policy", None)
+    if not callable(chooser):
+        return None
+    payload = chooser(
+        features=_worker_policy_features(
+            task_description=task_description,
+            task_count=task_count,
+        )
+    )
+    action_name, hint = _normalize_policy_action(payload)
+    if action_name != "deny_worker":
+        return None
+    suffix = f": {hint}" if hint else "."
+    return f"Policy denied {operation}{suffix}"
+
+
 def build_create_worker_tool(owner: Any) -> Any:
     async def create_worker(
         task_description: str,
@@ -20,6 +72,14 @@ def build_create_worker_tool(owner: Any) -> Any:
                 f"Max worker depth reached ({current_depth}/{max_depth}). "
                 "Finish in the current worker instead of creating another nested worker."
             )
+        denial = _policy_denial_message(
+            owner,
+            task_description=task_description,
+            task_count=1,
+            operation="worker creation",
+        )
+        if denial is not None:
+            return denial
         inherited_lease = lease
         if inherited_lease is None:
             current_lease = owner._get_current_task_lease_var().get()
@@ -51,6 +111,14 @@ def build_dispatch_workers_tool(owner: Any) -> Any:
         normalized = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
         if not normalized:
             return "No valid tasks were provided."
+        denial = _policy_denial_message(
+            owner,
+            task_description="\n".join(normalized),
+            task_count=len(normalized),
+            operation="worker dispatch",
+        )
+        if denial is not None:
+            return denial
         limit = max(1, min(int(max_concurrency), len(normalized), 8))
         system_conf = getattr(getattr(owner, "config", None), "system", None)
         effective_timeout = timeout_s

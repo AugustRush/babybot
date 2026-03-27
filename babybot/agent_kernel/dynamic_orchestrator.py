@@ -258,6 +258,47 @@ def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(resource_ids))
 
 
+def _policy_state_features(goal: str) -> dict[str, Any]:
+    text = str(goal or "").strip()
+    independent_subtasks = 1
+    for token in ("同时", "分别", "并行", "并且"):
+        independent_subtasks += text.count(token)
+    return {
+        "task_shape": "multi_step"
+        if any(token in text for token in ("然后", "再", "并且", "同时", "先"))
+        else "single_step",
+        "input_length": len(text),
+        "independent_subtasks": max(1, independent_subtasks),
+    }
+
+
+def _provider_policy_hints(resource_manager: "ResourceManager", goal: str) -> list[str]:
+    provider = getattr(resource_manager, "_observability_provider", None)
+    if provider is None:
+        return []
+    features = _policy_state_features(goal)
+    hints: list[str] = []
+    for method_name in ("choose_scheduling_policy", "choose_worker_policy"):
+        chooser = getattr(provider, method_name, None)
+        if not callable(chooser):
+            continue
+        payload = chooser(features=features)
+        if isinstance(payload, dict):
+            action_name = str(payload.get("action_name") or payload.get("name") or "").strip()
+            hint = str(payload.get("hint") or "").strip()
+        else:
+            action_name = str(
+                getattr(payload, "action_name", "") or getattr(payload, "name", "") or ""
+            ).strip()
+            hint = str(getattr(payload, "hint", "") or "").strip()
+        if not hint:
+            continue
+        if method_name == "choose_worker_policy" and action_name == "allow_worker":
+            continue
+        hints.append(hint)
+    return hints
+
+
 def _emit_policy_decision(
     context: ExecutionContext,
     *,
@@ -1166,14 +1207,20 @@ class DynamicOrchestrator:
             for item in (context.state.get("policy_hints") or ())
             if str(item).strip()
         ]
+        policy_hints.extend(_provider_policy_hints(self._rm, goal))
+        deduped_policy_hints: list[str] = []
+        for hint in policy_hints:
+            if hint and hint not in deduped_policy_hints:
+                deduped_policy_hints.append(hint)
+        context.state["policy_hints"] = tuple(deduped_policy_hints)
 
         system_parts = [_SYSTEM_PROMPT_ROLE, _build_resource_catalog(briefs)]
         if _needs_deferred_task_guidance(goal):
             system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
         if history:
             system_parts.append(f"\n{history}")
-        if policy_hints:
-            system_parts.append("\n策略建议：\n- " + "\n- ".join(policy_hints))
+        if deduped_policy_hints:
+            system_parts.append("\n策略建议：\n- " + "\n- ".join(deduped_policy_hints))
 
         return [
             ModelMessage(role="system", content="\n".join(system_parts)),

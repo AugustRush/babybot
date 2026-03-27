@@ -1,7 +1,14 @@
+import asyncio
+import contextvars
 import datetime
+from types import SimpleNamespace
 
 from babybot.builtin_tools import iter_builtin_tool_registrations
 from babybot.builtin_tools.time import build_get_current_time_tool
+from babybot.builtin_tools.workers import (
+    build_create_worker_tool,
+    build_dispatch_workers_tool,
+)
 
 
 class _DummyOwner:
@@ -146,3 +153,77 @@ def test_get_current_time_rejects_unknown_format(monkeypatch) -> None:
         "Unsupported format 'weird'. "
         "Supported formats: default, iso, date, time, datetime, timestamp, timestamp_ms."
     )
+
+
+def test_worker_tool_is_blocked_when_policy_marks_worker_usage_high_risk() -> None:
+    class _PolicyProvider:
+        def choose_worker_policy(self, *, features):
+            del features
+            return {"action_name": "deny_worker", "hint": "high risk"}
+
+    class _Owner:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(system=SimpleNamespace(worker_max_depth=3))
+            self._lease_var = contextvars.ContextVar("lease_var_builtin_worker", default=None)
+            self._skill_ids_var = contextvars.ContextVar("skill_ids_var_builtin_worker", default=None)
+            self._worker_depth_var = contextvars.ContextVar(
+                "worker_depth_var_builtin_worker", default=0
+            )
+            self._observability_provider = _PolicyProvider()
+            self.called = False
+
+        def _get_current_task_lease_var(self):
+            return self._lease_var
+
+        def _get_current_skill_ids_var(self):
+            return self._skill_ids_var
+
+        def _get_current_worker_depth_var(self):
+            return self._worker_depth_var
+
+        async def run_subagent_task(self, *args, **kwargs):
+            del args, kwargs
+            self.called = True
+            return "done", []
+
+    owner = _Owner()
+
+    result = asyncio.run(build_create_worker_tool(owner)("high risk task"))
+
+    assert "policy denied" in result.lower()
+    assert owner.called is False
+
+
+def test_dispatch_workers_tool_is_blocked_when_policy_marks_worker_usage_high_risk() -> None:
+    class _PolicyProvider:
+        def choose_worker_policy(self, *, features):
+            del features
+            return {"action_name": "deny_worker", "hint": "high risk"}
+
+    class _Owner:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(system=SimpleNamespace(worker_subtask_timeout=10))
+            self._lease_var = contextvars.ContextVar("lease_var_builtin_dispatch", default=None)
+            self._skill_ids_var = contextvars.ContextVar("skill_ids_var_builtin_dispatch", default=None)
+            self._observability_provider = _PolicyProvider()
+            self.called = False
+
+        def _get_current_task_lease_var(self):
+            return self._lease_var
+
+        def _get_current_skill_ids_var(self):
+            return self._skill_ids_var
+
+        async def run_subagent_task(self, *args, **kwargs):
+            del args, kwargs
+            self.called = True
+            return "done", []
+
+    owner = _Owner()
+
+    result = asyncio.run(
+        build_dispatch_workers_tool(owner)(["task one", "task two"], max_concurrency=2)
+    )
+
+    assert "policy denied" in result.lower()
+    assert owner.called is False

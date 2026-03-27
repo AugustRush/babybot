@@ -200,8 +200,34 @@ class OrchestratorAgent:
             user_input,
             media_paths=media_paths,
         )
+        selector = self._policy_selector()
+        action = selector.choose_decomposition(features=features)
+        return action.name, features, action.hint
+
+    @staticmethod
+    def _estimate_independent_subtasks(user_input: str) -> int:
+        text = str(user_input or "").strip()
+        count = 1
+        for token in ("同时", "分别", "并行", "并且"):
+            count += text.count(token)
+        return max(1, count)
+
+    def _build_scheduling_state_features(
+        self,
+        user_input: str,
+        *,
+        media_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        features = self._build_policy_state_features(
+            user_input,
+            media_paths=media_paths,
+        )
+        features["independent_subtasks"] = self._estimate_independent_subtasks(user_input)
+        return features
+
+    def _policy_selector(self) -> ConservativePolicySelector:
         store = getattr(self, "_policy_store", None)
-        if store is None:
+        if store is None or not hasattr(store, "summarize_action_stats"):
             class _NullPolicyStore:
                 @staticmethod
                 def summarize_action_stats(*, decision_kind: str | None = None) -> dict[str, dict[str, float | int]]:
@@ -209,7 +235,7 @@ class OrchestratorAgent:
                     return {}
 
             store = _NullPolicyStore()
-        selector = ConservativePolicySelector(
+        return ConservativePolicySelector(
             store,
             min_samples=getattr(self.config.system, "policy_learning_min_samples", 8),
             explore_ratio=getattr(
@@ -218,8 +244,16 @@ class OrchestratorAgent:
                 0.05,
             ),
         )
-        action = selector.choose_decomposition(features=features)
-        return action.name, features, action.hint
+
+    def choose_scheduling_policy(self, *, features: dict[str, Any]) -> dict[str, Any]:
+        action = self._policy_selector().choose_scheduling(features=features)
+        return {"action_name": action.name, "hint": action.hint}
+
+    def choose_worker_policy(self, *, features: dict[str, Any]) -> dict[str, Any]:
+        if not self._policy_learning_enabled():
+            return {"action_name": "allow_worker", "hint": ""}
+        action = self._policy_selector().choose_worker_gate(features=features)
+        return {"action_name": action.name, "hint": action.hint}
 
     def _persist_policy_events(
         self,
@@ -300,6 +334,17 @@ class OrchestratorAgent:
                 media_paths=media_paths,
             )
         )
+        scheduling_features = self._build_scheduling_state_features(
+            user_input,
+            media_paths=media_paths,
+        )
+        scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
+        worker_policy = self.choose_worker_policy(features=scheduling_features)
+        policy_hints = [decomposition_hint]
+        for payload in (scheduling_policy, worker_policy):
+            hint = str(payload.get("hint", "") or "").strip()
+            if hint and hint not in policy_hints:
+                policy_hints.append(hint)
 
         context = ExecutionContext(
             session_id=flow_id,
@@ -319,7 +364,7 @@ class OrchestratorAgent:
                     ("stream_callback", stream_callback),
                     ("runtime_event_callback", runtime_event_callback),
                     ("send_intermediate_message", send_intermediate_message),
-                    ("policy_hints", [decomposition_hint]),
+                    ("policy_hints", policy_hints),
                 ]
                 if v is not None
             },
@@ -331,6 +376,15 @@ class OrchestratorAgent:
                 action_name=decomposition_action,
                 state_features=decomposition_features,
             )
+        if chat_key and self._policy_learning_enabled():
+            worker_action_name = str(worker_policy.get("action_name", "") or "").strip()
+            if worker_action_name:
+                context.emit(
+                    "policy_decision",
+                    decision_kind="worker",
+                    action_name=worker_action_name,
+                    state_features=scheduling_features,
+                )
 
         logger.info("DynamicOrchestrator created, starting run flow_id=%s", flow_id)
         try:
@@ -463,6 +517,9 @@ class OrchestratorAgent:
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
         send_intermediate_message: Callable[[str], Awaitable[None]] | None = None,
     ) -> TaskResponse:
+        policy_control = self._parse_policy_feedback_command(user_input)
+        if policy_control is not None:
+            return await self._handle_policy_feedback_command(chat_key, policy_control)
         if not self._initialized:
             async with self._init_lock:
                 if not self._initialized:
@@ -710,6 +767,44 @@ class OrchestratorAgent:
         action = parts[1].lower() if len(parts) >= 2 else "status"
         backend_name = parts[2].lower() if len(parts) >= 3 else ""
         return {"action": action, "backend_name": backend_name}
+
+    @staticmethod
+    def _parse_policy_feedback_command(
+        user_input: str,
+    ) -> dict[str, str] | None:
+        text = (user_input or "").strip()
+        if not text.lower().startswith("@policy"):
+            return None
+        parts = text.split(maxsplit=3)
+        action = parts[1].lower() if len(parts) >= 2 else ""
+        rating = parts[2].lower() if len(parts) >= 3 else ""
+        reason = parts[3].strip() if len(parts) >= 4 else ""
+        return {"action": action, "rating": rating, "reason": reason}
+
+    async def _handle_policy_feedback_command(
+        self,
+        chat_key: str,
+        control: dict[str, str],
+    ) -> TaskResponse:
+        if control.get("action", "") != "feedback":
+            return TaskResponse(text="支持的命令：@policy feedback good|bad <reason>")
+        rating = str(control.get("rating", "") or "").strip().lower()
+        reason = str(control.get("reason", "") or "").strip()
+        if rating not in {"good", "bad"} or not reason:
+            return TaskResponse(text="用法：@policy feedback good|bad <reason>")
+        if not chat_key:
+            return TaskResponse(text="缺少 chat_key，无法记录策略反馈。")
+        recent = getattr(self, "_recent_flow_ids_by_chat", {}) or {}
+        flow_id = str(recent.get(chat_key, "") or "").strip()
+        if not flow_id:
+            return TaskResponse(text="当前会话没有可反馈的最近任务。")
+        self._policy_store.record_feedback(
+            flow_id=flow_id,
+            chat_key=chat_key,
+            rating=rating,
+            reason=reason,
+        )
+        return TaskResponse(text=f"已记录策略反馈：{rating}。")
 
     async def _handle_interactive_session_command(
         self, chat_key: str, control: dict[str, str]

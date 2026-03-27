@@ -48,6 +48,12 @@ class ConservativePolicySelector:
             hint="优先在当前编排内完成，不要轻易创建额外 worker。",
         ),
     }
+    _ACTION_ALIASES: dict[str, dict[str, str]] = {
+        "scheduling": {
+            "serial_dispatch": "serial",
+            "parallel_dispatch": "bounded_parallel",
+        }
+    }
 
     def __init__(
         self,
@@ -88,6 +94,7 @@ class ConservativePolicySelector:
 
     def _eligible_stats(self, *, decision_kind: str) -> dict[str, dict[str, float | int]]:
         raw = self._store.summarize_action_stats(decision_kind=decision_kind)
+        raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
         return {
             name: payload
             for name, payload in raw.items()
@@ -95,7 +102,57 @@ class ConservativePolicySelector:
         }
 
     @staticmethod
+    def _normalize_action_stats(
+        *,
+        decision_kind: str,
+        raw: dict[str, dict[str, float | int]],
+    ) -> dict[str, dict[str, float | int]]:
+        aliases = ConservativePolicySelector._ACTION_ALIASES.get(decision_kind, {})
+        if not aliases:
+            return dict(raw)
+        normalized: dict[str, dict[str, float | int]] = {}
+        for action_name, payload in raw.items():
+            canonical_name = aliases.get(action_name, action_name)
+            current = normalized.get(canonical_name)
+            samples = int(payload.get("samples", 0) or 0)
+            mean_reward = float(payload.get("mean_reward", 0.0) or 0.0)
+            if current is None:
+                normalized[canonical_name] = dict(payload)
+                normalized[canonical_name]["samples"] = samples
+                normalized[canonical_name]["mean_reward"] = mean_reward
+                continue
+            current_samples = int(current.get("samples", 0) or 0)
+            total_samples = current_samples + samples
+            weighted_reward = (float(current.get("mean_reward", 0.0) or 0.0) * current_samples) + (
+                mean_reward * samples
+            )
+            current["samples"] = total_samples
+            current["mean_reward"] = (
+                weighted_reward / total_samples if total_samples > 0 else 0.0
+            )
+            for key, value in payload.items():
+                if key not in {"samples", "mean_reward"} and key not in current:
+                    current[key] = value
+        return normalized
+
+    @staticmethod
+    def _score_payload(payload: dict[str, float | int]) -> float:
+        mean_reward = float(payload.get("mean_reward", 0.0) or 0.0)
+        failure_rate = float(payload.get("failure_rate", 0.0) or 0.0)
+        retry_rate = float(payload.get("retry_rate", 0.0) or 0.0)
+        dead_letter_rate = float(payload.get("dead_letter_rate", 0.0) or 0.0)
+        stalled_rate = float(payload.get("stalled_rate", 0.0) or 0.0)
+        return (
+            mean_reward
+            - (failure_rate * 0.5)
+            - (retry_rate * 0.2)
+            - (dead_letter_rate * 0.35)
+            - (stalled_rate * 0.25)
+        )
+
+    @classmethod
     def _best_action(
+        cls,
         stats: dict[str, dict[str, float | int]],
         default: PolicyAction,
         actions: dict[str, PolicyAction],
@@ -103,7 +160,7 @@ class ConservativePolicySelector:
         ranked = sorted(
             stats.items(),
             key=lambda item: (
-                float(item[1].get("mean_reward", 0.0) or 0.0),
+                cls._score_payload(item[1]),
                 int(item[1].get("samples", 0) or 0),
             ),
             reverse=True,
