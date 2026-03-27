@@ -258,6 +258,21 @@ def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(resource_ids))
 
 
+def _emit_policy_decision(
+    context: ExecutionContext,
+    *,
+    decision_kind: str,
+    action_name: str,
+    state_features: dict[str, Any] | None = None,
+) -> None:
+    context.emit(
+        "policy_decision",
+        decision_kind=decision_kind,
+        action_name=action_name,
+        state_features=dict(state_features or {}),
+    )
+
+
 @dataclass(frozen=True)
 class ChildTaskEvent:
     """Lifecycle event emitted for one child task."""
@@ -1259,6 +1274,23 @@ class DynamicOrchestrator:
         if name == "dispatch_task":
             dispatch_args = dict(args)
             resource_ids = _dispatch_resource_ids(dispatch_args)
+            deps = list(dispatch_args.get("deps", []) or [])
+            active_in_flight = len(runtime.in_flight)
+            scheduling_action = (
+                "parallel_dispatch"
+                if not deps and (prior_live_task_ids_this_turn or active_in_flight > 0)
+                else "serial_dispatch"
+            )
+            _emit_policy_decision(
+                context,
+                decision_kind="scheduling",
+                action_name=scheduling_action,
+                state_features={
+                    "deps_count": len(deps),
+                    "active_in_flight": active_in_flight,
+                    "resource_count": len(resource_ids),
+                },
+            )
             scheduler_dispatch = "group.scheduler" in resource_ids
             if (
                 scheduler_dispatch
@@ -1289,6 +1321,14 @@ class DynamicOrchestrator:
                 dispatch_args, task_counter=task_counter, context=context
             )
         if name == "wait_for_tasks":
+            _emit_policy_decision(
+                context,
+                decision_kind="scheduling",
+                action_name="wait_barrier",
+                state_features={
+                    "task_count": len(args.get("task_ids", []) or []),
+                },
+            )
             return await runtime.wait_for_tasks(args.get("task_ids", []))
         if name == "get_task_result":
             return runtime.get_task_result(args.get("task_id", ""))

@@ -25,6 +25,8 @@ from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
 from .interactive_sessions.backends import ClaudeInteractiveBackend
 from .model_gateway import OpenAICompatibleGateway
+from .orchestration_policy_store import OrchestrationPolicyStore
+from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
 
 if TYPE_CHECKING:
@@ -78,6 +80,9 @@ class OrchestratorAgent:
         self.memory_store.ensure_bootstrap()
         self.resource_manager.memory_store = self.memory_store
         self.resource_manager.set_observability_provider(self)
+        self._policy_store = OrchestrationPolicyStore(
+            self.config.home_dir / "memory" / "policy.db"
+        )
         self._child_task_bus = InMemoryChildTaskBus()
         self._task_heartbeat_registry = TaskHeartbeatRegistry()
         self._handoff_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
@@ -97,8 +102,10 @@ class OrchestratorAgent:
         )
 
     def _remember_flow_id(self, chat_key: str, flow_id: str) -> None:
-        if not isinstance(self._recent_flow_ids_by_chat, OrderedDict):
-            self._recent_flow_ids_by_chat = OrderedDict(self._recent_flow_ids_by_chat)
+        recent = getattr(self, "_recent_flow_ids_by_chat", None)
+        if not isinstance(recent, OrderedDict):
+            recent = OrderedDict(recent or {})
+            self._recent_flow_ids_by_chat = recent
         self._recent_flow_ids_by_chat.pop(chat_key, None)
         self._recent_flow_ids_by_chat[chat_key] = flow_id
         while len(self._recent_flow_ids_by_chat) > self._FLOW_CACHE_LIMIT:
@@ -139,6 +146,83 @@ class OrchestratorAgent:
 
         task.add_done_callback(_on_done)
         return task
+
+    def _policy_learning_enabled(self) -> bool:
+        system = getattr(getattr(self, "config", None), "system", None)
+        return bool(getattr(system, "policy_learning_enabled", False))
+
+    @staticmethod
+    def _build_policy_state_features(
+        user_input: str,
+        *,
+        media_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        text = str(user_input or "").strip()
+        task_shape = "single_step"
+        if any(token in text for token in ("然后", "再", "并且", "同时", "先")):
+            task_shape = "multi_step"
+        return {
+            "task_shape": task_shape,
+            "input_length": len(text),
+            "has_media": bool(media_paths),
+        }
+
+    def _record_policy_decision(self, record: PolicyDecisionRecord) -> None:
+        if not self._policy_learning_enabled() or not record.chat_key:
+            return
+        self._policy_store.record_decision(
+            flow_id=record.flow_id,
+            chat_key=record.chat_key,
+            decision_kind=record.decision_kind,
+            action_name=record.action_name,
+            state_features=record.state_features,
+        )
+
+    def _record_policy_outcome(self, record: PolicyOutcomeRecord) -> None:
+        if not self._policy_learning_enabled() or not record.chat_key:
+            return
+        self._policy_store.record_outcome(
+            flow_id=record.flow_id,
+            chat_key=record.chat_key,
+            final_status=record.final_status,
+            reward=record.reward,
+            outcome=record.outcome,
+        )
+
+    def _persist_policy_events(
+        self,
+        *,
+        flow_id: str,
+        chat_key: str,
+        events: list[dict[str, Any]],
+    ) -> None:
+        if not self._policy_learning_enabled() or not chat_key:
+            return
+        for event in events:
+            if event.get("event") != "policy_decision":
+                continue
+            self._record_policy_decision(
+                PolicyDecisionRecord(
+                    flow_id=flow_id,
+                    chat_key=chat_key,
+                    decision_kind=str(event.get("decision_kind", "") or "").strip(),
+                    action_name=str(event.get("action_name", "") or "").strip(),
+                    state_features=dict(event.get("state_features") or {}),
+                )
+            )
+
+    @staticmethod
+    def _policy_reward(events: list[dict[str, Any]], final_status: str) -> float:
+        reward = 1.0 if final_status == "succeeded" else -1.0
+        retry_count = sum(1 for event in events if event.get("event") == "retrying")
+        dead_letter_count = sum(
+            1 for event in events if event.get("event") == "dead_lettered"
+        )
+        stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        reward -= 0.15 * retry_count
+        reward -= 0.25 * dead_letter_count
+        reward -= 0.2 * stalled_count
+        return max(-1.0, min(1.0, reward))
 
     async def _answer_with_dag(
         self,
@@ -200,14 +284,59 @@ class OrchestratorAgent:
                 if v is not None
             },
         )
+        if chat_key:
+            context.emit(
+                "policy_decision",
+                decision_kind="decomposition",
+                action_name="baseline",
+                state_features=self._build_policy_state_features(
+                    user_input,
+                    media_paths=media_paths,
+                ),
+            )
 
         logger.info("DynamicOrchestrator created, starting run flow_id=%s", flow_id)
-        if heartbeat is not None:
-            result = await heartbeat.watch(
-                orchestrator.run(goal=user_input, context=context),
+        try:
+            if heartbeat is not None:
+                result = await heartbeat.watch(
+                    orchestrator.run(goal=user_input, context=context),
+                )
+            else:
+                result = await orchestrator.run(goal=user_input, context=context)
+        except Exception as exc:
+            self._persist_policy_events(
+                flow_id=flow_id,
+                chat_key=chat_key,
+                events=list(context.events),
             )
-        else:
-            result = await orchestrator.run(goal=user_input, context=context)
+            self._record_policy_outcome(
+                PolicyOutcomeRecord(
+                    flow_id=flow_id,
+                    chat_key=chat_key,
+                    final_status="failed",
+                    reward=self._policy_reward(context.events, "failed"),
+                    outcome={"error": str(exc)},
+                )
+            )
+            raise
+        self._persist_policy_events(
+            flow_id=flow_id,
+            chat_key=chat_key,
+            events=list(context.events),
+        )
+        self._record_policy_outcome(
+            PolicyOutcomeRecord(
+                flow_id=flow_id,
+                chat_key=chat_key,
+                final_status="succeeded",
+                reward=self._policy_reward(context.events, "succeeded"),
+                outcome={
+                    "task_result_count": len(
+                        getattr(result, "task_results", {}) or {}
+                    ),
+                },
+            )
+        )
 
         text = result.conclusion or "任务完成，但没有可返回的结果。"
         collected_media = context.state.get("media_paths_collected", [])
