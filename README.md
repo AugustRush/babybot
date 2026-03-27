@@ -138,6 +138,58 @@ uv run babybot
 7. 在 backend 层补齐 reader/writer 生命周期、超时、异常退出、reset/stop 清理，不把这些复杂度扩散到渠道层。
 8. 等常驻进程模式稳定后，再评估是否追加流式输出回传到飞书/微信，以及是否支持手动接管会话。
 
+## 编排策略学习
+
+当前实现增加了一层保守型 orchestration policy learning，用来优化“任务怎么拆、什么时候并行、什么时候不要再开 worker”，而不是去微调底层模型。
+
+启用方式：
+
+- 在 `config.json` 的 `system` 中打开 `policy_learning_enabled`
+- 可选参数：
+  - `policy_learning_min_samples`：动作最少样本数，低于这个阈值时不信任历史统计
+  - `policy_learning_explore_ratio`：保留给后续探索策略的占位参数，当前保守策略主要仍走安全默认值
+
+自动采集的信号：
+
+- 拆解策略决策：如 `analyze_then_execute`
+- 调度决策：如串行/并行 dispatch、wait barrier
+- worker gate 决策：允许还是拒绝继续创建 worker
+- 最终 outcome：成功/失败、reward，以及重试、dead letter、stalled 等惩罚信号
+
+当前保守选择规则：
+
+- 样本不足时，拆解默认 `analyze_then_execute`
+- 调度默认更偏向串行，只有历史收益更好且风险更低时才偏向受限并行
+- worker 使用默认更保守；启用策略学习后，如果历史数据不足或风险偏高，会拒绝继续创建/分发 worker
+- 排序不是只看 `mean_reward`，还会对 `failure_rate`、`retry_rate`、`dead_letter_rate`、`stalled_rate` 做惩罚
+
+人工纠偏命令：
+
+```text
+@policy feedback good 拆分合理
+@policy feedback bad 并行导致多次重试
+```
+
+- 反馈会绑定到当前 `chat_key` 最近一次执行 flow
+- 如果当前会话还没有最近任务，会直接返回明确错误，不会进入正常对话编排
+
+查看策略数据：
+
+- SQLite 文件：`~/.babybot/memory/policy.db`
+- 快速查看最近反馈：
+
+```bash
+sqlite3 ~/.babybot/memory/policy.db \
+  "select flow_id, chat_key, rating, reason, created_at from policy_feedback order by id desc limit 20;"
+```
+
+- 查看动作统计：
+
+```bash
+sqlite3 ~/.babybot/memory/policy.db \
+  "select decision_kind, action_name, count(*) from policy_decisions group by decision_kind, action_name order by count(*) desc;"
+```
+
 ### 网关模式
 
 ```bash
