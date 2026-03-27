@@ -66,6 +66,9 @@ class SystemConfig:
     context_compact_threshold: int = 3000
     context_max_chats: int = 500
     interactive_session_max_age_seconds: int = 7200
+    policy_learning_enabled: bool = False
+    policy_learning_min_samples: int = 8
+    policy_learning_explore_ratio: float = 0.05
 
 
 @dataclass
@@ -203,6 +206,13 @@ class Config:
             context_max_chats=system_conf.get("context_max_chats", 500),
             interactive_session_max_age_seconds=system_conf.get(
                 "interactive_session_max_age_seconds", 7200
+            ),
+            policy_learning_enabled=system_conf.get("policy_learning_enabled", False),
+            policy_learning_min_samples=system_conf.get(
+                "policy_learning_min_samples", 8
+            ),
+            policy_learning_explore_ratio=system_conf.get(
+                "policy_learning_explore_ratio", 0.05
             ),
         )
 
@@ -354,6 +364,9 @@ class Config:
                 "context_compact_threshold": 3000,
                 "context_max_chats": 500,
                 "interactive_session_max_age_seconds": 7200,
+                "policy_learning_enabled": False,
+                "policy_learning_min_samples": 8,
+                "policy_learning_explore_ratio": 0.05,
             },
             "channels": {
                 "feishu": {
@@ -457,6 +470,9 @@ class Config:
                 "context_compact_threshold": self.system.context_compact_threshold,
                 "context_max_chats": self.system.context_max_chats,
                 "interactive_session_max_age_seconds": self.system.interactive_session_max_age_seconds,
+                "policy_learning_enabled": self.system.policy_learning_enabled,
+                "policy_learning_min_samples": self.system.policy_learning_min_samples,
+                "policy_learning_explore_ratio": self.system.policy_learning_explore_ratio,
             },
             "channels": {
                 "feishu": {
