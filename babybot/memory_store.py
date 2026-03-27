@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -10,6 +11,7 @@ from typing import Any
 from .memory_models import MemoryRecord
 
 
+logger = logging.getLogger(__name__)
 _ACTIVE_STATUSES = ("candidate", "active", "decaying")
 _MAINTENANCE_INTERVAL_S = 300.0
 

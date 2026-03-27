@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import time
 
@@ -242,3 +243,22 @@ def test_hybrid_memory_store_caches_static_file_records_between_reads(tmp_path, 
     store.list_memories(chat_id="feishu:chat-2")
 
     assert read_counts == {"identity.json": 1, "policies.json": 1}
+
+
+def test_hybrid_memory_store_close_logs_db_close_failures(tmp_path, monkeypatch, caplog) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    store.ensure_bootstrap()
+
+    class _BrokenConnection:
+        def close(self) -> None:
+            raise RuntimeError("boom")
+
+    store._db = _BrokenConnection()  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING):
+        store.close()
+
+    assert "Failed to close memory store DB" in caplog.text
