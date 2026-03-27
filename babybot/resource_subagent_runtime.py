@@ -117,109 +117,114 @@ class ResourceSubagentRuntime:
 
         channel_context = ChannelToolContext.get_current()
         write_root = self._owner._get_output_dir()
-        token = self._owner._active_write_root.set(str(write_root))
         started = time.perf_counter()
         scope_token: contextvars.Token[ToolLease | None] | None = None
         skill_ids_token: contextvars.Token[tuple[str, ...] | None] | None = None
         worker_depth_token: contextvars.Token[int] | None = None
-        try:
-            merged_lease = self._owner._build_task_lease(lease or {})
-            skill_packs = await self._owner._select_skill_packs(
-                task_description,
-                skill_ids=skill_ids,
-            )
-            merged_lease = self.merge_skill_leases(merged_lease, skill_packs)
-            merged_lease = self.extend_lease_with_current_channel(
-                merged_lease,
-                channel_context=channel_context,
-            )
-            scope_token = self._owner._get_current_task_lease_var().set(merged_lease)
-            skill_ids_token = self._owner._get_current_skill_ids_var().set(
-                tuple(skill_ids) if skill_ids is not None else None
-            )
-            parent_depth = self._owner._get_current_worker_depth_var().get()
-            worker_depth_token = self._owner._get_current_worker_depth_var().set(
-                int(parent_depth) + 1
-            )
-            tools_text = (
-                ", ".join(
-                    sorted(
-                        registered.tool.name
-                        for registered in self._owner.registry.list(merged_lease)
-                    )
+        with self._owner._override_current_write_root(write_root):
+            try:
+                merged_lease = self._owner._build_task_lease(lease or {})
+                skill_packs = await self._owner._select_skill_packs(
+                    task_description,
+                    skill_ids=skill_ids,
                 )
-                or "无"
-            )
-            logger.info(
-                "Run subagent agent=%s write_root=%s selected_skills=%s tools=%s include_groups=%s include_tools=%s exclude_tools=%s",
-                agent_name,
-                write_root,
-                [skill.name for skill in skill_packs],
-                tools_text,
-                list(merged_lease.include_groups),
-                list(merged_lease.include_tools),
-                list(merged_lease.exclude_tools),
-            )
-            sys_prompt = self._owner._build_worker_sys_prompt(
-                agent_name=agent_name,
-                task_description=task_description,
-                tools_text=tools_text,
-                selected_skill_packs=skill_packs,
-                merged_lease=merged_lease,
-            )
-            executor = self._owner._create_worker_executor(
-                config=self._owner.config,
-                tools=self._owner.registry,
-                sys_prompt=sys_prompt,
-                skill_packs=self.executor_skill_packs(skill_packs),
-                gateway=self._owner._get_shared_gateway(),
-            )
-            exec_context = self.build_execution_context(
-                agent_name,
-                heartbeat=heartbeat,
-                tape=tape,
-                tape_store=tape_store,
-                memory_store=memory_store,
-                media_paths=media_paths,
-                channel_context=channel_context,
-            )
-            result = await executor.execute(
-                TaskContract(
-                    task_id=agent_name,
-                    description=task_description,
-                    lease=merged_lease,
-                    retries=0,
-                ),
-                exec_context,
-            )
-            text = result.output if result.status == "succeeded" else result.error
-            if result.status != "succeeded":
-                logger.error(
-                    "Subagent failed agent=%s status=%s error=%s metadata=%s",
+                merged_lease = self.merge_skill_leases(merged_lease, skill_packs)
+                merged_lease = self.extend_lease_with_current_channel(
+                    merged_lease,
+                    channel_context=channel_context,
+                )
+                scope_token = self._owner._get_current_task_lease_var().set(
+                    merged_lease
+                )
+                skill_ids_token = self._owner._get_current_skill_ids_var().set(
+                    tuple(skill_ids) if skill_ids is not None else None
+                )
+                parent_depth = self._owner._get_current_worker_depth_var().get()
+                worker_depth_token = self._owner._get_current_worker_depth_var().set(
+                    int(parent_depth) + 1
+                )
+                tools_text = (
+                    ", ".join(
+                        sorted(
+                            registered.tool.name
+                            for registered in self._owner.registry.list(merged_lease)
+                        )
+                    )
+                    or "无"
+                )
+                logger.info(
+                    "Run subagent agent=%s write_root=%s selected_skills=%s tools=%s include_groups=%s include_tools=%s exclude_tools=%s",
+                    agent_name,
+                    write_root,
+                    [skill.name for skill in skill_packs],
+                    tools_text,
+                    list(merged_lease.include_groups),
+                    list(merged_lease.include_tools),
+                    list(merged_lease.exclude_tools),
+                )
+                sys_prompt = self._owner._build_worker_sys_prompt(
+                    agent_name=agent_name,
+                    task_description=task_description,
+                    tools_text=tools_text,
+                    selected_skill_packs=skill_packs,
+                    merged_lease=merged_lease,
+                )
+                executor = self._owner._create_worker_executor(
+                    config=self._owner.config,
+                    tools=self._owner.registry,
+                    sys_prompt=sys_prompt,
+                    skill_packs=self.executor_skill_packs(skill_packs),
+                    gateway=self._owner._get_shared_gateway(),
+                )
+                exec_context = self.build_execution_context(
+                    agent_name,
+                    heartbeat=heartbeat,
+                    tape=tape,
+                    tape_store=tape_store,
+                    memory_store=memory_store,
+                    media_paths=media_paths,
+                    channel_context=channel_context,
+                )
+                result = await executor.execute(
+                    TaskContract(
+                        task_id=agent_name,
+                        description=task_description,
+                        lease=merged_lease,
+                        retries=0,
+                    ),
+                    exec_context,
+                )
+                text = result.output if result.status == "succeeded" else result.error
+                if result.status != "succeeded":
+                    logger.error(
+                        "Subagent failed agent=%s status=%s error=%s metadata=%s",
+                        agent_name,
+                        result.status,
+                        result.error,
+                        (result.metadata or {}),
+                    )
+                logger.info(
+                    "Run subagent done agent=%s status=%s elapsed=%.2fs output_len=%d",
                     agent_name,
                     result.status,
-                    result.error,
-                    (result.metadata or {}),
+                    time.perf_counter() - started,
+                    len(text or ""),
                 )
-            logger.info(
-                "Run subagent done agent=%s status=%s elapsed=%.2fs output_len=%d",
-                agent_name,
-                result.status,
-                time.perf_counter() - started,
-                len(text or ""),
-            )
-            collected_media = list(exec_context.state.get("media_paths_collected", []))
-            fallback_media = self._owner._extract_media_from_text(text)
-            merged_media = list(dict.fromkeys(collected_media + fallback_media))
-            return text.strip() or "任务完成但没有文本输出。", merged_media
-        except Exception:
-            logger.exception("Run subagent crashed agent=%s", agent_name)
-            raise
-        finally:
-            if worker_depth_token is not None:
-                self._owner._get_current_worker_depth_var().reset(worker_depth_token)
-            if skill_ids_token is not None:
-                self._owner._get_current_skill_ids_var().reset(skill_ids_token)
-            if scope_token is not None:
-                self._owner._get_current_task_lease_var().reset(scope_token)
-            self._owner._active_write_root.reset(token)
+                collected_media = list(
+                    exec_context.state.get("media_paths_collected", [])
+                )
+                fallback_media = self._owner._extract_media_from_text(text)
+                merged_media = list(dict.fromkeys(collected_media + fallback_media))
+                return text.strip() or "任务完成但没有文本输出。", merged_media
+            except Exception:
+                logger.exception("Run subagent crashed agent=%s", agent_name)
+                raise
+            finally:
+                if worker_depth_token is not None:
+                    self._owner._get_current_worker_depth_var().reset(
+                        worker_depth_token
+                    )
+                if skill_ids_token is not None:
+                    self._owner._get_current_skill_ids_var().reset(skill_ids_token)
+                if scope_token is not None:
+                    self._owner._get_current_task_lease_var().reset(scope_token)

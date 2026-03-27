@@ -120,6 +120,24 @@ uv run babybot
 - `@session status`：查看当前会话是否已启动及 session_id
 - `@session stop`：关闭当前交互会话，后续消息恢复走默认 DAG 编排路径
 
+当前实现说明：
+
+- 当前 Claude 交互会话是“会话恢复式交互”，不是“常驻进程式交互”
+- `@session start claude` 会先创建一个按 `chat_key` 隔离的 Claude 会话上下文
+- 后续每条消息都会重新启动一次 `claude` CLI，并通过 `--resume <session_id>` 继续该会话
+- 会话状态当前保存在 BabyBot 管理的隔离目录中，因此用户在默认终端里直接执行 `claude --resume <session_id>` 未必能接上
+
+交互会话后续计划：
+
+1. 保持现有 `@session start/status/stop` 控制面不变，避免影响当前 CLI 与网关路由。
+2. 将 `InteractiveSessionManager` 继续作为按 `chat_key` 的会话注册表，不重写 MessageBus、Orchestrator 和渠道层。
+3. 把 Claude backend 从“每条消息重新执行 `claude --resume`”逐步演进为“每个会话一个常驻 Claude 进程”。
+4. 将 BabyBot 自己的 session 标识与 Claude 内部 resume id 解耦，避免状态展示误导用户。
+5. `@session status` 后续改为优先展示 backend 模式、进程存活状态、最近活跃时间，而不是只展示 `session_id`。
+6. 保留当前隔离环境策略，后续在常驻进程模式下继续沿用隔离目录管理 runtime、临时文件和状态文件。
+7. 在 backend 层补齐 reader/writer 生命周期、超时、异常退出、reset/stop 清理，不把这些复杂度扩散到渠道层。
+8. 等常驻进程模式稳定后，再评估是否追加流式输出回传到飞书/微信，以及是否支持手动接管会话。
+
 ### 网关模式
 
 ```bash

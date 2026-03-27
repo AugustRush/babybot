@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,8 @@ class ClaudeSessionHandle:
     session_id: str
     runtime_root: Path
     env: dict[str, str]
+    is_stopped: bool = False
+    stop_reason: str = ""
 
 
 class ClaudeInteractiveBackend:
@@ -51,6 +55,8 @@ class ClaudeInteractiveBackend:
     async def send(
         self, handle: ClaudeSessionHandle, message: str
     ) -> InteractiveReply:
+        if handle.is_stopped:
+            raise RuntimeError("Claude 交互会话已关闭，请重新启动。")
         output = await self._run_claude(
             prompt=message,
             env=handle.env,
@@ -66,7 +72,10 @@ class ClaudeInteractiveBackend:
     async def stop(
         self, handle: ClaudeSessionHandle, reason: str = "user_stop"
     ) -> None:
-        del reason
+        handle.is_stopped = True
+        handle.stop_reason = str(reason or "user_stop")
+        handle.session_id = ""
+        shutil.rmtree(handle.runtime_root, ignore_errors=True)
         return None
 
     def status(self, handle: ClaudeSessionHandle) -> dict[str, Any]:
@@ -74,6 +83,8 @@ class ClaudeInteractiveBackend:
             "backend": "claude",
             "session_id": handle.session_id,
             "runtime_root": str(handle.runtime_root),
+            "is_stopped": handle.is_stopped,
+            "stop_reason": handle.stop_reason,
         }
 
     def _runtime_root(self, chat_key: str) -> Path:
@@ -115,15 +126,30 @@ class ClaudeInteractiveBackend:
             env=env,
             cwd=str(self._workspace_root),
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=self._default_timeout_s,
-        )
-        if proc.returncode != 0:
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=self._default_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            maybe_kill = proc.kill()
+            if inspect.isawaitable(maybe_kill):
+                await maybe_kill
+            maybe_wait = proc.wait()
+            if inspect.isawaitable(maybe_wait):
+                await maybe_wait
             raise RuntimeError(
-                stderr.decode(errors="replace")
-                or stdout.decode(errors="replace")
-                or f"Claude exited with code {proc.returncode}"
+                f"Claude CLI timed out after {self._default_timeout_s:.2f}s"
+            ) from exc
+        if proc.returncode != 0:
+            detail = (
+                stderr.decode(errors="replace").strip()
+                or stdout.decode(errors="replace").strip()
+            )
+            if detail:
+                detail = f": {detail}"
+            raise RuntimeError(
+                f"Claude CLI exited with code {proc.returncode}{detail}"
             )
         return stdout.decode(errors="replace")
 

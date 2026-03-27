@@ -2009,6 +2009,44 @@ def test_callable_tool_runs_sync_tools_concurrently_without_workspace_chdir(tmp_
     assert overlap_detected == [True]
 
 
+def test_get_current_write_root_prefers_bound_context_root_over_process_cwd(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    with resource_module.override_current_write_root(workspace):
+        assert resource_module.get_current_write_root() == workspace.resolve()
+
+
+def test_callable_tool_without_manager_uses_bound_context_write_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    tool = CallableTool(
+        func=lambda: str(resource_module.get_current_write_root()),
+        name="bound_root",
+        description="returns root",
+        schema={"type": "object", "properties": {}},
+    )
+
+    with resource_module.override_current_write_root(workspace):
+        result = asyncio.run(tool.invoke({}, ToolContext(session_id="s1", state={})))
+
+    assert result.ok is True
+    assert result.content == str(workspace.resolve())
+
+
 
 def test_resource_manager_areset_awaits_client_close() -> None:
     manager = object.__new__(ResourceManager)

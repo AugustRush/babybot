@@ -4,6 +4,8 @@ from .config import Config
 from .orchestrator import OrchestratorAgent
 from .channels import ChannelManager
 
+_CLI_CHAT_KEY = "cli:local"
+
 
 def _setup_logging(console_output: bool) -> None:
     level = logging.INFO if console_output else logging.WARNING
@@ -104,8 +106,13 @@ def run():
 
             if user_input.lower() == "status":
                 status = orchestrator.get_status()
+                interactive = dict(status.get("interactive_sessions") or {})
+                active_count = int(interactive.get("active_count") or 0)
+                chat_keys = ", ".join(interactive.get("chat_keys") or [])
                 print(
                     f"\nAvailable Tools: {status.get('available_tools', 0)}\n"
+                    f"Interactive Sessions: {active_count}\n"
+                    f"Interactive Chats: {chat_keys or '-'}\n"
                 )
                 continue
 
@@ -113,7 +120,10 @@ def run():
                 print("\n正在处理...")
                 response = loop.run_until_complete(
                     asyncio.wait_for(
-                        orchestrator.process_task(user_input),
+                        orchestrator.process_task(
+                            user_input,
+                            chat_key=_CLI_CHAT_KEY,
+                        ),
                         timeout=float(config.system.timeout),
                     )
                 )

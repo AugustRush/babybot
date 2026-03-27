@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextvars
+from contextlib import contextmanager
 import inspect
 import json
 import logging
@@ -69,6 +70,9 @@ logger = logging.getLogger(__name__)
 _CURRENT_CALLABLE_TOOL_WRITE_ROOT: contextvars.ContextVar[str | None] = (
     contextvars.ContextVar("current_callable_tool_write_root", default=None)
 )
+_CURRENT_DEFAULT_WRITE_ROOT: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("current_default_write_root", default=None)
+)
 
 if TYPE_CHECKING:
     from .channels.tools import ChannelTools, ChannelToolContext
@@ -126,21 +130,24 @@ class CallableTool:
                 tool_context_token = (
                     self._resource_manager._get_current_tool_context_var().set(context)
                 )
-            write_root_token = _CURRENT_CALLABLE_TOOL_WRITE_ROOT.set(str(write_root))
-            if inspect.iscoroutinefunction(self._func):
-                value = await self._func(**kwargs)
-            else:
-                # Run sync callables in a thread to avoid blocking the loop.
-                # Use contextvars.copy_context() so channel context etc.
-                # are visible inside the thread (Python <3.12 doesn't copy
-                # context automatically in run_in_executor).
-                loop = asyncio.get_running_loop()
-                ctx = contextvars.copy_context()
-                value = await loop.run_in_executor(
-                    None,
-                    ctx.run,
-                    lambda: self._func(**kwargs),
+            with override_current_write_root(write_root):
+                write_root_token = _CURRENT_CALLABLE_TOOL_WRITE_ROOT.set(
+                    str(write_root)
                 )
+                if inspect.iscoroutinefunction(self._func):
+                    value = await self._func(**kwargs)
+                else:
+                    # Run sync callables in a thread to avoid blocking the loop.
+                    # Use contextvars.copy_context() so channel context etc.
+                    # are visible inside the thread (Python <3.12 doesn't copy
+                    # context automatically in run_in_executor).
+                    loop = asyncio.get_running_loop()
+                    ctx = contextvars.copy_context()
+                    value = await loop.run_in_executor(
+                        None,
+                        ctx.run,
+                        lambda: self._func(**kwargs),
+                    )
             return ToolResult(
                 ok=True,
                 content=self._normalize_result(value),
@@ -172,7 +179,7 @@ class CallableTool:
 
     def _current_write_root(self) -> Path:
         if self._resource_manager is None:
-            return Path.cwd().resolve()
+            return get_current_write_root()
         return self._resource_manager._get_active_write_root()
 
     @staticmethod
@@ -307,10 +314,23 @@ class CallableTool:
         return target.resolve()
 
 
+@contextmanager
+def override_current_write_root(path: str | os.PathLike[str]) -> Any:
+    resolved = Path(path).expanduser().resolve()
+    token = _CURRENT_DEFAULT_WRITE_ROOT.set(str(resolved))
+    try:
+        yield resolved
+    finally:
+        _CURRENT_DEFAULT_WRITE_ROOT.reset(token)
+
+
 def get_current_write_root() -> Path:
     raw = _CURRENT_CALLABLE_TOOL_WRITE_ROOT.get()
     if raw:
         return Path(raw).expanduser().resolve()
+    fallback = _CURRENT_DEFAULT_WRITE_ROOT.get()
+    if fallback:
+        return Path(fallback).expanduser().resolve()
     return Path.cwd().resolve()
 
 
@@ -1250,6 +1270,16 @@ class ResourceManager:
         if self._is_within(ws, raw):
             return raw
         return ws
+
+    @contextmanager
+    def _override_current_write_root(self, write_root: Path) -> Any:
+        resolved = Path(write_root).expanduser().resolve()
+        token = self._active_write_root.set(str(resolved))
+        try:
+            with override_current_write_root(resolved):
+                yield resolved
+        finally:
+            self._active_write_root.reset(token)
 
     def _get_output_dir(self) -> Path:
         output = self.config.workspace_dir.resolve() / "output"
