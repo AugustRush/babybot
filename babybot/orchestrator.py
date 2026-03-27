@@ -25,6 +25,7 @@ from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
 from .interactive_sessions.backends import ClaudeInteractiveBackend
 from .model_gateway import OpenAICompatibleGateway
+from .orchestration_policy import ConservativePolicySelector
 from .orchestration_policy_store import OrchestrationPolicyStore
 from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
@@ -189,6 +190,37 @@ class OrchestratorAgent:
             outcome=record.outcome,
         )
 
+    def _select_decomposition_action(
+        self,
+        *,
+        user_input: str,
+        media_paths: list[str] | None = None,
+    ) -> tuple[str, dict[str, Any], str]:
+        features = self._build_policy_state_features(
+            user_input,
+            media_paths=media_paths,
+        )
+        store = getattr(self, "_policy_store", None)
+        if store is None:
+            class _NullPolicyStore:
+                @staticmethod
+                def summarize_action_stats(*, decision_kind: str | None = None) -> dict[str, dict[str, float | int]]:
+                    del decision_kind
+                    return {}
+
+            store = _NullPolicyStore()
+        selector = ConservativePolicySelector(
+            store,
+            min_samples=getattr(self.config.system, "policy_learning_min_samples", 8),
+            explore_ratio=getattr(
+                self.config.system,
+                "policy_learning_explore_ratio",
+                0.05,
+            ),
+        )
+        action = selector.choose_decomposition(features=features)
+        return action.name, features, action.hint
+
     def _persist_policy_events(
         self,
         *,
@@ -262,6 +294,13 @@ class OrchestratorAgent:
         if chat_key:
             self._remember_flow_id(chat_key, flow_id)
 
+        decomposition_action, decomposition_features, decomposition_hint = (
+            self._select_decomposition_action(
+                user_input=user_input,
+                media_paths=media_paths,
+            )
+        )
+
         context = ExecutionContext(
             session_id=flow_id,
             state={
@@ -280,6 +319,7 @@ class OrchestratorAgent:
                     ("stream_callback", stream_callback),
                     ("runtime_event_callback", runtime_event_callback),
                     ("send_intermediate_message", send_intermediate_message),
+                    ("policy_hints", [decomposition_hint]),
                 ]
                 if v is not None
             },
@@ -288,11 +328,8 @@ class OrchestratorAgent:
             context.emit(
                 "policy_decision",
                 decision_kind="decomposition",
-                action_name="baseline",
-                state_features=self._build_policy_state_features(
-                    user_input,
-                    media_paths=media_paths,
-                ),
+                action_name=decomposition_action,
+                state_features=decomposition_features,
             )
 
         logger.info("DynamicOrchestrator created, starting run flow_id=%s", flow_id)

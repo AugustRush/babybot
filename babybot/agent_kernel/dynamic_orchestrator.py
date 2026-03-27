@@ -1161,12 +1161,19 @@ class DynamicOrchestrator:
         memory_store = context.state.get("memory_store")
         history = build_history_summary(tape, memory_store=memory_store, query=goal)
         media_paths = context.state.get("media_paths") or ()
+        policy_hints = [
+            str(item).strip()
+            for item in (context.state.get("policy_hints") or ())
+            if str(item).strip()
+        ]
 
         system_parts = [_SYSTEM_PROMPT_ROLE, _build_resource_catalog(briefs)]
         if _needs_deferred_task_guidance(goal):
             system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
         if history:
             system_parts.append(f"\n{history}")
+        if policy_hints:
+            system_parts.append("\n策略建议：\n- " + "\n- ".join(policy_hints))
 
         return [
             ModelMessage(role="system", content="\n".join(system_parts)),

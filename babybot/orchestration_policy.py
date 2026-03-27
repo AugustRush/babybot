@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class PolicyAction:
+    name: str
+    hint: str
+
+
+class ConservativePolicySelector:
+    _DECOMPOSITION_ACTIONS: dict[str, PolicyAction] = {
+        "direct_execute": PolicyAction(
+            name="direct_execute",
+            hint="如果任务非常直接且信息充分，可以直接执行，但仍要避免猜测。",
+        ),
+        "analyze_then_execute": PolicyAction(
+            name="analyze_then_execute",
+            hint="优先先分析任务边界、依赖和风险，再逐步执行。",
+        ),
+        "retrieve_then_execute": PolicyAction(
+            name="retrieve_then_execute",
+            hint="先补足上下文、文件或外部信息，再开始执行。",
+        ),
+        "verify_before_finish": PolicyAction(
+            name="verify_before_finish",
+            hint="在最终回复前，优先做局部或完整验证。",
+        ),
+    }
+
+    _SCHEDULING_ACTIONS: dict[str, PolicyAction] = {
+        "serial": PolicyAction(
+            name="serial",
+            hint="默认串行执行；只有独立子任务非常明确时才考虑并行。",
+        ),
+        "bounded_parallel": PolicyAction(
+            name="bounded_parallel",
+            hint="仅对明确独立的子任务做有限并行，并保留收敛检查。",
+        ),
+        "allow_worker": PolicyAction(
+            name="allow_worker",
+            hint="允许创建 worker，但仍应控制深度与数量。",
+        ),
+        "deny_worker": PolicyAction(
+            name="deny_worker",
+            hint="优先在当前编排内完成，不要轻易创建额外 worker。",
+        ),
+    }
+
+    def __init__(
+        self,
+        store: Any,
+        *,
+        min_samples: int = 8,
+        explore_ratio: float = 0.05,
+    ) -> None:
+        self._store = store
+        self._min_samples = max(1, int(min_samples))
+        self._explore_ratio = max(0.0, float(explore_ratio))
+
+    def choose_decomposition(self, *, features: dict[str, Any]) -> PolicyAction:
+        del self._explore_ratio
+        default = self._DECOMPOSITION_ACTIONS["analyze_then_execute"]
+        stats = self._eligible_stats(decision_kind="decomposition")
+        if not stats:
+            return default
+        if str(features.get("task_shape", "") or "").strip() == "multi_step":
+            return self._best_action(stats, default, self._DECOMPOSITION_ACTIONS)
+        return self._best_action(stats, default, self._DECOMPOSITION_ACTIONS)
+
+    def choose_scheduling(self, *, features: dict[str, Any]) -> PolicyAction:
+        del features
+        default = self._SCHEDULING_ACTIONS["serial"]
+        stats = self._eligible_stats(decision_kind="scheduling")
+        if not stats:
+            return default
+        return self._best_action(stats, default, self._SCHEDULING_ACTIONS)
+
+    def choose_worker_gate(self, *, features: dict[str, Any]) -> PolicyAction:
+        del features
+        default = self._SCHEDULING_ACTIONS["deny_worker"]
+        stats = self._eligible_stats(decision_kind="worker")
+        if not stats:
+            return default
+        return self._best_action(stats, default, self._SCHEDULING_ACTIONS)
+
+    def _eligible_stats(self, *, decision_kind: str) -> dict[str, dict[str, float | int]]:
+        raw = self._store.summarize_action_stats(decision_kind=decision_kind)
+        return {
+            name: payload
+            for name, payload in raw.items()
+            if int(payload.get("samples", 0) or 0) >= self._min_samples
+        }
+
+    @staticmethod
+    def _best_action(
+        stats: dict[str, dict[str, float | int]],
+        default: PolicyAction,
+        actions: dict[str, PolicyAction],
+    ) -> PolicyAction:
+        ranked = sorted(
+            stats.items(),
+            key=lambda item: (
+                float(item[1].get("mean_reward", 0.0) or 0.0),
+                int(item[1].get("samples", 0) or 0),
+            ),
+            reverse=True,
+        )
+        for action_name, _payload in ranked:
+            action = actions.get(action_name)
+            if action is not None:
+                return action
+        return default
