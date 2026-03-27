@@ -142,12 +142,13 @@ uv run babybot
 
 当前实现增加了一层保守型 orchestration policy learning，用来优化“任务怎么拆、什么时候并行、什么时候不要再开 worker”，而不是去微调底层模型。
 
-启用方式：
+默认行为：
 
-- 在 `config.json` 的 `system` 中打开 `policy_learning_enabled`
-- 可选参数：
-  - `policy_learning_min_samples`：动作最少样本数，低于这个阈值时不信任历史统计
-  - `policy_learning_explore_ratio`：保留给后续探索策略的占位参数，当前保守策略主要仍走安全默认值
+- 默认自动开启 policy learning，不需要手工打开
+- `policy_learning_enabled` 现在更适合当作开发/回滚开关；只有你想强制关闭时才需要配置
+- 可选 override：
+  - `policy_learning_min_samples`：`0` 表示自动模式；只有你想手工覆盖动作最小样本阈值时才需要配置
+  - `policy_learning_explore_ratio`：`-1.0` 表示自动模式；只有你想手工覆盖探索预算时才需要配置
 
 自动采集的信号：
 
@@ -169,6 +170,7 @@ uv run babybot
 - 排序不是只看 `mean_reward`，还会对 `failure_rate`、`retry_rate`、`dead_letter_rate`、`stalled_rate` 做惩罚
 - `good/bad` 反馈不会直接覆盖 reward，而是作为保守 shaping 信号参与打分
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
+- 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
 
 人工纠偏命令：
 

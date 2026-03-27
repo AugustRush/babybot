@@ -155,3 +155,25 @@ def test_policy_prefers_stabler_action_when_high_reward_action_is_under_sampled(
     action = selector.choose_scheduling(features={"independent_subtasks": 2})
 
     assert action.name == "serial"
+
+
+def test_policy_auto_mode_uses_internal_conservative_thresholds() -> None:
+    store = _FakePolicyStore(
+        {
+            "scheduling": {
+                "serial": {
+                    "mean_reward": 0.75,
+                    "samples": 12,
+                },
+                "bounded_parallel": {
+                    "mean_reward": 0.95,
+                    "samples": 7,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=0, explore_ratio=-1.0)
+
+    action = selector.choose_scheduling(features={"independent_subtasks": 2})
+
+    assert action.name == "serial"

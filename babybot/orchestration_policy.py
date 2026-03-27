@@ -76,29 +76,76 @@ class ConservativePolicySelector:
         explore_ratio: float = 0.05,
     ) -> None:
         self._store = store
-        self._min_samples = max(1, int(min_samples))
-        self._explore_ratio = max(0.0, float(explore_ratio))
+        self._min_samples_override = int(min_samples)
+        self._explore_ratio_override = float(explore_ratio)
+
+    def _effective_min_samples(self, *, decision_kind: str) -> int:
+        if self._min_samples_override > 0:
+            return self._min_samples_override
+        defaults = {
+            "decomposition": 6,
+            "scheduling": 8,
+            "worker": 10,
+        }
+        return defaults.get(decision_kind, 8)
+
+    def _effective_explore_ratio(
+        self,
+        *,
+        decision_kind: str,
+        stats: dict[str, dict[str, float | int]],
+    ) -> float:
+        if self._explore_ratio_override >= 0.0:
+            return min(0.25, max(0.0, self._explore_ratio_override))
+        base = {
+            "decomposition": 0.06,
+            "scheduling": 0.04,
+            "worker": 0.02,
+        }.get(decision_kind, 0.04)
+        if not stats:
+            return 0.0
+        total_samples = sum(int(item.get("samples", 0) or 0) for item in stats.values())
+        avg_failure = sum(float(item.get("failure_rate", 0.0) or 0.0) for item in stats.values()) / max(1, len(stats))
+        avg_stall = sum(float(item.get("stalled_rate", 0.0) or 0.0) for item in stats.values()) / max(1, len(stats))
+        sample_factor = min(1.0, total_samples / float(self._effective_min_samples(decision_kind=decision_kind) * 4))
+        risk_factor = max(0.2, 1.0 - avg_failure - avg_stall)
+        return min(0.15, max(0.0, base * sample_factor * risk_factor))
 
     def choose_decomposition(self, *, features: dict[str, Any]) -> PolicyAction:
         default = self._DECOMPOSITION_ACTIONS["analyze_then_execute"]
         stats = self._eligible_stats(decision_kind="decomposition", features=features)
         if not stats:
             return default
-        return self._best_action(stats, default, self._DECOMPOSITION_ACTIONS)
+        return self._best_action(
+            decision_kind="decomposition",
+            stats=stats,
+            default=default,
+            actions=self._DECOMPOSITION_ACTIONS,
+        )
 
     def choose_scheduling(self, *, features: dict[str, Any]) -> PolicyAction:
         default = self._SCHEDULING_ACTIONS["serial"]
         stats = self._eligible_stats(decision_kind="scheduling", features=features)
         if not stats:
             return default
-        return self._best_action(stats, default, self._SCHEDULING_ACTIONS)
+        return self._best_action(
+            decision_kind="scheduling",
+            stats=stats,
+            default=default,
+            actions=self._SCHEDULING_ACTIONS,
+        )
 
     def choose_worker_gate(self, *, features: dict[str, Any]) -> PolicyAction:
         default = self._SCHEDULING_ACTIONS["deny_worker"]
         stats = self._eligible_stats(decision_kind="worker", features=features)
         if not stats:
             return default
-        return self._best_action(stats, default, self._SCHEDULING_ACTIONS)
+        return self._best_action(
+            decision_kind="worker",
+            stats=stats,
+            default=default,
+            actions=self._SCHEDULING_ACTIONS,
+        )
 
     def _eligible_stats(
         self,
@@ -115,7 +162,8 @@ class ConservativePolicySelector:
         eligible = {
             name: payload
             for name, payload in raw.items()
-            if int(payload.get("samples", 0) or 0) >= self._min_samples
+            if int(payload.get("samples", 0) or 0)
+            >= self._effective_min_samples(decision_kind=decision_kind)
         }
         if eligible:
             return eligible
@@ -124,7 +172,8 @@ class ConservativePolicySelector:
         return {
             name: payload
             for name, payload in raw.items()
-            if int(payload.get("samples", 0) or 0) >= self._min_samples
+            if int(payload.get("samples", 0) or 0)
+            >= self._effective_min_samples(decision_kind=decision_kind)
         }
 
     @staticmethod
@@ -181,16 +230,24 @@ class ConservativePolicySelector:
     def _confidence_penalty(
         self,
         *,
+        decision_kind: str,
         samples: int,
         total_samples: int,
+        stats: dict[str, dict[str, float | int]],
     ) -> float:
         if samples <= 0 or total_samples <= 0:
             return float("inf")
-        conservatism = max(0.0, 1.0 - self._explore_ratio)
+        explore_ratio = self._effective_explore_ratio(
+            decision_kind=decision_kind,
+            stats=stats,
+        )
+        conservatism = max(0.0, 1.0 - explore_ratio)
         return conservatism * math.sqrt(math.log(total_samples + 1.0) / samples)
 
     def _best_action(
         self,
+        *,
+        decision_kind: str,
         stats: dict[str, dict[str, float | int]],
         default: PolicyAction,
         actions: dict[str, PolicyAction],
@@ -201,8 +258,10 @@ class ConservativePolicySelector:
             payload = item[1]
             samples = int(payload.get("samples", 0) or 0)
             conservative_score = self._score_payload(payload) - self._confidence_penalty(
+                decision_kind=decision_kind,
                 samples=samples,
                 total_samples=total_samples,
+                stats=stats,
             )
             return (
                 conservative_score,
