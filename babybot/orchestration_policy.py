@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
+
+
+def build_policy_state_bucket(features: dict[str, Any]) -> str:
+    task_shape = str(features.get("task_shape", "") or "unknown").strip() or "unknown"
+    has_media = 1 if bool(features.get("has_media")) else 0
+    raw_subtasks = int(features.get("independent_subtasks", 1) or 1)
+    subtasks_bucket = "3plus" if raw_subtasks >= 3 else str(max(1, raw_subtasks))
+    return (
+        f"task_shape={task_shape}"
+        f"|has_media={has_media}"
+        f"|subtasks={subtasks_bucket}"
+    )
 
 
 @dataclass(frozen=True)
@@ -67,32 +80,45 @@ class ConservativePolicySelector:
         self._explore_ratio = max(0.0, float(explore_ratio))
 
     def choose_decomposition(self, *, features: dict[str, Any]) -> PolicyAction:
-        del self._explore_ratio
         default = self._DECOMPOSITION_ACTIONS["analyze_then_execute"]
-        stats = self._eligible_stats(decision_kind="decomposition")
+        stats = self._eligible_stats(decision_kind="decomposition", features=features)
         if not stats:
             return default
-        if str(features.get("task_shape", "") or "").strip() == "multi_step":
-            return self._best_action(stats, default, self._DECOMPOSITION_ACTIONS)
         return self._best_action(stats, default, self._DECOMPOSITION_ACTIONS)
 
     def choose_scheduling(self, *, features: dict[str, Any]) -> PolicyAction:
-        del features
         default = self._SCHEDULING_ACTIONS["serial"]
-        stats = self._eligible_stats(decision_kind="scheduling")
+        stats = self._eligible_stats(decision_kind="scheduling", features=features)
         if not stats:
             return default
         return self._best_action(stats, default, self._SCHEDULING_ACTIONS)
 
     def choose_worker_gate(self, *, features: dict[str, Any]) -> PolicyAction:
-        del features
         default = self._SCHEDULING_ACTIONS["deny_worker"]
-        stats = self._eligible_stats(decision_kind="worker")
+        stats = self._eligible_stats(decision_kind="worker", features=features)
         if not stats:
             return default
         return self._best_action(stats, default, self._SCHEDULING_ACTIONS)
 
-    def _eligible_stats(self, *, decision_kind: str) -> dict[str, dict[str, float | int]]:
+    def _eligible_stats(
+        self,
+        *,
+        decision_kind: str,
+        features: dict[str, Any],
+    ) -> dict[str, dict[str, float | int]]:
+        bucket = build_policy_state_bucket(features)
+        raw = self._store.summarize_action_stats(
+            decision_kind=decision_kind,
+            state_bucket=bucket,
+        )
+        raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
+        eligible = {
+            name: payload
+            for name, payload in raw.items()
+            if int(payload.get("samples", 0) or 0) >= self._min_samples
+        }
+        if eligible:
+            return eligible
         raw = self._store.summarize_action_stats(decision_kind=decision_kind)
         raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
         return {
@@ -142,27 +168,50 @@ class ConservativePolicySelector:
         retry_rate = float(payload.get("retry_rate", 0.0) or 0.0)
         dead_letter_rate = float(payload.get("dead_letter_rate", 0.0) or 0.0)
         stalled_rate = float(payload.get("stalled_rate", 0.0) or 0.0)
+        feedback_score = float(payload.get("feedback_score", 0.0) or 0.0)
         return (
             mean_reward
+            + (feedback_score * 0.4)
             - (failure_rate * 0.5)
             - (retry_rate * 0.2)
             - (dead_letter_rate * 0.35)
             - (stalled_rate * 0.25)
         )
 
-    @classmethod
+    def _confidence_penalty(
+        self,
+        *,
+        samples: int,
+        total_samples: int,
+    ) -> float:
+        if samples <= 0 or total_samples <= 0:
+            return float("inf")
+        conservatism = max(0.0, 1.0 - self._explore_ratio)
+        return conservatism * math.sqrt(math.log(total_samples + 1.0) / samples)
+
     def _best_action(
-        cls,
+        self,
         stats: dict[str, dict[str, float | int]],
         default: PolicyAction,
         actions: dict[str, PolicyAction],
     ) -> PolicyAction:
+        total_samples = sum(int(item.get("samples", 0) or 0) for item in stats.values())
+
+        def _rank(item: tuple[str, dict[str, float | int]]) -> tuple[float, int]:
+            payload = item[1]
+            samples = int(payload.get("samples", 0) or 0)
+            conservative_score = self._score_payload(payload) - self._confidence_penalty(
+                samples=samples,
+                total_samples=total_samples,
+            )
+            return (
+                conservative_score,
+                samples,
+            )
+
         ranked = sorted(
             stats.items(),
-            key=lambda item: (
-                cls._score_payload(item[1]),
-                int(item[1].get("samples", 0) or 0),
-            ),
+            key=_rank,
             reverse=True,
         )
         for action_name, _payload in ranked:

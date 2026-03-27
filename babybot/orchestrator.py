@@ -230,8 +230,12 @@ class OrchestratorAgent:
         if store is None or not hasattr(store, "summarize_action_stats"):
             class _NullPolicyStore:
                 @staticmethod
-                def summarize_action_stats(*, decision_kind: str | None = None) -> dict[str, dict[str, float | int]]:
-                    del decision_kind
+                def summarize_action_stats(
+                    *,
+                    decision_kind: str | None = None,
+                    state_bucket: str | None = None,
+                ) -> dict[str, dict[str, float | int]]:
+                    del decision_kind, state_bucket
                     return {}
 
             store = _NullPolicyStore()
@@ -289,6 +293,29 @@ class OrchestratorAgent:
         reward -= 0.25 * dead_letter_count
         reward -= 0.2 * stalled_count
         return max(-1.0, min(1.0, reward))
+
+    @staticmethod
+    def _policy_outcome_details(
+        events: list[dict[str, Any]],
+        *,
+        result: Any | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        retry_count = sum(1 for event in events if event.get("event") == "retrying")
+        dead_letter_count = sum(
+            1 for event in events if event.get("event") == "dead_lettered"
+        )
+        stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        payload = {
+            "retry_count": retry_count,
+            "dead_letter_count": dead_letter_count,
+            "stalled_count": stalled_count,
+        }
+        if result is not None:
+            payload["task_result_count"] = len(getattr(result, "task_results", {}) or {})
+        if error:
+            payload["error"] = error
+        return payload
 
     async def _answer_with_dag(
         self,
@@ -406,7 +433,10 @@ class OrchestratorAgent:
                     chat_key=chat_key,
                     final_status="failed",
                     reward=self._policy_reward(context.events, "failed"),
-                    outcome={"error": str(exc)},
+                    outcome=self._policy_outcome_details(
+                        context.events,
+                        error=str(exc),
+                    ),
                 )
             )
             raise
@@ -421,11 +451,10 @@ class OrchestratorAgent:
                 chat_key=chat_key,
                 final_status="succeeded",
                 reward=self._policy_reward(context.events, "succeeded"),
-                outcome={
-                    "task_result_count": len(
-                        getattr(result, "task_results", {}) or {}
-                    ),
-                },
+                outcome=self._policy_outcome_details(
+                    context.events,
+                    result=result,
+                ),
             )
         )
 

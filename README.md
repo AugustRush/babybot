@@ -155,13 +155,20 @@ uv run babybot
 - 调度决策：如串行/并行 dispatch、wait barrier
 - worker gate 决策：允许还是拒绝继续创建 worker
 - 最终 outcome：成功/失败、reward，以及重试、dead letter、stalled 等惩罚信号
+- action 聚合统计：`mean_reward`、`success_rate`、`failure_rate`
+- 风险统计：`retry_rate`、`dead_letter_rate`、`stalled_rate`
+- 人工反馈统计：`feedback_good_count`、`feedback_bad_count`、`feedback_score`
 
 当前保守选择规则：
 
 - 样本不足时，拆解默认 `analyze_then_execute`
 - 调度默认更偏向串行，只有历史收益更好且风险更低时才偏向受限并行
 - worker 使用默认更保守；启用策略学习后，如果历史数据不足或风险偏高，会拒绝继续创建/分发 worker
+- 不是全局平均直接排序，而是先按 bucket 查局部历史，没命中再回落到全局
+- 当前 bucket 只用稳定特征：`task_shape`、`has_media`、`independent_subtasks`
 - 排序不是只看 `mean_reward`，还会对 `failure_rate`、`retry_rate`、`dead_letter_rate`、`stalled_rate` 做惩罚
+- `good/bad` 反馈不会直接覆盖 reward，而是作为保守 shaping 信号参与打分
+- 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 
 人工纠偏命令：
 

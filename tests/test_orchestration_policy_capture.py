@@ -141,6 +141,9 @@ def test_orchestrator_records_flow_level_outcome_on_success() -> None:
 
         async def run(self, goal: str, context: ExecutionContext):
             del goal
+            context.emit("retrying", attempt=1)
+            context.emit("dead_lettered", task_id="task-1")
+            context.emit("stalled", task_id="task-2")
             context.emit(
                 "policy_decision",
                 decision_kind="scheduling",
@@ -158,6 +161,9 @@ def test_orchestrator_records_flow_level_outcome_on_success() -> None:
     assert media == []
     assert agent._policy_store.recorded_decisions[0]["decision_kind"] == "decomposition"
     assert agent._policy_store.recorded_outcomes[0]["final_status"] == "succeeded"
+    assert agent._policy_store.recorded_outcomes[0]["outcome"]["retry_count"] == 1
+    assert agent._policy_store.recorded_outcomes[0]["outcome"]["dead_letter_count"] == 1
+    assert agent._policy_store.recorded_outcomes[0]["outcome"]["stalled_count"] == 1
 
 
 def test_dynamic_orchestrator_records_dispatch_and_wait_events() -> None:
