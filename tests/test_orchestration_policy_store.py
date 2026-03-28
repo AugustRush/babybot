@@ -284,3 +284,47 @@ def test_policy_store_matches_generalized_state_bucket(tmp_path) -> None:
     )
 
     assert set(stats) == {"retrieve_then_execute"}
+
+
+def test_policy_store_tracks_recent_failure_window(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    now = datetime(2026, 3, 28, tzinfo=timezone.utc)
+    recent = now.isoformat(timespec="seconds")
+    old = (now - timedelta(days=30)).isoformat(timespec="seconds")
+    store.record_decision(
+        flow_id="flow-old",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="bounded_parallel",
+        state_features={"task_shape": "multi_step"},
+        created_at=old,
+    )
+    store.record_outcome(
+        flow_id="flow-old",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=1.0,
+        outcome={},
+        created_at=old,
+    )
+    store.record_decision(
+        flow_id="flow-new",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="bounded_parallel",
+        state_features={"task_shape": "multi_step"},
+        created_at=recent,
+    )
+    store.record_outcome(
+        flow_id="flow-new",
+        chat_key="feishu:c1",
+        final_status="failed",
+        reward=-1.0,
+        outcome={},
+        created_at=recent,
+    )
+
+    stats = store.summarize_action_stats(decision_kind="scheduling", now=now)
+
+    assert stats["bounded_parallel"]["recent_failure_rate"] > 0.5
+    assert stats["bounded_parallel"]["recent_guard_samples"] >= 1.0

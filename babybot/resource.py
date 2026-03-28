@@ -1082,6 +1082,18 @@ class ResourceManager:
             parts.append("[Memory Records]\n" + "\n".join(lines))
         return "\n".join(parts)
 
+    def _inspect_policy(self, chat_key: str = "", decision_kind: str = "") -> str:
+        provider = getattr(self, "_observability_provider", None)
+        resolved_chat_key = chat_key.strip() or self._default_chat_key()
+        if provider is not None and hasattr(provider, "inspect_policy"):
+            return str(
+                provider.inspect_policy(
+                    chat_key=resolved_chat_key,
+                    decision_kind=decision_kind.strip(),
+                )
+            )
+        return decision_kind.strip() or resolved_chat_key or "policy"
+
     def register_channel_tools(self, channel_tools: "ChannelTools") -> None:
         group_name = channel_tools.get_tool_group_name()
         if group_name not in self.groups:

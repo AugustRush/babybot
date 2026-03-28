@@ -19,8 +19,17 @@ def build_inspect_chat_context_tool(owner: Any) -> Any:
     return inspect_chat_context
 
 
+def build_inspect_policy_tool(owner: Any) -> Any:
+    def inspect_policy(chat_key: str = "", decision_kind: str = "") -> str:
+        """Inspect current orchestration policy summaries and effective action stats."""
+        return owner._inspect_policy(chat_key=chat_key, decision_kind=decision_kind)
+
+    return inspect_policy
+
+
 def iter_observability_tool_registrations(owner: Any) -> tuple[tuple[Any, str], ...]:
     return (
         (build_inspect_runtime_flow_tool(owner), "basic"),
         (build_inspect_chat_context_tool(owner), "basic"),
+        (build_inspect_policy_tool(owner), "basic"),
     )

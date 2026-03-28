@@ -103,6 +103,13 @@ class ConservativePolicySelector:
         }
         return defaults.get(decision_kind, 8)
 
+    @staticmethod
+    def _sample_mass(payload: dict[str, float | int]) -> float:
+        effective = float(payload.get("effective_samples", 0.0) or 0.0)
+        if effective > 0:
+            return effective
+        return float(payload.get("samples", 0) or 0)
+
     def _effective_explore_ratio(
         self,
         *,
@@ -176,7 +183,7 @@ class ConservativePolicySelector:
             eligible = {
                 name: payload
                 for name, payload in raw.items()
-                if int(payload.get("samples", 0) or 0)
+                if self._sample_mass(payload)
                 >= self._effective_min_samples(decision_kind=decision_kind)
             }
             if eligible:
@@ -186,7 +193,7 @@ class ConservativePolicySelector:
         return {
             name: payload
             for name, payload in raw.items()
-            if int(payload.get("samples", 0) or 0)
+            if self._sample_mass(payload)
             >= self._effective_min_samples(decision_kind=decision_kind)
         }
 
@@ -304,13 +311,25 @@ class ConservativePolicySelector:
                 samples,
             )
 
-        ranked = sorted(
-            stats.items(),
-            key=_rank,
-            reverse=True,
-        )
+        safe_items = [
+            item
+            for item in stats.items()
+            if not self._is_recently_risky(item[1])
+        ]
+        ranked = sorted((safe_items or list(stats.items())), key=_rank, reverse=True)
         for action_name, _payload in ranked:
             action = actions.get(action_name)
             if action is not None:
                 return action
         return default
+
+    @staticmethod
+    def _is_recently_risky(payload: dict[str, float | int]) -> bool:
+        recent_guard_samples = float(payload.get("recent_guard_samples", 0.0) or 0.0)
+        if recent_guard_samples < 1.0:
+            return False
+        recent_failure_rate = float(payload.get("recent_failure_rate", 0.0) or 0.0)
+        recent_bad_feedback_rate = float(
+            payload.get("recent_bad_feedback_rate", 0.0) or 0.0
+        )
+        return recent_failure_rate >= 0.5 or recent_bad_feedback_rate >= 0.6

@@ -28,6 +28,25 @@ class _FakePolicyStore:
             }
         )
 
+    def summarize_action_stats(
+        self,
+        *,
+        decision_kind: str | None = None,
+        state_bucket: str | None = None,
+        now=None,
+    ) -> dict[str, dict[str, float | int]]:
+        del state_bucket, now
+        if decision_kind == "scheduling":
+            return {
+                "serial_dispatch": {
+                    "samples": 4,
+                    "effective_samples": 3.2,
+                    "mean_reward": 0.82,
+                    "failure_rate": 0.0,
+                }
+            }
+        return {}
+
 
 def _make_agent() -> OrchestratorAgent:
     agent = object.__new__(OrchestratorAgent)
@@ -73,3 +92,17 @@ async def test_policy_feedback_command_returns_clear_error_without_recent_flow()
 
     assert "没有可反馈的最近任务" in response.text
     assert agent._policy_store.feedback_rows == []
+
+
+@pytest.mark.asyncio
+async def test_policy_inspect_command_reports_policy_summary() -> None:
+    agent = _make_agent()
+
+    response = await agent.process_task(
+        "@policy inspect scheduling",
+        chat_key="feishu:c1",
+    )
+
+    assert response.text.startswith("[Policy]")
+    assert "decision_kind=scheduling" in response.text
+    assert "action=serial_dispatch" in response.text

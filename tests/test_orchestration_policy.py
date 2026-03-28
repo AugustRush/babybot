@@ -9,6 +9,7 @@ from babybot.orchestration_policy import ConservativePolicySelector
 class _FakePolicyStore:
     def __init__(self, stats: dict[str, dict[str, float | int]]) -> None:
         self._stats = stats
+        self.calls: list[tuple[str | None, str | None]] = []
 
     def summarize_action_stats(
         self,
@@ -16,6 +17,7 @@ class _FakePolicyStore:
         decision_kind: str | None = None,
         state_bucket: str | None = None,
     ) -> dict[str, dict[str, float | int]]:
+        self.calls.append((decision_kind, state_bucket))
         if decision_kind and state_bucket:
             value = self._stats.get((decision_kind, state_bucket))
             if isinstance(value, Mapping) and all(
@@ -256,3 +258,74 @@ def test_policy_falls_back_from_specific_bucket_to_general_bucket() -> None:
     )
 
     assert action.name == "retrieve_then_execute"
+
+
+def test_policy_prefers_bucket_template_with_stronger_effective_samples() -> None:
+    store = _FakePolicyStore(
+        {
+            ("decomposition", "task_shape=single_step|has_media=1|subtasks=1"): {
+                "retrieve_then_execute": {
+                    "mean_reward": 0.86,
+                    "samples": 8,
+                    "effective_samples": 1.2,
+                }
+            },
+            ("decomposition", "task_shape=single_step|has_media=1"): {
+                "retrieve_then_execute": {
+                    "mean_reward": 0.8,
+                    "samples": 14,
+                    "effective_samples": 9.5,
+                }
+            },
+            "decomposition": {
+                "analyze_then_execute": {
+                    "mean_reward": 0.9,
+                    "samples": 30,
+                    "effective_samples": 30.0,
+                }
+            },
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=8, explore_ratio=-1.0)
+
+    action = selector.choose_decomposition(
+        features={
+            "task_shape": "single_step",
+            "has_media": True,
+            "independent_subtasks": 1,
+        }
+    )
+
+    assert action.name == "retrieve_then_execute"
+    assert store.calls[:2] == [
+        ("decomposition", "task_shape=single_step|has_media=1|subtasks=1"),
+        ("decomposition", "task_shape=single_step|has_media=1"),
+    ]
+
+
+def test_policy_safeguard_downgrades_action_with_recent_failures() -> None:
+    store = _FakePolicyStore(
+        {
+            "scheduling": {
+                "serial": {
+                    "mean_reward": 0.75,
+                    "samples": 12,
+                    "effective_samples": 12.0,
+                    "recent_failure_rate": 0.0,
+                    "recent_guard_samples": 2.0,
+                },
+                "bounded_parallel": {
+                    "mean_reward": 0.9,
+                    "samples": 16,
+                    "effective_samples": 16.0,
+                    "recent_failure_rate": 1.0,
+                    "recent_guard_samples": 2.0,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    action = selector.choose_scheduling(features={"independent_subtasks": 2})
+
+    assert action.name == "serial"

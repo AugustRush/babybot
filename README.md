@@ -161,6 +161,7 @@ uv run babybot
 - 衰减统计：`effective_samples`
 - 人工反馈统计：`feedback_good_count`、`feedback_bad_count`、`feedback_score`
 - 反馈可信度统计：`effective_feedback_samples`、`feedback_confidence`
+- 最近窗口护栏统计：`recent_guard_samples`、`recent_failure_rate`、`recent_bad_feedback_rate`
 
 当前保守选择规则：
 
@@ -170,9 +171,11 @@ uv run babybot
 - 不是全局平均直接排序，而是先按 bucket 查局部历史，没命中再回落到全局
 - 当前 bucket 只用稳定特征：`task_shape`、`has_media`、`independent_subtasks`
 - bucket 不是只查一个最具体值，而是按“具体 → 一般”自动回退，例如先查 `task_shape + has_media + subtasks`，再查更一般的组合
+- bucket 模板会优先选择有效样本量更强的组合，而不是机械地迷信最具体模板
 - 排序不是只看 `mean_reward`，还会对 `failure_rate`、`retry_rate`、`dead_letter_rate`、`stalled_rate` 做惩罚
 - 历史 outcome 会做时间衰减，越旧的经验影响越小，不会长期主导当前策略
 - `good/bad` 反馈不会直接覆盖 reward，而是先做时间衰减，再按 `feedback_confidence` 进行有限幅度 shaping
+- 如果某个 action 在最近窗口内出现明显失败或负反馈，会触发 safeguard，优先退回更保守的动作
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
 
@@ -181,10 +184,13 @@ uv run babybot
 ```text
 @policy feedback good 拆分合理
 @policy feedback bad 并行导致多次重试
+@policy inspect
+@policy inspect scheduling
 ```
 
 - 反馈会绑定到当前 `chat_key` 最近一次执行 flow
 - 如果当前会话还没有最近任务，会直接返回明确错误，不会进入正常对话编排
+- `@policy inspect` 会返回当前 policy 聚合摘要，便于排查为什么系统偏向某个 action
 
 查看策略数据：
 

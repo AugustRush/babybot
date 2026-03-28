@@ -536,6 +536,41 @@ class OrchestratorAgent:
                 parts.append(f"[Tape Summary]\n{summary}")
         return "\n".join(parts)
 
+    def inspect_policy(self, chat_key: str = "", decision_kind: str = "") -> str:
+        kinds = (
+            [decision_kind.strip()]
+            if decision_kind.strip()
+            else ["decomposition", "scheduling", "worker"]
+        )
+        parts = ["[Policy]"]
+        if chat_key:
+            parts.append(f"chat_key={chat_key}")
+        for kind in kinds:
+            stats = self._policy_store.summarize_action_stats(decision_kind=kind)
+            parts.append(f"decision_kind={kind}")
+            if not stats:
+                parts.append("- no_stats")
+                continue
+            ranked = sorted(
+                stats.items(),
+                key=lambda item: (
+                    float(item[1].get("effective_samples", item[1].get("samples", 0.0)) or 0.0),
+                    float(item[1].get("mean_reward", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )
+            for action_name, payload in ranked[:5]:
+                parts.append(
+                    "- "
+                    + f"action={action_name} "
+                    + f"samples={int(payload.get('samples', 0) or 0)} "
+                    + f"effective_samples={float(payload.get('effective_samples', payload.get('samples', 0.0)) or 0.0):.2f} "
+                    + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f} "
+                    + f"failure_rate={float(payload.get('failure_rate', 0.0) or 0.0):.2f} "
+                    + f"feedback_score={float(payload.get('feedback_score', 0.0) or 0.0):.2f}"
+                )
+        return "\n".join(parts)
+
     async def process_task(
         self,
         user_input: str,
@@ -815,8 +850,15 @@ class OrchestratorAgent:
         chat_key: str,
         control: dict[str, str],
     ) -> TaskResponse:
+        if control.get("action", "") == "inspect":
+            return TaskResponse(
+                text=self.inspect_policy(
+                    chat_key=chat_key,
+                    decision_kind=str(control.get("rating", "") or "").strip(),
+                )
+            )
         if control.get("action", "") != "feedback":
-            return TaskResponse(text="支持的命令：@policy feedback good|bad <reason>")
+            return TaskResponse(text="支持的命令：@policy feedback good|bad <reason> / @policy inspect [decision_kind]")
         rating = str(control.get("rating", "") or "").strip().lower()
         reason = str(control.get("reason", "") or "").strip()
         if rating not in {"good", "bad"} or not reason:

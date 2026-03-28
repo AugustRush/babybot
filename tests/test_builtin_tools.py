@@ -80,6 +80,9 @@ class _DummyOwner:
     def _inspect_chat_context(self, chat_key: str = "", query: str = "") -> str:
         return chat_key or query or "context"
 
+    def _inspect_policy(self, chat_key: str = "", decision_kind: str = "") -> str:
+        return decision_kind or chat_key or "policy"
+
     def reload_skill(self, skill_path: str) -> str:
         return f"reloaded {skill_path}"
 
@@ -97,6 +100,7 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("basic", "delete_scheduled_task"),
         ("basic", "inspect_runtime_flow"),
         ("basic", "inspect_chat_context"),
+        ("basic", "inspect_policy"),
         ("basic", "get_current_time"),
         ("code", "_workspace_execute_python_code"),
         ("code", "_workspace_execute_shell_command"),

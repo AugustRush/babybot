@@ -12,6 +12,7 @@ from .orchestration_policy import build_policy_state_buckets
 class OrchestrationPolicyStore:
     _OUTCOME_HALF_LIFE_DAYS = 21.0
     _FEEDBACK_HALF_LIFE_DAYS = 30.0
+    _RECENT_WINDOW_DAYS = 7.0
 
     def __init__(self, db_path: Path, *, busy_timeout_ms: int = 3000) -> None:
         self._db_path = Path(db_path)
@@ -178,6 +179,9 @@ class OrchestrationPolicyStore:
                     "effective_feedback_samples": 0.0,
                     "feedback_confidence": 0.0,
                     "feedback_score": 0.0,
+                    "recent_guard_samples": 0.0,
+                    "recent_failure_rate": 0.0,
+                    "recent_bad_feedback_rate": 0.0,
                     "last_updated_at": "",
                 },
             )
@@ -203,6 +207,12 @@ class OrchestrationPolicyStore:
                 bucket["failure_rate"] = float(bucket["failure_rate"]) + weight
             elif final_status == "succeeded":
                 bucket["success_rate"] = float(bucket["success_rate"]) + weight
+            if self._is_recent(reference_time, now=current_time):
+                bucket["recent_guard_samples"] = float(bucket["recent_guard_samples"]) + 1.0
+                if final_status == "failed":
+                    bucket["recent_failure_rate"] = (
+                        float(bucket["recent_failure_rate"]) + 1.0
+                    )
             outcome = self._decode_json_object(row["outcome_json"])
             bucket["retry_rate"] = float(bucket["retry_rate"]) + float(
                 outcome.get("retry_count", 0) or 0
@@ -265,6 +275,10 @@ class OrchestrationPolicyStore:
                     payload["feedback_score"] = float(payload["feedback_score"]) + (
                         signed * weight
                     )
+                    if self._is_recent(created_at, now=current_time) and rating == "bad":
+                        payload["recent_bad_feedback_rate"] = (
+                            float(payload["recent_bad_feedback_rate"]) + 1.0
+                        )
         for payload in summary.values():
             good_count = int(payload.get("feedback_good_count", 0) or 0)
             bad_count = int(payload.get("feedback_bad_count", 0) or 0)
@@ -275,6 +289,15 @@ class OrchestrationPolicyStore:
                 payload["effective_feedback_samples"] = round(total_feedback, 6)
             elif good_count + bad_count > 0:
                 payload["feedback_confidence"] = 0.0
+            recent_guard_samples = float(payload.get("recent_guard_samples", 0.0) or 0.0)
+            if recent_guard_samples > 0:
+                payload["recent_failure_rate"] = (
+                    float(payload["recent_failure_rate"]) / recent_guard_samples
+                )
+                payload["recent_bad_feedback_rate"] = min(
+                    1.0,
+                    float(payload["recent_bad_feedback_rate"]) / recent_guard_samples,
+                )
         return summary
 
     def _ensure_db(self) -> sqlite3.Connection:
@@ -351,6 +374,10 @@ class OrchestrationPolicyStore:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    @classmethod
+    def _is_recent(cls, created_at: datetime, *, now: datetime) -> bool:
+        return (now - created_at).total_seconds() <= cls._RECENT_WINDOW_DAYS * 86400.0
 
     @staticmethod
     def _decode_json_object(raw: Any) -> dict[str, Any]:
