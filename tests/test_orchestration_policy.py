@@ -329,3 +329,76 @@ def test_policy_safeguard_downgrades_action_with_recent_failures() -> None:
     action = selector.choose_scheduling(features={"independent_subtasks": 2})
 
     assert action.name == "serial"
+
+
+def test_policy_prefers_more_discriminative_bucket_template() -> None:
+    store = _FakePolicyStore(
+        {
+            ("decomposition", "task_shape=single_step|has_media=1|subtasks=1"): {
+                "retrieve_then_execute": {
+                    "mean_reward": 0.81,
+                    "samples": 14,
+                    "effective_samples": 14.0,
+                },
+                "analyze_then_execute": {
+                    "mean_reward": 0.8,
+                    "samples": 14,
+                    "effective_samples": 14.0,
+                },
+            },
+            ("decomposition", "task_shape=single_step|has_media=1"): {
+                "retrieve_then_execute": {
+                    "mean_reward": 0.84,
+                    "samples": 9,
+                    "effective_samples": 9.0,
+                },
+                "analyze_then_execute": {
+                    "mean_reward": 0.42,
+                    "samples": 9,
+                    "effective_samples": 9.0,
+                },
+            },
+            "decomposition": {
+                "analyze_then_execute": {"mean_reward": 0.9, "samples": 30},
+            },
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=8, explore_ratio=-1.0)
+
+    action = selector.choose_decomposition(
+        features={
+            "task_shape": "single_step",
+            "has_media": True,
+            "independent_subtasks": 1,
+        }
+    )
+
+    assert action.name == "retrieve_then_execute"
+
+
+def test_policy_penalizes_action_when_recent_reward_drift_is_high() -> None:
+    store = _FakePolicyStore(
+        {
+            "scheduling": {
+                "serial": {
+                    "mean_reward": 0.76,
+                    "samples": 12,
+                    "effective_samples": 12.0,
+                    "recent_mean_reward": 0.74,
+                    "drift_score": 0.02,
+                },
+                "bounded_parallel": {
+                    "mean_reward": 0.92,
+                    "samples": 20,
+                    "effective_samples": 20.0,
+                    "recent_mean_reward": 0.15,
+                    "drift_score": 0.77,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    action = selector.choose_scheduling(features={"independent_subtasks": 2})
+
+    assert action.name == "serial"

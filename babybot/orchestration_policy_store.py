@@ -169,6 +169,8 @@ class OrchestrationPolicyStore:
                     "samples": 0,
                     "effective_samples": 0.0,
                     "mean_reward": 0.0,
+                    "recent_mean_reward": 0.0,
+                    "drift_score": 0.0,
                     "failure_rate": 0.0,
                     "success_rate": 0.0,
                     "retry_rate": 0.0,
@@ -209,6 +211,14 @@ class OrchestrationPolicyStore:
                 bucket["success_rate"] = float(bucket["success_rate"]) + weight
             if self._is_recent(reference_time, now=current_time):
                 bucket["recent_guard_samples"] = float(bucket["recent_guard_samples"]) + 1.0
+                recent_guard_samples = float(bucket["recent_guard_samples"])
+                bucket["recent_mean_reward"] = (
+                    (
+                        float(bucket["recent_mean_reward"])
+                        * max(0.0, recent_guard_samples - 1.0)
+                    )
+                    + float(reward)
+                ) / recent_guard_samples
                 if final_status == "failed":
                     bucket["recent_failure_rate"] = (
                         float(bucket["recent_failure_rate"]) + 1.0
@@ -291,12 +301,17 @@ class OrchestrationPolicyStore:
                 payload["feedback_confidence"] = 0.0
             recent_guard_samples = float(payload.get("recent_guard_samples", 0.0) or 0.0)
             if recent_guard_samples > 0:
+                recent_mean_reward = float(payload.get("recent_mean_reward", 0.0) or 0.0)
                 payload["recent_failure_rate"] = (
                     float(payload["recent_failure_rate"]) / recent_guard_samples
                 )
                 payload["recent_bad_feedback_rate"] = min(
                     1.0,
                     float(payload["recent_bad_feedback_rate"]) / recent_guard_samples,
+                )
+                payload["drift_score"] = max(
+                    0.0,
+                    float(payload.get("mean_reward", 0.0) or 0.0) - recent_mean_reward,
                 )
         return summary
 

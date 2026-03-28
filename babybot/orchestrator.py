@@ -250,14 +250,29 @@ class OrchestratorAgent:
         )
 
     def choose_scheduling_policy(self, *, features: dict[str, Any]) -> dict[str, Any]:
-        action = self._policy_selector().choose_scheduling(features=features)
-        return {"action_name": action.name, "hint": action.hint}
+        selection = self._policy_selector().select_scheduling(features=features)
+        return {
+            "action_name": selection.action.name,
+            "hint": selection.action.hint,
+            "explain": selection.explain,
+            "state_bucket": selection.state_bucket,
+        }
 
     def choose_worker_policy(self, *, features: dict[str, Any]) -> dict[str, Any]:
         if not self._policy_learning_enabled():
-            return {"action_name": "allow_worker", "hint": ""}
-        action = self._policy_selector().choose_worker_gate(features=features)
-        return {"action_name": action.name, "hint": action.hint}
+            return {
+                "action_name": "allow_worker",
+                "hint": "",
+                "explain": "policy_learning_disabled",
+                "state_bucket": "disabled",
+            }
+        selection = self._policy_selector().select_worker_gate(features=features)
+        return {
+            "action_name": selection.action.name,
+            "hint": selection.action.hint,
+            "explain": selection.explain,
+            "state_bucket": selection.state_bucket,
+        }
 
     def _persist_policy_events(
         self,
@@ -566,6 +581,8 @@ class OrchestratorAgent:
                     + f"samples={int(payload.get('samples', 0) or 0)} "
                     + f"effective_samples={float(payload.get('effective_samples', payload.get('samples', 0.0)) or 0.0):.2f} "
                     + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f} "
+                    + f"recent_mean_reward={float(payload.get('recent_mean_reward', 0.0) or 0.0):.2f} "
+                    + f"drift_score={float(payload.get('drift_score', 0.0) or 0.0):.2f} "
                     + f"failure_rate={float(payload.get('failure_rate', 0.0) or 0.0):.2f} "
                     + f"feedback_score={float(payload.get('feedback_score', 0.0) or 0.0):.2f}"
                 )

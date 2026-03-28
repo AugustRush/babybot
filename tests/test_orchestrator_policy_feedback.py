@@ -106,3 +106,18 @@ async def test_policy_inspect_command_reports_policy_summary() -> None:
     assert response.text.startswith("[Policy]")
     assert "decision_kind=scheduling" in response.text
     assert "action=serial_dispatch" in response.text
+
+
+def test_policy_choice_payload_includes_explain() -> None:
+    agent = _make_agent()
+
+    payload = agent.choose_scheduling_policy(
+        features={
+            "task_shape": "multi_step",
+            "has_media": False,
+            "independent_subtasks": 2,
+        }
+    )
+
+    assert payload["action_name"] == "serial"
+    assert payload["explain"]

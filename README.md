@@ -162,6 +162,7 @@ uv run babybot
 - 人工反馈统计：`feedback_good_count`、`feedback_bad_count`、`feedback_score`
 - 反馈可信度统计：`effective_feedback_samples`、`feedback_confidence`
 - 最近窗口护栏统计：`recent_guard_samples`、`recent_failure_rate`、`recent_bad_feedback_rate`
+- 漂移统计：`recent_mean_reward`、`drift_score`
 
 当前保守选择规则：
 
@@ -172,10 +173,13 @@ uv run babybot
 - 当前 bucket 只用稳定特征：`task_shape`、`has_media`、`independent_subtasks`
 - bucket 不是只查一个最具体值，而是按“具体 → 一般”自动回退，例如先查 `task_shape + has_media + subtasks`，再查更一般的组合
 - bucket 模板会优先选择有效样本量更强的组合，而不是机械地迷信最具体模板
+- bucket 模板选择不只看样本量，还会优先保留“动作区分度”更高的模板，减少学到过于平均化的策略
 - 排序不是只看 `mean_reward`，还会对 `failure_rate`、`retry_rate`、`dead_letter_rate`、`stalled_rate` 做惩罚
+- 如果某个 action 的近期收益相对历史均值明显下滑，会额外计算 `drift_score`，把“旧经验很好、最近突然变差”的动作降权
 - 历史 outcome 会做时间衰减，越旧的经验影响越小，不会长期主导当前策略
 - `good/bad` 反馈不会直接覆盖 reward，而是先做时间衰减，再按 `feedback_confidence` 进行有限幅度 shaping
 - 如果某个 action 在最近窗口内出现明显失败或负反馈，会触发 safeguard，优先退回更保守的动作
+- 当前调度/worker 策略选择会附带 explain 摘要，便于在日志、debug 和 `@policy inspect` 时直接看出命中 bucket、分数与风险项
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
 

@@ -37,6 +37,15 @@ class PolicyAction:
     hint: str
 
 
+@dataclass(frozen=True)
+class PolicySelection:
+    action: PolicyAction
+    decision_kind: str
+    state_bucket: str
+    score: float
+    explain: str
+
+
 class ConservativePolicySelector:
     _DECOMPOSITION_ACTIONS: dict[str, PolicyAction] = {
         "direct_execute": PolicyAction(
@@ -133,39 +142,64 @@ class ConservativePolicySelector:
         return min(0.15, max(0.0, base * sample_factor * risk_factor))
 
     def choose_decomposition(self, *, features: dict[str, Any]) -> PolicyAction:
+        return self.select_decomposition(features=features).action
+
+    def select_decomposition(self, *, features: dict[str, Any]) -> PolicySelection:
         default = self._DECOMPOSITION_ACTIONS["analyze_then_execute"]
-        stats = self._eligible_stats(decision_kind="decomposition", features=features)
-        if not stats:
-            return default
-        return self._best_action(
+        return self._select_action(
             decision_kind="decomposition",
-            stats=stats,
+            features=features,
             default=default,
             actions=self._DECOMPOSITION_ACTIONS,
         )
 
     def choose_scheduling(self, *, features: dict[str, Any]) -> PolicyAction:
+        return self.select_scheduling(features=features).action
+
+    def select_scheduling(self, *, features: dict[str, Any]) -> PolicySelection:
         default = self._SCHEDULING_ACTIONS["serial"]
-        stats = self._eligible_stats(decision_kind="scheduling", features=features)
-        if not stats:
-            return default
-        return self._best_action(
+        return self._select_action(
             decision_kind="scheduling",
-            stats=stats,
+            features=features,
             default=default,
             actions=self._SCHEDULING_ACTIONS,
         )
 
     def choose_worker_gate(self, *, features: dict[str, Any]) -> PolicyAction:
+        return self.select_worker_gate(features=features).action
+
+    def select_worker_gate(self, *, features: dict[str, Any]) -> PolicySelection:
         default = self._SCHEDULING_ACTIONS["deny_worker"]
-        stats = self._eligible_stats(decision_kind="worker", features=features)
-        if not stats:
-            return default
-        return self._best_action(
+        return self._select_action(
             decision_kind="worker",
-            stats=stats,
+            features=features,
             default=default,
             actions=self._SCHEDULING_ACTIONS,
+        )
+
+    def _select_action(
+        self,
+        *,
+        decision_kind: str,
+        features: dict[str, Any],
+        default: PolicyAction,
+        actions: dict[str, PolicyAction],
+    ) -> PolicySelection:
+        bucket, stats = self._eligible_stats(decision_kind=decision_kind, features=features)
+        if not stats:
+            return PolicySelection(
+                action=default,
+                decision_kind=decision_kind,
+                state_bucket="global_default",
+                score=0.0,
+                explain="insufficient_samples; using safe default",
+            )
+        return self._best_action(
+            decision_kind=decision_kind,
+            state_bucket=bucket,
+            stats=stats,
+            default=default,
+            actions=actions,
         )
 
     def _eligible_stats(
@@ -173,7 +207,9 @@ class ConservativePolicySelector:
         *,
         decision_kind: str,
         features: dict[str, Any],
-    ) -> dict[str, dict[str, float | int]]:
+    ) -> tuple[str, dict[str, dict[str, float | int]]]:
+        local_candidates: list[tuple[str, dict[str, dict[str, float | int]]]] = []
+        min_samples = self._effective_min_samples(decision_kind=decision_kind)
         for bucket in build_policy_state_buckets(features):
             raw = self._store.summarize_action_stats(
                 decision_kind=decision_kind,
@@ -184,18 +220,43 @@ class ConservativePolicySelector:
                 name: payload
                 for name, payload in raw.items()
                 if self._sample_mass(payload)
-                >= self._effective_min_samples(decision_kind=decision_kind)
+                >= min_samples
             }
             if eligible:
-                return eligible
+                local_candidates.append((bucket, eligible))
+        if local_candidates:
+            return max(
+                local_candidates,
+                key=lambda item: self._template_quality(item[1]),
+            )
         raw = self._store.summarize_action_stats(decision_kind=decision_kind)
         raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
-        return {
+        global_stats = {
             name: payload
             for name, payload in raw.items()
             if self._sample_mass(payload)
-            >= self._effective_min_samples(decision_kind=decision_kind)
+            >= min_samples
         }
+        if not global_stats:
+            return "global_default", {}
+        return "global", global_stats
+
+    def _template_quality(
+        self,
+        stats: dict[str, dict[str, float | int]],
+    ) -> tuple[float, float]:
+        ranked_scores = sorted(
+            (self._score_payload(payload) for payload in stats.values()),
+            reverse=True,
+        )
+        top_score = ranked_scores[0] if ranked_scores else -1.0
+        second_score = ranked_scores[1] if len(ranked_scores) > 1 else top_score - 0.05
+        separation = top_score - second_score
+        support = sum(self._sample_mass(payload) for payload in stats.values())
+        return (
+            separation,
+            support,
+        )
 
     @staticmethod
     def _normalize_action_stats(
@@ -240,6 +301,7 @@ class ConservativePolicySelector:
         stalled_rate = float(payload.get("stalled_rate", 0.0) or 0.0)
         feedback_score = float(payload.get("feedback_score", 0.0) or 0.0)
         feedback_confidence = float(payload.get("feedback_confidence", 1.0) or 0.0)
+        drift_score = float(payload.get("drift_score", 0.0) or 0.0)
         return (
             mean_reward
             + (feedback_score * feedback_confidence * 0.05)
@@ -247,6 +309,7 @@ class ConservativePolicySelector:
             - (retry_rate * 0.2)
             - (dead_letter_rate * 0.35)
             - (stalled_rate * 0.25)
+            - (drift_score * 0.35)
         )
 
     def _confidence_penalty(
@@ -282,10 +345,11 @@ class ConservativePolicySelector:
         self,
         *,
         decision_kind: str,
+        state_bucket: str,
         stats: dict[str, dict[str, float | int]],
         default: PolicyAction,
         actions: dict[str, PolicyAction],
-    ) -> PolicyAction:
+    ) -> PolicySelection:
         total_samples = sum(int(item.get("samples", 0) or 0) for item in stats.values())
         total_effective_samples = sum(
             float(item.get("effective_samples", item.get("samples", 0.0)) or 0.0)
@@ -317,19 +381,60 @@ class ConservativePolicySelector:
             if not self._is_recently_risky(item[1])
         ]
         ranked = sorted((safe_items or list(stats.items())), key=_rank, reverse=True)
-        for action_name, _payload in ranked:
+        for action_name, payload in ranked:
             action = actions.get(action_name)
             if action is not None:
-                return action
-        return default
+                score = _rank((action_name, payload))[0]
+                return PolicySelection(
+                    action=action,
+                    decision_kind=decision_kind,
+                    state_bucket=state_bucket,
+                    score=score,
+                    explain=self._build_explain(
+                        action_name=action_name,
+                        payload=payload,
+                        state_bucket=state_bucket,
+                        score=score,
+                    ),
+                )
+        return PolicySelection(
+            action=default,
+            decision_kind=decision_kind,
+            state_bucket=state_bucket,
+            score=0.0,
+            explain="no_action_match; using default",
+        )
+
+    @staticmethod
+    def _build_explain(
+        *,
+        action_name: str,
+        payload: dict[str, float | int],
+        state_bucket: str,
+        score: float,
+    ) -> str:
+        return (
+            f"selected={action_name}; "
+            f"bucket={state_bucket}; "
+            f"score={score:.3f}; "
+            f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.3f}; "
+            f"recent_mean_reward={float(payload.get('recent_mean_reward', 0.0) or 0.0):.3f}; "
+            f"effective_samples={float(payload.get('effective_samples', payload.get('samples', 0.0)) or 0.0):.3f}; "
+            f"failure_rate={float(payload.get('failure_rate', 0.0) or 0.0):.3f}; "
+            f"drift_score={float(payload.get('drift_score', 0.0) or 0.0):.3f}; "
+            f"recent_failure_rate={float(payload.get('recent_failure_rate', 0.0) or 0.0):.3f}"
+        )
 
     @staticmethod
     def _is_recently_risky(payload: dict[str, float | int]) -> bool:
         recent_guard_samples = float(payload.get("recent_guard_samples", 0.0) or 0.0)
-        if recent_guard_samples < 1.0:
-            return False
-        recent_failure_rate = float(payload.get("recent_failure_rate", 0.0) or 0.0)
-        recent_bad_feedback_rate = float(
-            payload.get("recent_bad_feedback_rate", 0.0) or 0.0
-        )
-        return recent_failure_rate >= 0.5 or recent_bad_feedback_rate >= 0.6
+        if recent_guard_samples >= 1.0:
+            recent_failure_rate = float(payload.get("recent_failure_rate", 0.0) or 0.0)
+            recent_bad_feedback_rate = float(
+                payload.get("recent_bad_feedback_rate", 0.0) or 0.0
+            )
+            if recent_failure_rate >= 0.5 or recent_bad_feedback_rate >= 0.6:
+                return True
+        drift_score = float(payload.get("drift_score", 0.0) or 0.0)
+        recent_mean_reward = float(payload.get("recent_mean_reward", 0.0) or 0.0)
+        return drift_score >= 0.5 and recent_mean_reward <= 0.3

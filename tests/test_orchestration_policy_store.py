@@ -328,3 +328,48 @@ def test_policy_store_tracks_recent_failure_window(tmp_path) -> None:
 
     assert stats["bounded_parallel"]["recent_failure_rate"] > 0.5
     assert stats["bounded_parallel"]["recent_guard_samples"] >= 1.0
+
+
+def test_policy_store_tracks_recent_reward_drift(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    now = datetime(2026, 3, 28, tzinfo=timezone.utc)
+    old = (now - timedelta(days=40)).isoformat(timespec="seconds")
+    recent = now.isoformat(timespec="seconds")
+    for idx in range(3):
+        store.record_decision(
+            flow_id=f"flow-old-{idx}",
+            chat_key="feishu:c1",
+            decision_kind="scheduling",
+            action_name="bounded_parallel",
+            state_features={"task_shape": "multi_step"},
+            created_at=old,
+        )
+        store.record_outcome(
+            flow_id=f"flow-old-{idx}",
+            chat_key="feishu:c1",
+            final_status="succeeded",
+            reward=1.0,
+            outcome={},
+            created_at=old,
+        )
+    store.record_decision(
+        flow_id="flow-new",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="bounded_parallel",
+        state_features={"task_shape": "multi_step"},
+        created_at=recent,
+    )
+    store.record_outcome(
+        flow_id="flow-new",
+        chat_key="feishu:c1",
+        final_status="failed",
+        reward=-1.0,
+        outcome={},
+        created_at=recent,
+    )
+
+    stats = store.summarize_action_stats(decision_kind="scheduling", now=now)
+
+    assert stats["bounded_parallel"]["recent_mean_reward"] < 0.3
+    assert stats["bounded_parallel"]["drift_score"] > 0.4
