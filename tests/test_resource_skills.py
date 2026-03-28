@@ -13,6 +13,10 @@ import babybot.resource as resource_module
 
 from babybot.agent_kernel import SkillPack, TaskResult, ToolLease
 from babybot.agent_kernel.tools import ToolContext
+from babybot.builtin_tools.observability import build_inspect_chat_context_tool
+from babybot.context import TapeStore
+from babybot.memory_store import HybridMemoryStore
+from babybot.orchestrator import OrchestratorAgent
 from babybot.resource import CallableTool, LoadedSkill, ResourceManager, ToolGroup
 from babybot.config import Config
 
@@ -1918,6 +1922,41 @@ def test_inspect_chat_context_uses_channel_context_default_chat_key(tmp_path: Pa
 
     assert "chat=feishu:oc_test" in result
     assert "query=继续语音任务" in result
+
+
+def test_inspect_chat_context_tool_invokes_without_cross_thread_sqlite_error(
+    tmp_path: Path,
+) -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent.memory_store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    agent.memory_store.ensure_bootstrap()
+    agent.tape_store = TapeStore(db_path=tmp_path / "context.db")
+    agent.memory_store.observe_user_message("feishu:chat-1", "以后默认中文，回答简洁")
+
+    manager = object.__new__(ResourceManager)
+    manager._observability_provider = agent
+    manager._default_chat_key = lambda: "feishu:chat-1"
+
+    tool = CallableTool(
+        func=build_inspect_chat_context_tool(manager),
+        name="inspect_chat_context",
+        description="inspect context",
+        schema={"type": "object", "properties": {}},
+    )
+
+    result = asyncio.run(
+        tool.invoke(
+            {"chat_key": "feishu:chat-1", "query": "继续语音任务"},
+            ToolContext(session_id="s1", state={}),
+        )
+    )
+
+    assert result.ok is True
+    assert "SQLite objects created in a thread" not in (result.error or "")
+    assert result.content.startswith("[Chat Context]")
 
 
 def test_inspect_runtime_flow_uses_provider_snapshot(tmp_path: Path) -> None:

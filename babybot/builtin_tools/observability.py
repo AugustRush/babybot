@@ -4,7 +4,7 @@ from typing import Any
 
 
 def build_inspect_runtime_flow_tool(owner: Any) -> Any:
-    def inspect_runtime_flow(flow_id: str = "", chat_key: str = "") -> str:
+    async def inspect_runtime_flow(flow_id: str = "", chat_key: str = "") -> str:
         """Inspect a runtime flow snapshot with child task states and recent events."""
         return owner._inspect_runtime_flow(flow_id=flow_id, chat_key=chat_key)
 
@@ -12,7 +12,7 @@ def build_inspect_runtime_flow_tool(owner: Any) -> Any:
 
 
 def build_inspect_chat_context_tool(owner: Any) -> Any:
-    def inspect_chat_context(chat_key: str = "", query: str = "") -> str:
+    async def inspect_chat_context(chat_key: str = "", query: str = "") -> str:
         """Inspect the current chat context, including Hot/Warm/Cold layers and memory records."""
         return owner._inspect_chat_context(chat_key=chat_key, query=query)
 
@@ -20,7 +20,7 @@ def build_inspect_chat_context_tool(owner: Any) -> Any:
 
 
 def build_inspect_policy_tool(owner: Any) -> Any:
-    def inspect_policy(chat_key: str = "", decision_kind: str = "") -> str:
+    async def inspect_policy(chat_key: str = "", decision_kind: str = "") -> str:
         """Inspect current orchestration policy summaries and effective action stats."""
         return owner._inspect_policy(chat_key=chat_key, decision_kind=decision_kind)
 
