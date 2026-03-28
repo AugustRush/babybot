@@ -1774,3 +1774,124 @@ def test_team_dispatch_no_stream_falls_back_to_intermediate() -> None:
     assert len(intermediate_messages) == 2
     assert "tabs-fan" in intermediate_messages[0].lower()
     assert "spaces-fan" in intermediate_messages[1].lower()
+
+
+def test_team_dispatch_streaming_sends_immediate_kickoff_message() -> None:
+    """With stream mode enabled, dispatch_team should still send an immediate progress hint."""
+    team_args = {
+        "topic": "Agent evolution",
+        "agents": [
+            {"id": "architect", "role": "architect", "description": "Architecture"},
+            {"id": "researcher", "role": "researcher", "description": "Research"},
+        ],
+        "max_rounds": 2,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="架构观点"),
+            ModelResponse(text="研究观点"),
+            ModelResponse(text="架构补充"),
+            ModelResponse(text="研究补充"),
+            _reply_tool_call("Done."),
+        ]
+    )
+
+    intermediate_messages: list[str] = []
+
+    async def send_msg(text: str) -> None:
+        intermediate_messages.append(text)
+
+    async def fake_stream_callback(accumulated_text: str) -> None:
+        del accumulated_text
+
+    async def fake_reset() -> None:
+        return None
+
+    fake_stream_callback.reset = fake_reset  # type: ignore[attr-defined]
+
+    context = ExecutionContext(
+        state={
+            "stream_callback": fake_stream_callback,
+            "send_intermediate_message": send_msg,
+        }
+    )
+
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("讨论一下", context))
+
+    assert result.conclusion == "Done."
+    assert intermediate_messages
+    assert "已启动" in intermediate_messages[0]
+    assert "2 位专家" in intermediate_messages[0]
+
+
+def test_team_dispatch_streaming_sends_round_progress_messages() -> None:
+    """Streaming mode should still emit independent phase progress updates."""
+    team_args = {
+        "topic": "Agent evolution",
+        "agents": [
+            {"id": "architect", "role": "architect", "description": "Architecture"},
+            {"id": "researcher", "role": "researcher", "description": "Research"},
+        ],
+        "max_rounds": 2,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="架构观点"),
+            ModelResponse(text="研究观点"),
+            ModelResponse(text="架构补充"),
+            ModelResponse(text="研究补充"),
+            _reply_tool_call("Done."),
+        ]
+    )
+
+    intermediate_messages: list[str] = []
+
+    async def send_msg(text: str) -> None:
+        intermediate_messages.append(text)
+
+    async def fake_stream_callback(accumulated_text: str) -> None:
+        del accumulated_text
+
+    async def fake_reset() -> None:
+        return None
+
+    fake_stream_callback.reset = fake_reset  # type: ignore[attr-defined]
+
+    context = ExecutionContext(
+        state={
+            "stream_callback": fake_stream_callback,
+            "send_intermediate_message": send_msg,
+        }
+    )
+
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("讨论一下", context))
+
+    assert result.conclusion == "Done."
+    assert any("第 1/2 轮" in item for item in intermediate_messages)
+    assert any("第 2/2 轮" in item for item in intermediate_messages)

@@ -183,6 +183,56 @@ uv run babybot
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
 
+### 当前策略算法（简化）
+
+可以把当前实现理解成一层“自动保守优化器”，核心流程如下：
+
+1. 先根据任务特征构造 bucket：
+   - `task_shape`
+   - `has_media`
+   - `independent_subtasks`
+2. 查询顺序优先走局部历史，而不是先看全局平均：
+   - `task_shape + has_media + subtasks`
+   - `task_shape + has_media`
+   - `task_shape + subtasks`
+   - `task_shape`
+   - 全局 `global`
+3. 如果多个局部 bucket 都有足够样本，不是简单选择“最具体”的那个，而是优先选择：
+   - 动作区分度更高的模板
+   - 同时有效样本量也更扎实的模板
+4. 对候选 action 的分数会综合：
+   - `mean_reward`
+   - `failure_rate`
+   - `retry_rate`
+   - `dead_letter_rate`
+   - `stalled_rate`
+   - `feedback_score * feedback_confidence`
+   - `drift_score`
+5. 最后再减去一个和样本量相关的保守置信惩罚，避免“小样本高收益”过早主导策略。
+6. 如果最近窗口显示某个 action 明显变差（比如失败率高、坏反馈集中、近期收益相对历史均值明显下滑），会直接触发 safeguard，优先退回更稳的动作。
+
+因此它不是“固定规则表”，也不是“手工调参系统”，而是一个带护栏的自动学习策略层：随着真实任务 outcome、反馈和风险信号积累，拆解、调度和 worker 使用策略会逐步自适应收敛。
+
+### Explain 输出
+
+当前策略选择器会生成 explain 摘要，主要用于两类场景：
+
+- 调试为什么这次选择了某个 scheduling / worker action
+- 观察系统是否因为最近漂移、失败或负反馈而主动转保守
+
+explain 中会包含这类信息：
+
+- 命中的 `bucket`
+- 被选中的 `action`
+- 当前综合 `score`
+- `mean_reward`
+- `recent_mean_reward`
+- `drift_score`
+- `failure_rate`
+- `effective_samples`
+
+这让 `@policy inspect` 和运行时日志不再只告诉你“选了什么”，而是能顺便解释“为什么现在这么选”。
+
 人工纠偏命令：
 
 ```text

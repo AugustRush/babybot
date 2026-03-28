@@ -250,3 +250,30 @@ async def test_team_runner_on_turn_not_required() -> None:
     )
     assert result.rounds == 1
     assert len(result.transcript) == 2
+
+
+@pytest.mark.asyncio
+async def test_team_runner_on_round_start_fires_for_each_round() -> None:
+    """on_round_start is invoked before each debate round begins."""
+    started_rounds: list[int] = []
+
+    async def fake_executor(agent_id: str, prompt: str, ctx: dict) -> str:
+        del agent_id, prompt, ctx
+        return "ok"
+
+    async def on_round_start(round_num: int, max_rounds: int) -> None:
+        started_rounds.append(round_num)
+        assert max_rounds == 2
+
+    runner = TeamRunner(executor=fake_executor, max_rounds=2)
+    result = await runner.run_debate(
+        topic="test",
+        agents=[
+            {"id": "a", "role": "X", "description": "x"},
+            {"id": "b", "role": "Y", "description": "y"},
+        ],
+        on_round_start=on_round_start,
+    )
+
+    assert result.rounds == 2
+    assert started_rounds == [1, 2]

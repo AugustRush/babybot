@@ -1497,12 +1497,28 @@ class DynamicOrchestrator:
             heartbeat is not None,
         )
 
+        async def notify_progress(text: str) -> None:
+            if team_streaming and send_intermediate is not None and text.strip():
+                await send_intermediate(text)
+
+        await notify_progress(
+            f"已启动 {len(enriched_agents)} 位专家讨论，最多 {max_rounds} 轮。"
+        )
+
+        async def on_round_start(round_num: int, total_rounds: int) -> None:
+            if heartbeat is not None:
+                heartbeat.beat()
+            await notify_progress(f"第 {round_num}/{total_rounds} 轮讨论进行中。")
+
         if team_streaming:
             await reset_stream()
 
         runner = TeamRunner(executor=gateway_executor, max_rounds=max_rounds)
         result = await runner.run_debate(
-            topic=topic, agents=enriched_agents, on_turn=on_turn,
+            topic=topic,
+            agents=enriched_agents,
+            on_turn=on_turn,
+            on_round_start=on_round_start,
         )
 
         logger.info(

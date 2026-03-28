@@ -165,6 +165,7 @@ class TeamRunner:
         agents: list[dict[str, str]],
         judge: Any | None = None,
         on_turn: Any | None = None,
+        on_round_start: Any | None = None,
     ) -> DebateResult:
         """Run a structured debate.
 
@@ -182,6 +183,11 @@ class TeamRunner:
 
         for round_num in range(1, self._max_rounds + 1):
             logger.info("Debate round %d/%d started", round_num, self._max_rounds)
+            if on_round_start is not None:
+                import inspect as _inspect
+                _result = on_round_start(round_num, self._max_rounds)
+                if _inspect.isawaitable(_result):
+                    await _result
             for agent in agents:
                 prompt_parts = [
                     f"Topic: {topic}",
