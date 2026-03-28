@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from babybot.orchestration_policy_store import OrchestrationPolicyStore
 
 
@@ -163,3 +165,122 @@ def test_policy_store_filters_action_stats_by_bucket(tmp_path) -> None:
     )
 
     assert set(stats) == {"analyze_then_execute"}
+
+
+def test_policy_store_downweights_stale_outcomes_via_time_decay(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    now = datetime(2026, 3, 28, tzinfo=timezone.utc)
+    old = (now - timedelta(days=45)).isoformat(timespec="seconds")
+    recent = now.isoformat(timespec="seconds")
+    store.record_decision(
+        flow_id="flow-old",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="bounded_parallel",
+        state_features={"task_shape": "multi_step"},
+        created_at=old,
+    )
+    store.record_outcome(
+        flow_id="flow-old",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=1.0,
+        outcome={},
+        created_at=old,
+    )
+    store.record_decision(
+        flow_id="flow-new",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="serial_dispatch",
+        state_features={"task_shape": "multi_step"},
+        created_at=recent,
+    )
+    store.record_outcome(
+        flow_id="flow-new",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=0.8,
+        outcome={},
+        created_at=recent,
+    )
+
+    stats = store.summarize_action_stats(
+        decision_kind="scheduling",
+        now=now,
+    )
+
+    assert stats["bounded_parallel"]["effective_samples"] < 0.5
+    assert stats["serial_dispatch"]["effective_samples"] == 1.0
+
+
+def test_policy_store_decays_feedback_and_tracks_confidence(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    now = datetime(2026, 3, 28, tzinfo=timezone.utc)
+    old = (now - timedelta(days=60)).isoformat(timespec="seconds")
+    recent = now.isoformat(timespec="seconds")
+    store.record_decision(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="serial_dispatch",
+        state_features={"task_shape": "multi_step"},
+        created_at=recent,
+    )
+    store.record_outcome(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=0.8,
+        outcome={},
+        created_at=recent,
+    )
+    store.record_feedback(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        rating="bad",
+        reason="太激进",
+        created_at=old,
+    )
+    store.record_feedback(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        rating="good",
+        reason="最近更稳",
+        created_at=recent,
+    )
+
+    stats = store.summarize_action_stats(decision_kind="scheduling", now=now)
+
+    assert 0.0 < stats["serial_dispatch"]["effective_feedback_samples"] < 2.0
+    assert 0.0 < stats["serial_dispatch"]["feedback_confidence"] < 1.0
+    assert stats["serial_dispatch"]["feedback_score"] > 0.0
+
+
+def test_policy_store_matches_generalized_state_bucket(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_decision(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        decision_kind="decomposition",
+        action_name="retrieve_then_execute",
+        state_features={
+            "task_shape": "single_step",
+            "has_media": True,
+            "independent_subtasks": 1,
+        },
+    )
+    store.record_outcome(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=0.8,
+        outcome={},
+    )
+
+    stats = store.summarize_action_stats(
+        decision_kind="decomposition",
+        state_bucket="task_shape=single_step|has_media=1",
+    )
+
+    assert set(stats) == {"retrieve_then_execute"}

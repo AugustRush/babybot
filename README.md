@@ -158,7 +158,9 @@ uv run babybot
 - 最终 outcome：成功/失败、reward，以及重试、dead letter、stalled 等惩罚信号
 - action 聚合统计：`mean_reward`、`success_rate`、`failure_rate`
 - 风险统计：`retry_rate`、`dead_letter_rate`、`stalled_rate`
+- 衰减统计：`effective_samples`
 - 人工反馈统计：`feedback_good_count`、`feedback_bad_count`、`feedback_score`
+- 反馈可信度统计：`effective_feedback_samples`、`feedback_confidence`
 
 当前保守选择规则：
 
@@ -167,8 +169,10 @@ uv run babybot
 - worker 使用默认更保守；启用策略学习后，如果历史数据不足或风险偏高，会拒绝继续创建/分发 worker
 - 不是全局平均直接排序，而是先按 bucket 查局部历史，没命中再回落到全局
 - 当前 bucket 只用稳定特征：`task_shape`、`has_media`、`independent_subtasks`
+- bucket 不是只查一个最具体值，而是按“具体 → 一般”自动回退，例如先查 `task_shape + has_media + subtasks`，再查更一般的组合
 - 排序不是只看 `mean_reward`，还会对 `failure_rate`、`retry_rate`、`dead_letter_rate`、`stalled_rate` 做惩罚
-- `good/bad` 反馈不会直接覆盖 reward，而是作为保守 shaping 信号参与打分
+- 历史 outcome 会做时间衰减，越旧的经验影响越小，不会长期主导当前策略
+- `good/bad` 反馈不会直接覆盖 reward，而是先做时间衰减，再按 `feedback_confidence` 进行有限幅度 shaping
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
 

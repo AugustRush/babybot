@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 
 from babybot.orchestration_policy import ConservativePolicySelector
 
@@ -15,14 +16,13 @@ class _FakePolicyStore:
         decision_kind: str | None = None,
         state_bucket: str | None = None,
     ) -> dict[str, dict[str, float | int]]:
-        if (
-            decision_kind
-            and state_bucket
-            and isinstance(self._stats.get((decision_kind, state_bucket)), Mapping)
-        ):
-            value = self._stats[(decision_kind, state_bucket)]
-            if all(isinstance(item, Mapping) for item in value.values()):
+        if decision_kind and state_bucket:
+            value = self._stats.get((decision_kind, state_bucket))
+            if isinstance(value, Mapping) and all(
+                isinstance(item, Mapping) for item in value.values()
+            ):
                 return dict(value)
+            return {}
         if decision_kind and isinstance(self._stats.get(decision_kind), Mapping):
             value = self._stats[decision_kind]
             if all(isinstance(item, Mapping) for item in value.values()):
@@ -177,3 +177,82 @@ def test_policy_auto_mode_uses_internal_conservative_thresholds() -> None:
     action = selector.choose_scheduling(features={"independent_subtasks": 2})
 
     assert action.name == "serial"
+
+
+def test_policy_downweights_stale_high_reward_history() -> None:
+    now = datetime(2026, 3, 28, tzinfo=timezone.utc)
+    store = _FakePolicyStore(
+        {
+            "scheduling": {
+                "serial": {
+                    "mean_reward": 0.8,
+                    "samples": 12,
+                    "effective_samples": 1.0,
+                    "last_updated_at": now.isoformat(timespec="seconds"),
+                },
+                "bounded_parallel": {
+                    "mean_reward": 1.0,
+                    "samples": 12,
+                    "effective_samples": 0.12,
+                    "last_updated_at": (now - timedelta(days=45)).isoformat(timespec="seconds"),
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    action = selector.choose_scheduling(features={"independent_subtasks": 2})
+
+    assert action.name == "serial"
+
+
+def test_sparse_feedback_does_not_overcorrect_action_score() -> None:
+    store = _FakePolicyStore(
+        {
+            "scheduling": {
+                "serial": {
+                    "mean_reward": 0.74,
+                    "samples": 12,
+                    "feedback_score": 0.0,
+                    "feedback_confidence": 0.0,
+                },
+                "bounded_parallel": {
+                    "mean_reward": 0.75,
+                    "samples": 12,
+                    "feedback_score": -1.0,
+                    "feedback_confidence": 0.1,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    action = selector.choose_scheduling(features={"independent_subtasks": 2})
+
+    assert action.name == "bounded_parallel"
+
+
+def test_policy_falls_back_from_specific_bucket_to_general_bucket() -> None:
+    store = _FakePolicyStore(
+        {
+            "decomposition": {
+                "analyze_then_execute": {"mean_reward": 0.9, "samples": 16},
+                "retrieve_then_execute": {"mean_reward": 0.4, "samples": 16},
+            },
+            ("decomposition", "task_shape=single_step|has_media=1"): {
+                "retrieve_then_execute": {"mean_reward": 0.85, "samples": 10},
+                "analyze_then_execute": {"mean_reward": 0.45, "samples": 10},
+            },
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=8, explore_ratio=-1.0)
+
+    action = selector.choose_decomposition(
+        features={
+            "task_shape": "single_step",
+            "has_media": True,
+            "independent_subtasks": 1,
+        }
+    )
+
+    assert action.name == "retrieve_then_execute"

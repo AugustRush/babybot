@@ -5,16 +5,30 @@ from dataclasses import dataclass
 from typing import Any
 
 
-def build_policy_state_bucket(features: dict[str, Any]) -> str:
+def _bucket_subtasks(value: Any) -> str:
+    raw_subtasks = int(value or 1)
+    return "3plus" if raw_subtasks >= 3 else str(max(1, raw_subtasks))
+
+
+def build_policy_state_buckets(features: dict[str, Any]) -> tuple[str, ...]:
     task_shape = str(features.get("task_shape", "") or "unknown").strip() or "unknown"
     has_media = 1 if bool(features.get("has_media")) else 0
-    raw_subtasks = int(features.get("independent_subtasks", 1) or 1)
-    subtasks_bucket = "3plus" if raw_subtasks >= 3 else str(max(1, raw_subtasks))
-    return (
-        f"task_shape={task_shape}"
-        f"|has_media={has_media}"
-        f"|subtasks={subtasks_bucket}"
+    subtasks_bucket = _bucket_subtasks(features.get("independent_subtasks", 1))
+    ordered = (
+        f"task_shape={task_shape}|has_media={has_media}|subtasks={subtasks_bucket}",
+        f"task_shape={task_shape}|has_media={has_media}",
+        f"task_shape={task_shape}|subtasks={subtasks_bucket}",
+        f"task_shape={task_shape}",
     )
+    deduped: list[str] = []
+    for item in ordered:
+        if item not in deduped:
+            deduped.append(item)
+    return tuple(deduped)
+
+
+def build_policy_state_bucket(features: dict[str, Any]) -> str:
+    return build_policy_state_buckets(features)[0]
 
 
 @dataclass(frozen=True)
@@ -153,20 +167,20 @@ class ConservativePolicySelector:
         decision_kind: str,
         features: dict[str, Any],
     ) -> dict[str, dict[str, float | int]]:
-        bucket = build_policy_state_bucket(features)
-        raw = self._store.summarize_action_stats(
-            decision_kind=decision_kind,
-            state_bucket=bucket,
-        )
-        raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
-        eligible = {
-            name: payload
-            for name, payload in raw.items()
-            if int(payload.get("samples", 0) or 0)
-            >= self._effective_min_samples(decision_kind=decision_kind)
-        }
-        if eligible:
-            return eligible
+        for bucket in build_policy_state_buckets(features):
+            raw = self._store.summarize_action_stats(
+                decision_kind=decision_kind,
+                state_bucket=bucket,
+            )
+            raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
+            eligible = {
+                name: payload
+                for name, payload in raw.items()
+                if int(payload.get("samples", 0) or 0)
+                >= self._effective_min_samples(decision_kind=decision_kind)
+            }
+            if eligible:
+                return eligible
         raw = self._store.summarize_action_stats(decision_kind=decision_kind)
         raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
         return {
@@ -218,9 +232,10 @@ class ConservativePolicySelector:
         dead_letter_rate = float(payload.get("dead_letter_rate", 0.0) or 0.0)
         stalled_rate = float(payload.get("stalled_rate", 0.0) or 0.0)
         feedback_score = float(payload.get("feedback_score", 0.0) or 0.0)
+        feedback_confidence = float(payload.get("feedback_confidence", 1.0) or 0.0)
         return (
             mean_reward
-            + (feedback_score * 0.4)
+            + (feedback_score * feedback_confidence * 0.05)
             - (failure_rate * 0.5)
             - (retry_rate * 0.2)
             - (dead_letter_rate * 0.35)
@@ -232,17 +247,29 @@ class ConservativePolicySelector:
         *,
         decision_kind: str,
         samples: int,
+        effective_samples: float,
         total_samples: int,
+        total_effective_samples: float,
         stats: dict[str, dict[str, float | int]],
     ) -> float:
-        if samples <= 0 or total_samples <= 0:
+        effective = (
+            effective_samples
+            if effective_samples > 0
+            else float(samples)
+        )
+        total_effective = (
+            total_effective_samples
+            if total_effective_samples > 0
+            else float(total_samples)
+        )
+        if effective <= 0 or total_effective <= 0:
             return float("inf")
         explore_ratio = self._effective_explore_ratio(
             decision_kind=decision_kind,
             stats=stats,
         )
         conservatism = max(0.0, 1.0 - explore_ratio)
-        return conservatism * math.sqrt(math.log(total_samples + 1.0) / samples)
+        return conservatism * math.sqrt(math.log(total_effective + 1.0) / effective)
 
     def _best_action(
         self,
@@ -253,14 +280,23 @@ class ConservativePolicySelector:
         actions: dict[str, PolicyAction],
     ) -> PolicyAction:
         total_samples = sum(int(item.get("samples", 0) or 0) for item in stats.values())
+        total_effective_samples = sum(
+            float(item.get("effective_samples", item.get("samples", 0.0)) or 0.0)
+            for item in stats.values()
+        )
 
         def _rank(item: tuple[str, dict[str, float | int]]) -> tuple[float, int]:
             payload = item[1]
             samples = int(payload.get("samples", 0) or 0)
+            effective_samples = float(
+                payload.get("effective_samples", payload.get("samples", 0.0)) or 0.0
+            )
             conservative_score = self._score_payload(payload) - self._confidence_penalty(
                 decision_kind=decision_kind,
                 samples=samples,
+                effective_samples=effective_samples,
                 total_samples=total_samples,
+                total_effective_samples=total_effective_samples,
                 stats=stats,
             )
             return (

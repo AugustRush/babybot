@@ -6,10 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .orchestration_policy import build_policy_state_bucket
+from .orchestration_policy import build_policy_state_buckets
 
 
 class OrchestrationPolicyStore:
+    _OUTCOME_HALF_LIFE_DAYS = 21.0
+    _FEEDBACK_HALF_LIFE_DAYS = 30.0
+
     def __init__(self, db_path: Path, *, busy_timeout_ms: int = 3000) -> None:
         self._db_path = Path(db_path)
         self._busy_timeout_ms = max(1, int(busy_timeout_ms))
@@ -34,6 +37,7 @@ class OrchestrationPolicyStore:
         decision_kind: str,
         action_name: str,
         state_features: dict[str, Any],
+        created_at: str | None = None,
     ) -> None:
         db = self._ensure_db()
         db.execute(
@@ -48,7 +52,7 @@ class OrchestrationPolicyStore:
                 decision_kind,
                 action_name,
                 json.dumps(state_features, ensure_ascii=False, sort_keys=True),
-                self._utc_now(),
+                created_at or self._utc_now(),
             ),
         )
         db.commit()
@@ -61,6 +65,7 @@ class OrchestrationPolicyStore:
         final_status: str,
         reward: float,
         outcome: dict[str, Any] | None = None,
+        created_at: str | None = None,
     ) -> None:
         db = self._ensure_db()
         db.execute(
@@ -75,7 +80,7 @@ class OrchestrationPolicyStore:
                 final_status,
                 float(reward),
                 json.dumps(outcome or {}, ensure_ascii=False, sort_keys=True),
-                self._utc_now(),
+                created_at or self._utc_now(),
             ),
         )
         db.commit()
@@ -87,6 +92,7 @@ class OrchestrationPolicyStore:
         chat_key: str,
         rating: str,
         reason: str,
+        created_at: str | None = None,
     ) -> None:
         db = self._ensure_db()
         db.execute(
@@ -100,7 +106,7 @@ class OrchestrationPolicyStore:
                 chat_key,
                 rating,
                 reason,
-                self._utc_now(),
+                created_at or self._utc_now(),
             ),
         )
         db.commit()
@@ -125,16 +131,20 @@ class OrchestrationPolicyStore:
         *,
         decision_kind: str | None = None,
         state_bucket: str | None = None,
+        now: datetime | None = None,
     ) -> dict[str, dict[str, float | int]]:
         db = self._ensure_db()
+        current_time = now or datetime.now(timezone.utc)
         rows = db.execute(
             """
             SELECT d.flow_id AS flow_id,
                    d.action_name AS action_name,
                    d.state_features_json AS state_features_json,
+                   d.created_at AS decision_created_at,
                    o.reward AS reward,
                    o.final_status AS final_status,
-                   o.outcome_json AS outcome_json
+                   o.outcome_json AS outcome_json,
+                   o.created_at AS outcome_created_at
             FROM policy_decisions AS d
             LEFT JOIN policy_outcomes AS o
               ON o.flow_id = d.flow_id
@@ -149,13 +159,14 @@ class OrchestrationPolicyStore:
             action_name = str(row["action_name"] or "")
             state_features = self._decode_json_object(row["state_features_json"])
             if state_bucket is not None:
-                if build_policy_state_bucket(state_features) != state_bucket:
+                if state_bucket not in build_policy_state_buckets(state_features):
                     continue
             flow_actions.setdefault(flow_id, set()).add(action_name)
             bucket = summary.setdefault(
                 action_name,
                 {
                     "samples": 0,
+                    "effective_samples": 0.0,
                     "mean_reward": 0.0,
                     "failure_rate": 0.0,
                     "success_rate": 0.0,
@@ -164,50 +175,63 @@ class OrchestrationPolicyStore:
                     "stalled_rate": 0.0,
                     "feedback_good_count": 0,
                     "feedback_bad_count": 0,
+                    "effective_feedback_samples": 0.0,
+                    "feedback_confidence": 0.0,
                     "feedback_score": 0.0,
+                    "last_updated_at": "",
                 },
             )
             reward = row["reward"]
             if reward is None:
                 continue
+            reference_time = self._parse_time(
+                row["outcome_created_at"] or row["decision_created_at"]
+            )
+            weight = self._decay_weight(reference_time, now=current_time)
             bucket["samples"] = int(bucket["samples"]) + 1
-            sample_count = int(bucket["samples"])
+            bucket["effective_samples"] = float(bucket["effective_samples"]) + weight
+            effective_samples = float(bucket["effective_samples"])
             bucket["mean_reward"] = (
                 (
                     float(bucket["mean_reward"])
-                    * max(0, sample_count - 1)
+                    * max(0.0, effective_samples - weight)
                 )
-                + float(reward)
-            ) / sample_count
+                + (float(reward) * weight)
+            ) / effective_samples
             final_status = str(row["final_status"] or "").strip().lower()
             if final_status == "failed":
-                bucket["failure_rate"] = float(bucket["failure_rate"]) + 1.0
+                bucket["failure_rate"] = float(bucket["failure_rate"]) + weight
             elif final_status == "succeeded":
-                bucket["success_rate"] = float(bucket["success_rate"]) + 1.0
+                bucket["success_rate"] = float(bucket["success_rate"]) + weight
             outcome = self._decode_json_object(row["outcome_json"])
             bucket["retry_rate"] = float(bucket["retry_rate"]) + float(
                 outcome.get("retry_count", 0) or 0
-            )
+            ) * weight
             bucket["dead_letter_rate"] = float(bucket["dead_letter_rate"]) + float(
                 outcome.get("dead_letter_count", 0) or 0
-            )
+            ) * weight
             bucket["stalled_rate"] = float(bucket["stalled_rate"]) + float(
                 outcome.get("stalled_count", 0) or 0
+            ) * weight
+            bucket["last_updated_at"] = max(
+                str(bucket.get("last_updated_at", "") or ""),
+                reference_time.isoformat(timespec="seconds"),
             )
         for payload in summary.values():
-            samples = int(payload.get("samples", 0) or 0)
-            if samples <= 0:
+            effective_samples = float(payload.get("effective_samples", 0.0) or 0.0)
+            if effective_samples <= 0:
                 continue
-            payload["failure_rate"] = float(payload["failure_rate"]) / samples
-            payload["success_rate"] = float(payload["success_rate"]) / samples
-            payload["retry_rate"] = float(payload["retry_rate"]) / samples
-            payload["dead_letter_rate"] = float(payload["dead_letter_rate"]) / samples
-            payload["stalled_rate"] = float(payload["stalled_rate"]) / samples
+            payload["effective_samples"] = round(effective_samples, 6)
+            payload["failure_rate"] = float(payload["failure_rate"]) / effective_samples
+            payload["success_rate"] = float(payload["success_rate"]) / effective_samples
+            payload["retry_rate"] = float(payload["retry_rate"]) / effective_samples
+            payload["dead_letter_rate"] = float(payload["dead_letter_rate"]) / effective_samples
+            payload["stalled_rate"] = float(payload["stalled_rate"]) / effective_samples
         if flow_actions:
             placeholders = ", ".join("?" for _ in flow_actions)
             feedback_rows = db.execute(
                 f"""
-                SELECT flow_id, rating
+                SELECT flow_id, rating, created_at
                 FROM policy_feedback
                 WHERE flow_id IN ({placeholders})
                 """,
@@ -216,6 +240,13 @@ class OrchestrationPolicyStore:
             for row in feedback_rows:
                 flow_id = str(row["flow_id"] or "")
                 rating = str(row["rating"] or "").strip().lower()
+                created_at = self._parse_time(row["created_at"])
+                weight = self._decay_weight(
+                    created_at,
+                    now=current_time,
+                    half_life_days=self._FEEDBACK_HALF_LIFE_DAYS,
+                )
+                signed = 1.0 if rating == "good" else -1.0 if rating == "bad" else 0.0
                 for action_name in flow_actions.get(flow_id, ()):
                     payload = summary.get(action_name)
                     if payload is None:
@@ -228,12 +259,22 @@ class OrchestrationPolicyStore:
                         payload["feedback_bad_count"] = (
                             int(payload["feedback_bad_count"]) + 1
                         )
+                    payload["effective_feedback_samples"] = (
+                        float(payload["effective_feedback_samples"]) + weight
+                    )
+                    payload["feedback_score"] = float(payload["feedback_score"]) + (
+                        signed * weight
+                    )
         for payload in summary.values():
             good_count = int(payload.get("feedback_good_count", 0) or 0)
             bad_count = int(payload.get("feedback_bad_count", 0) or 0)
-            total_feedback = good_count + bad_count
+            total_feedback = float(payload.get("effective_feedback_samples", 0.0) or 0.0)
             if total_feedback > 0:
-                payload["feedback_score"] = (good_count - bad_count) / total_feedback
+                payload["feedback_score"] = float(payload["feedback_score"]) / total_feedback
+                payload["feedback_confidence"] = min(1.0, total_feedback / 3.0)
+                payload["effective_feedback_samples"] = round(total_feedback, 6)
+            elif good_count + bad_count > 0:
+                payload["feedback_confidence"] = 0.0
         return summary
 
     def _ensure_db(self) -> sqlite3.Connection:
@@ -288,6 +329,28 @@ class OrchestrationPolicyStore:
     @staticmethod
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    @classmethod
+    def _decay_weight(
+        cls,
+        created_at: datetime,
+        *,
+        now: datetime,
+        half_life_days: float | None = None,
+    ) -> float:
+        age_days = max(0.0, (now - created_at).total_seconds() / 86400.0)
+        half_life = half_life_days or cls._OUTCOME_HALF_LIFE_DAYS
+        return 0.5 ** (age_days / half_life)
+
+    @staticmethod
+    def _parse_time(raw: Any) -> datetime:
+        if isinstance(raw, datetime):
+            value = raw
+        else:
+            value = datetime.fromisoformat(str(raw))
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     @staticmethod
     def _decode_json_object(raw: Any) -> dict[str, Any]:
