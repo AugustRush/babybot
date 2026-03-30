@@ -321,6 +321,7 @@ async def route_task(
                     heartbeat=heartbeat,
                     model_name=str(model_name or "").strip() or None,
                     timeout=max(0.5, float(timeout or 0.0)),
+                    expected_timeout=True,
                 ),
                 timeout=max(0.5, float(timeout or 0.0) + 0.2),
             )
@@ -334,7 +335,7 @@ async def route_task(
                 ),
                 timeout=max(0.5, float(timeout or 0.0) + 0.2),
             )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         logger.warning(
             "Routing decision timed out after %.2fs; falling back to default contract",
             max(0.5, float(timeout or 0.0)),

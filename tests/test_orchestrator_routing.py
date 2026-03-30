@@ -805,6 +805,7 @@ def test_answer_with_dag_uses_adaptive_router_timeout(tmp_path: Path) -> None:
         def __init__(self) -> None:
             super().__init__([])
             self.timeout_calls: list[float] = []
+            self.expected_timeout_flags: list[bool] = []
 
         async def complete_structured(
             self,
@@ -814,9 +815,11 @@ def test_answer_with_dag_uses_adaptive_router_timeout(tmp_path: Path) -> None:
             heartbeat: Any = None,
             model_name: str | None = None,
             timeout: float | None = None,
+            expected_timeout: bool = False,
         ):
             del system_prompt, user_prompt, heartbeat, model_name, model_cls
             self.timeout_calls.append(float(timeout or 0.0))
+            self.expected_timeout_flags.append(bool(expected_timeout))
             return None
 
     gateway = _TimeoutAwareGateway()
@@ -857,9 +860,16 @@ def test_answer_with_dag_uses_adaptive_router_timeout(tmp_path: Path) -> None:
 
     assert text == "ok"
     assert media == []
-    router_timeout_calls = [value for value in gateway.timeout_calls if value > 0.0]
-    assert len(router_timeout_calls) == 1
-    assert 0.5 <= router_timeout_calls[0] < 2.0
+    timed_router_calls = [
+        (timeout_value, expected_flag)
+        for timeout_value, expected_flag in zip(
+            gateway.timeout_calls, gateway.expected_timeout_flags, strict=False
+        )
+        if timeout_value > 0.0
+    ]
+    assert len(timed_router_calls) == 1
+    assert 0.5 <= timed_router_calls[0][0] < 2.0
+    assert timed_router_calls[0][1] is True
 
 
 def test_answer_with_dag_skips_router_model_for_stable_success_bucket(tmp_path: Path) -> None:

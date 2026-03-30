@@ -422,12 +422,20 @@ class OpenAICompatibleGateway(ModelProvider):
                     timeout=per_call_timeout,
                 )
         except asyncio.TimeoutError:
-            logger.error(
-                "LLM request timeout task=%s step=%s timeout=%.1fs",
-                task_id,
-                step,
-                per_call_timeout,
-            )
+            if bool(meta.get("expected_timeout", False)):
+                logger.warning(
+                    "LLM request timeout task=%s step=%s timeout=%.1fs",
+                    task_id,
+                    step,
+                    per_call_timeout,
+                )
+            else:
+                logger.error(
+                    "LLM request timeout task=%s step=%s timeout=%.1fs",
+                    task_id,
+                    step,
+                    per_call_timeout,
+                )
             raise
         except Exception:
             logger.exception("LLM request failed task=%s step=%s", task_id, step)
@@ -484,6 +492,7 @@ class OpenAICompatibleGateway(ModelProvider):
         on_stream_text: StreamTextCallback | None = None,
         model_name: str | None = None,
         timeout: float | None = None,
+        expected_timeout: bool = False,
     ) -> str:
         if on_stream_text is not None:
             return await self._complete_streaming(
@@ -508,6 +517,7 @@ class OpenAICompatibleGateway(ModelProvider):
                 for k, v in {
                     "model_name": model_name,
                     "timeout": timeout,
+                    "expected_timeout": expected_timeout or None,
                 }.items()
                 if v not in {None, ""}
             },
@@ -525,6 +535,7 @@ class OpenAICompatibleGateway(ModelProvider):
         on_stream_text: StreamTextCallback | None = None,
         model_name: str | None = None,
         timeout: float | None = None,
+        expected_timeout: bool = False,
     ) -> str:
         """Send a full multi-turn message list to the model and return text."""
         if on_stream_text is not None:
@@ -541,6 +552,7 @@ class OpenAICompatibleGateway(ModelProvider):
                 for k, v in {
                     "model_name": model_name,
                     "timeout": timeout,
+                    "expected_timeout": expected_timeout or None,
                 }.items()
                 if v not in {None, ""}
             },
@@ -559,6 +571,7 @@ class OpenAICompatibleGateway(ModelProvider):
         heartbeat: Any = None,
         model_name: str | None = None,
         timeout: float | None = None,
+        expected_timeout: bool = False,
     ) -> T | None:
         instruction = (
             "请严格输出 JSON 对象，不要输出 markdown 或额外解释。"
@@ -570,6 +583,7 @@ class OpenAICompatibleGateway(ModelProvider):
             heartbeat=heartbeat,
             model_name=model_name,
             timeout=timeout,
+            expected_timeout=expected_timeout,
         )
         # Strip markdown code fences if present
         cleaned = text.strip()

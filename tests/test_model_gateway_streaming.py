@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
+
+import pytest
 
 from babybot.agent_kernel import ExecutionContext, ModelMessage, ModelRequest
 from babybot.model_gateway import OpenAICompatibleGateway
@@ -41,6 +44,15 @@ class _FakeCompletions:
     async def create(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append(kwargs)
         return _FakeStream(self._chunks)
+
+
+class _TimeoutCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        raise asyncio.TimeoutError
 
 
 def test_complete_streams_accumulated_text_to_callback() -> None:
@@ -191,3 +203,31 @@ def test_decode_partial_json_string_keeps_valid_prefix_before_trailing_escape() 
 
     assert gateway._decode_partial_json_string('\\u4f60\\') == '你'
     assert gateway._decode_partial_json_string('abc\\u4f60\\') == 'abc你'
+
+
+def test_complete_expected_timeout_logs_warning_not_error(caplog: pytest.LogCaptureFixture) -> None:
+    completions = _TimeoutCompletions()
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+    gateway._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    async def _run() -> None:
+        with pytest.raises(asyncio.TimeoutError):
+            await gateway.complete(
+                system_prompt="sys",
+                user_prompt="user",
+                timeout=1.0,
+                expected_timeout=True,
+            )
+
+    with caplog.at_level(logging.WARNING, logger="babybot.model_gateway"):
+        asyncio.run(_run())
+
+    assert any(
+        record.levelno == logging.WARNING
+        and "LLM request timeout" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelno >= logging.ERROR and "LLM request timeout" in record.message
+        for record in caplog.records
+    )
