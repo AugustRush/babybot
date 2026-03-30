@@ -176,7 +176,7 @@ uv run babybot
 - `routing_model_name` 可单独配置；为空时回退到当前会话同一模型
 - `routing_timeout` 默认 `2.0` 秒；只有进入小模型 router 时才使用，并会根据最近模型路由 telemetry 做保守 fail-fast 调整，优先不阻塞主会话流程
 - `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
-- 对稳定命中的成功 bucket，会优先复用带时间衰减的历史成功反思直达同类路由；这些成功经验也会回流到调度/worker gate 的保守选择
+- 对稳定命中的成功 bucket，会优先复用带时间衰减的历史成功反思直达同类路由；这些成功经验也会回流到调度/worker gate 的保守选择，并单独统计 execution_style / parallelism / worker_gate 命中率
 - 极短问候/寒暄（如 `hi`、`你好`）会直接跳过执行约束抽取和 router 结构化调用，避免简单消息被前置 LLM 链路拖慢
 - 对明显的请求类型（如显式辩论、多角色讨论、显式查询/检索、显式执行型任务），会先走零模型规则路由；只有模糊请求才进入一次小模型 router
 - Router 只决定宏观路由（`tool_workflow` / `debate`）和执行倾向，不直接接管整个编排

@@ -57,6 +57,44 @@ def test_policy_store_recommends_router_timeout_from_recent_model_runs(tmp_path)
     assert 0.5 <= recommendation["timeout_seconds"] < 2.0
 
 
+def test_policy_store_summarizes_reflection_dimension_rates(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_runtime_telemetry(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=120.0,
+        router_fallback=False,
+        router_source="reflection",
+        reflection_hint_count=2,
+        reflection_override_count=2,
+        execution_style_reflection_count=1,
+        parallelism_reflection_count=1,
+        worker_reflection_count=0,
+    )
+    store.record_runtime_telemetry(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=180.0,
+        router_fallback=False,
+        router_source="model",
+        reflection_hint_count=1,
+        reflection_override_count=1,
+        execution_style_reflection_count=0,
+        parallelism_reflection_count=0,
+        worker_reflection_count=1,
+    )
+
+    summary = store.summarize_runtime_telemetry()
+
+    assert summary["overall"]["execution_style_reflection_rate"] == 0.5
+    assert summary["overall"]["parallelism_reflection_rate"] == 0.5
+    assert summary["overall"]["worker_reflection_rate"] == 0.5
+
+
 def test_policy_store_recommends_route_from_clean_success_reflections(tmp_path) -> None:
     store = OrchestrationPolicyStore(tmp_path / "policy.db")
     state_features = {

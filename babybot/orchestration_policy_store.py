@@ -299,6 +299,9 @@ class OrchestrationPolicyStore:
         router_source: str = "model",
         reflection_hint_count: int = 0,
         reflection_override_count: int = 0,
+        execution_style_reflection_count: int = 0,
+        parallelism_reflection_count: int = 0,
+        worker_reflection_count: int = 0,
         created_at: str | None = None,
     ) -> None:
         db = self._ensure_db()
@@ -307,8 +310,9 @@ class OrchestrationPolicyStore:
             INSERT OR REPLACE INTO policy_runtime_telemetry (
                 flow_id, chat_key, route_mode, router_model, router_latency_ms,
                 router_fallback, router_source, reflection_hint_count,
-                reflection_override_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reflection_override_count, execution_style_reflection_count,
+                parallelism_reflection_count, worker_reflection_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow_id,
@@ -320,6 +324,9 @@ class OrchestrationPolicyStore:
                 str(router_source or "model").strip() or "model",
                 max(0, int(reflection_hint_count)),
                 max(0, int(reflection_override_count)),
+                max(0, int(execution_style_reflection_count)),
+                max(0, int(parallelism_reflection_count)),
+                max(0, int(worker_reflection_count)),
                 created_at or self._utc_now(),
             ),
         )
@@ -401,6 +408,9 @@ class OrchestrationPolicyStore:
                    t.router_source,
                    t.reflection_hint_count,
                    t.reflection_override_count,
+                   t.execution_style_reflection_count,
+                   t.parallelism_reflection_count,
+                   t.worker_reflection_count,
                    o.reward
             FROM policy_runtime_telemetry AS t
             LEFT JOIN policy_outcomes AS o
@@ -698,6 +708,9 @@ class OrchestrationPolicyStore:
                     router_source TEXT NOT NULL DEFAULT 'model',
                     reflection_hint_count INTEGER NOT NULL DEFAULT 0,
                     reflection_override_count INTEGER NOT NULL DEFAULT 0,
+                    execution_style_reflection_count INTEGER NOT NULL DEFAULT 0,
+                    parallelism_reflection_count INTEGER NOT NULL DEFAULT 0,
+                    worker_reflection_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 )
                 """
@@ -711,6 +724,27 @@ class OrchestrationPolicyStore:
                     """
                     ALTER TABLE policy_runtime_telemetry
                     ADD COLUMN router_source TEXT NOT NULL DEFAULT 'model'
+                    """
+                )
+            if "execution_style_reflection_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN execution_style_reflection_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+            if "parallelism_reflection_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN parallelism_reflection_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+            if "worker_reflection_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN worker_reflection_count INTEGER NOT NULL DEFAULT 0
                     """
                 )
             db.commit()
@@ -730,6 +764,9 @@ class OrchestrationPolicyStore:
                 "reflection_route_rate": 0.0,
                 "reflection_match_rate": 0.0,
                 "reflection_override_rate": 0.0,
+                "execution_style_reflection_rate": 0.0,
+                "parallelism_reflection_rate": 0.0,
+                "worker_reflection_rate": 0.0,
                 "mean_reward": 0.0,
             }
         runs = len(rows)
@@ -747,6 +784,15 @@ class OrchestrationPolicyStore:
         reflection_override_total = sum(
             1 for row in rows if int(row["reflection_override_count"] or 0) > 0
         )
+        execution_style_reflection_total = sum(
+            1 for row in rows if int(row["execution_style_reflection_count"] or 0) > 0
+        )
+        parallelism_reflection_total = sum(
+            1 for row in rows if int(row["parallelism_reflection_count"] or 0) > 0
+        )
+        worker_reflection_total = sum(
+            1 for row in rows if int(row["worker_reflection_count"] or 0) > 0
+        )
         reward_values = [float(row["reward"]) for row in rows if row["reward"] is not None]
         return {
             "runs": runs,
@@ -756,6 +802,13 @@ class OrchestrationPolicyStore:
             "reflection_route_rate": round(reflection_route_total / runs, 6),
             "reflection_match_rate": round(reflection_match_total / runs, 6),
             "reflection_override_rate": round(reflection_override_total / runs, 6),
+            "execution_style_reflection_rate": round(
+                execution_style_reflection_total / runs, 6
+            ),
+            "parallelism_reflection_rate": round(
+                parallelism_reflection_total / runs, 6
+            ),
+            "worker_reflection_rate": round(worker_reflection_total / runs, 6),
             "mean_reward": round(
                 sum(reward_values) / len(reward_values), 6
             ) if reward_values else 0.0,

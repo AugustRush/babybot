@@ -694,10 +694,17 @@ class OrchestratorAgent:
             hint_prefix="历史反思建议 worker 动作：",
         )
         reflection_override_count = 0
+        execution_style_reflection_count = 0
+        parallelism_reflection_count = 0
+        worker_reflection_count = 0
+        if routing_decision is not None and routing_decision.decision_source == "reflection":
+            execution_style_reflection_count = 1
         if str(scheduling_policy.get("action_name", "") or "") != scheduling_base_action:
             reflection_override_count += 1
+            parallelism_reflection_count = 1
         if str(worker_policy.get("action_name", "") or "") != worker_base_action:
             reflection_override_count += 1
+            worker_reflection_count = 1
         if (
             chat_key
             and runtime_telemetry_store is not None
@@ -715,6 +722,9 @@ class OrchestratorAgent:
                 ),
                 reflection_hint_count=len(reflection_hints_payload),
                 reflection_override_count=reflection_override_count,
+                execution_style_reflection_count=execution_style_reflection_count,
+                parallelism_reflection_count=parallelism_reflection_count,
+                worker_reflection_count=worker_reflection_count,
             )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
@@ -977,6 +987,9 @@ class OrchestratorAgent:
                     + f"reflection_route_rate={float(overall.get('reflection_route_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_match_rate={float(overall.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_override_rate={float(overall.get('reflection_override_rate', 0.0) or 0.0):.2f} "
+                    + f"execution_style_reflection_rate={float(overall.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
+                    + f"parallelism_reflection_rate={float(overall.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
+                    + f"worker_reflection_rate={float(overall.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
                     + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
                 )
                 if isinstance(by_route_mode, dict):
@@ -993,6 +1006,9 @@ class OrchestratorAgent:
                             + f"reflection_route_rate={float(payload.get('reflection_route_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_match_rate={float(payload.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_override_rate={float(payload.get('reflection_override_rate', 0.0) or 0.0):.2f} "
+                            + f"execution_style_reflection_rate={float(payload.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
+                            + f"parallelism_reflection_rate={float(payload.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
+                            + f"worker_reflection_rate={float(payload.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
                             + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"
                         )
         return "\n".join(parts)

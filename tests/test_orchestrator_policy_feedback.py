@@ -57,6 +57,9 @@ class _FakePolicyStore:
                 "reflection_route_rate": 1 / 3,
                 "reflection_match_rate": 2 / 3,
                 "reflection_override_rate": 1 / 3,
+                "execution_style_reflection_rate": 1 / 3,
+                "parallelism_reflection_rate": 2 / 3,
+                "worker_reflection_rate": 1 / 3,
                 "mean_reward": 0.4,
             },
             "by_route_mode": {
@@ -67,6 +70,9 @@ class _FakePolicyStore:
                     "reflection_route_rate": 0.5,
                     "reflection_match_rate": 1.0,
                     "reflection_override_rate": 0.5,
+                    "execution_style_reflection_rate": 0.5,
+                    "parallelism_reflection_rate": 0.5,
+                    "worker_reflection_rate": 0.0,
                     "mean_reward": 0.8,
                 }
             },
@@ -135,6 +141,9 @@ async def test_policy_inspect_command_reports_policy_summary() -> None:
     assert "action=serial_dispatch" in response.text
     assert "avg_router_latency_ms=210.00" in response.text
     assert "reflection_route_rate=0.33" in response.text
+    assert "execution_style_reflection_rate=0.33" in response.text
+    assert "parallelism_reflection_rate=0.67" in response.text
+    assert "worker_reflection_rate=0.33" in response.text
     assert "reflection_match_rate=0.67" in response.text
 
 
@@ -217,6 +226,9 @@ def test_policy_inspect_command_reports_runtime_summary_sync() -> None:
 
     assert "avg_router_latency_ms=210.00" in response.text
     assert "reflection_route_rate=0.33" in response.text
+    assert "execution_style_reflection_rate=0.33" in response.text
+    assert "parallelism_reflection_rate=0.67" in response.text
+    assert "worker_reflection_rate=0.33" in response.text
     assert "reflection_match_rate=0.67" in response.text
 
 
