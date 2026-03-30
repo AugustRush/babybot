@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from babybot.orchestration_policy_store import OrchestrationPolicyStore
 from babybot.orchestration_router import build_routing_intent_bucket
 
@@ -239,7 +241,75 @@ def test_policy_store_recommends_route_from_stable_intent_bucket(tmp_path) -> No
     assert recommendation["route_mode"] == "tool_workflow"
     assert recommendation["execution_style"] == "direct_execute"
     assert recommendation["samples"] == 4
-    assert recommendation["wins"] == 3
+    assert recommendation["wins"] == pytest.approx(3.0, abs=1e-5)
+
+
+def test_policy_store_suppresses_stale_intent_bucket_successes(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
+    for idx in range(3):
+        flow_id = f"flow-{idx}"
+        store.record_runtime_telemetry(
+            flow_id=flow_id,
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="model",
+            execution_style="direct_execute",
+            intent_bucket=intent_bucket,
+            created_at="2020-01-01T00:00:00+00:00",
+        )
+        store.record_outcome(
+            flow_id=flow_id,
+            chat_key="feishu:c1",
+            final_status="succeeded",
+            reward=0.9,
+            outcome={"task_result_count": 1},
+            created_at="2020-01-01T00:00:00+00:00",
+        )
+
+    recommendation = store.recommend_route_from_intent_bucket(
+        chat_key="feishu:c1",
+        intent_bucket=intent_bucket,
+    )
+
+    assert recommendation is None
+
+
+def test_policy_store_suppresses_intent_bucket_after_shadow_disagreement(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
+    for idx in range(3):
+        flow_id = f"flow-{idx}"
+        store.record_runtime_telemetry(
+            flow_id=flow_id,
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="model",
+            execution_style="direct_execute",
+            intent_bucket=intent_bucket,
+            shadow_routing_eval_count=1,
+            shadow_routing_agree_count=0,
+        )
+        store.record_outcome(
+            flow_id=flow_id,
+            chat_key="feishu:c1",
+            final_status="succeeded",
+            reward=0.9,
+            outcome={"task_result_count": 1},
+        )
+
+    recommendation = store.recommend_route_from_intent_bucket(
+        chat_key="feishu:c1",
+        intent_bucket=intent_bucket,
+    )
+
+    assert recommendation is None
 
 
 def test_policy_store_reflection_route_recommendation_decays_stale_successes(tmp_path) -> None:

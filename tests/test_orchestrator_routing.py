@@ -1023,6 +1023,83 @@ def test_answer_with_dag_records_shadow_routing_agreement_for_rule_route(tmp_pat
     ] != []
 
 
+def test_answer_with_dag_skips_stale_or_disagreed_intent_cache(tmp_path: Path) -> None:
+    class _RoutingGateway(_FakeGateway):
+        async def complete_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            model_cls: type,
+            heartbeat: Any = None,
+            model_name: str | None = None,
+            timeout: float | None = None,
+        ):
+            del system_prompt, user_prompt, heartbeat, model_name, timeout
+            self.structured_calls.append(
+                {"model_cls": getattr(model_cls, "__name__", str(model_cls))}
+            )
+            if model_cls.__name__ == "RoutingDecision":
+                return model_cls(
+                    route_mode="tool_workflow",
+                    need_clarification=False,
+                    execution_style="analyze_first",
+                    parallelism_hint="serial",
+                    worker_hint="deny",
+                    explain="缓存失效后回退模型",
+                )
+            return None
+
+    gateway = _RoutingGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    agent.config.system.routing_shadow_eval_enabled = False
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
+    for idx in range(3):
+        flow_id = f"flow-{idx}"
+        agent._policy_store.record_runtime_telemetry(
+            flow_id=flow_id,
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="model",
+            execution_style="direct_execute",
+            intent_bucket=intent_bucket,
+            shadow_routing_eval_count=1,
+            shadow_routing_agree_count=0,
+        )
+        agent._policy_store.record_outcome(
+            flow_id=flow_id,
+            chat_key="feishu:c1",
+            final_status="succeeded",
+            reward=0.9,
+            outcome={"task_result_count": 1},
+        )
+    seen: dict[str, Any] = {}
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("这个该怎么办", tape=tape))
+
+    assert text == "ok"
+    assert media == []
+    assert [
+        call for call in gateway.structured_calls if call["model_cls"] == "RoutingDecision"
+    ] != []
+    assert seen["routing_decision"].decision_source == "model"
+
+
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:
     class _RepeatableDispatchGateway(_FakeGateway):
         def __init__(self) -> None:

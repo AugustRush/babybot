@@ -178,6 +178,7 @@ uv run babybot
 - `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
 - 对稳定命中的成功 bucket，会优先复用带时间衰减的历史成功反思直达同类路由；这些成功经验也会回流到调度/worker gate 的保守选择，并单独统计 execution_style / parallelism / worker_gate 命中率
 - 对规则和 reflection 都没命中的模糊请求，会先尝试一个极轻量的稳定意图桶缓存；只有缓存也没把握时，才进入一次小模型 router
+- 意图桶缓存会对旧样本做时间衰减；如果后台 shadow routing 长期不一致，会自动暂时停用该桶，回退到模型 router
 - 当某一维反思长期低命中时，会自动降低该维 reflection 注入强度；当 parallelism / worker 维长期高命中时，会在“样本稀疏但可并行”的场景里温和放宽默认保守动作，并把 guardrail 实际触发率一并写入 runtime telemetry
 - 对非模型路由命中的请求，系统会在后台做一次不阻塞主会话的影子路由评估，只记录 agreement telemetry，不会影响当次会话结果
 - 极短问候/寒暄（如 `hi`、`你好`）会直接跳过执行约束抽取和 router 结构化调用，避免简单消息被前置 LLM 链路拖慢

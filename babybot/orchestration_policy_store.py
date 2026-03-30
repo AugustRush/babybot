@@ -13,6 +13,7 @@ class OrchestrationPolicyStore:
     _OUTCOME_HALF_LIFE_DAYS = 21.0
     _FEEDBACK_HALF_LIFE_DAYS = 30.0
     _REFLECTION_ROUTE_HALF_LIFE_DAYS = 14.0
+    _INTENT_BUCKET_HALF_LIFE_DAYS = 14.0
     _RECENT_WINDOW_DAYS = 7.0
 
     def __init__(self, db_path: Path, *, busy_timeout_ms: int = 3000) -> None:
@@ -348,7 +349,10 @@ class OrchestrationPolicyStore:
         chat_key: str | None = None,
         limit: int = 24,
         min_samples: int = 3,
+        min_effective_samples: float = 1.5,
         min_win_rate: float = 0.75,
+        min_shadow_samples: int = 2,
+        min_shadow_agreement_rate: float = 0.5,
     ) -> dict[str, Any] | None:
         bucket = str(intent_bucket or "").strip()
         if not bucket:
@@ -357,6 +361,9 @@ class OrchestrationPolicyStore:
             """
             SELECT t.route_mode,
                    t.execution_style,
+                   t.shadow_routing_eval_count,
+                   t.shadow_routing_agree_count,
+                   t.created_at,
                    o.final_status
             FROM policy_runtime_telemetry AS t
             JOIN policy_outcomes AS o
@@ -370,34 +377,72 @@ class OrchestrationPolicyStore:
         ).fetchall()
         if len(rows) < max(1, int(min_samples)):
             return None
-        grouped: dict[tuple[str, str], int] = {}
+        now = datetime.now(timezone.utc)
+        grouped: dict[tuple[str, str], dict[str, float | str]] = {}
+        total_weight = 0.0
+        shadow_eval_weight = 0.0
+        shadow_agree_weight = 0.0
         for row in rows:
+            created_at = self._parse_time(row["created_at"])
+            weight = self._decay_weight(
+                created_at,
+                now=now,
+                half_life_days=self._INTENT_BUCKET_HALF_LIFE_DAYS,
+            )
+            total_weight += weight
             route_mode = str(row["route_mode"] or "").strip()
             execution_style = str(row["execution_style"] or "").strip()
             if route_mode not in {"tool_workflow", "answer", "debate"}:
                 continue
+            if int(row["shadow_routing_eval_count"] or 0) > 0:
+                shadow_eval_weight += weight
+                if int(row["shadow_routing_agree_count"] or 0) > 0:
+                    shadow_agree_weight += weight
             if str(row["final_status"] or "").strip().lower() != "succeeded":
                 continue
             key = (route_mode, execution_style)
-            grouped[key] = grouped.get(key, 0) + 1
+            payload = grouped.setdefault(
+                key,
+                {
+                    "route_mode": route_mode,
+                    "execution_style": execution_style,
+                    "wins": 0.0,
+                },
+            )
+            payload["wins"] = float(payload["wins"]) + weight
         if not grouped:
             return None
+        if (
+            shadow_eval_weight >= float(min_shadow_samples)
+            and shadow_agree_weight / max(shadow_eval_weight, 1e-9) < float(min_shadow_agreement_rate)
+        ):
+            return None
         ranked = sorted(
-            grouped.items(),
-            key=lambda item: (int(item[1]), item[0][0], item[0][1]),
+            grouped.values(),
+            key=lambda item: (
+                float(item["wins"]),
+                str(item["route_mode"]),
+                str(item["execution_style"]),
+            ),
             reverse=True,
         )
-        (route_mode, execution_style), wins = ranked[0]
-        total = len(rows)
-        win_rate = wins / max(1, total)
-        if wins < max(1, int(min_samples)) or win_rate < float(min_win_rate):
+        top = ranked[0]
+        route_mode = str(top["route_mode"])
+        execution_style = str(top["execution_style"])
+        weighted_wins = float(top["wins"] or 0.0)
+        win_rate = weighted_wins / max(total_weight, 1e-9)
+        if weighted_wins < float(min_effective_samples) or win_rate < float(min_win_rate):
             return None
         return {
             "route_mode": route_mode,
             "execution_style": execution_style or "analyze_first",
-            "samples": total,
-            "wins": wins,
+            "samples": len(rows),
+            "effective_samples": round(total_weight, 6),
+            "wins": round(weighted_wins, 6),
             "win_rate": round(win_rate, 6),
+            "shadow_agreement_rate": round(
+                shadow_agree_weight / max(shadow_eval_weight, 1e-9), 6
+            ) if shadow_eval_weight > 0 else 0.0,
             "source": "intent_bucket_success",
         }
 
