@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .runtime_jobs import JOB_STATES, RuntimeJob
+from .runtime_jobs import ACTIVE_JOB_STATES, JOB_STATES, RuntimeJob
 
 
 class RuntimeJobStore:
@@ -17,7 +17,15 @@ class RuntimeJobStore:
         self._db_path = Path(db_path)
         self._db: sqlite3.Connection | None = None
 
-    def create(self, *, chat_key: str, goal: str, plan_id: str = "") -> RuntimeJob:
+    def create(
+        self,
+        *,
+        chat_key: str,
+        goal: str,
+        plan_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> RuntimeJob:
+        normalized_metadata = dict(metadata or {})
         job = RuntimeJob(
             job_id=f"job_{uuid.uuid4().hex[:12]}",
             chat_key=str(chat_key or ""),
@@ -26,6 +34,7 @@ class RuntimeJobStore:
             state="queued",
             created_at=self._utc_now(),
             updated_at=self._utc_now(),
+            metadata=normalized_metadata,
         )
         db = self._ensure_db()
         db.execute(
@@ -44,7 +53,7 @@ class RuntimeJobStore:
                 job.progress_message,
                 job.result_text,
                 job.error,
-                json.dumps(job.metadata, ensure_ascii=False, sort_keys=True),
+                json.dumps(normalized_metadata, ensure_ascii=False, sort_keys=True),
                 job.created_at,
                 job.updated_at,
             ),
@@ -130,6 +139,69 @@ class RuntimeJobStore:
             return None
         return self._row_to_job(row)
 
+    def find_by_flow_id(self, flow_id: str) -> RuntimeJob | None:
+        normalized_flow_id = str(flow_id or "").strip()
+        if not normalized_flow_id:
+            return None
+        for job in self.list_jobs():
+            if str(job.metadata.get("flow_id", "") or "").strip() == normalized_flow_id:
+                return job
+        return None
+
+    def known_flow_ids(self) -> set[str]:
+        return {
+            flow_id
+            for job in self.list_jobs()
+            if (flow_id := str(job.metadata.get("flow_id", "") or "").strip())
+        }
+
+    def list_jobs(self, *, chat_key: str | None = None) -> list[RuntimeJob]:
+        sql = """
+            SELECT job_id, chat_key, goal, plan_id, state, progress_message,
+                   result_text, error, metadata_json, created_at, updated_at
+            FROM runtime_jobs
+        """
+        params: tuple[Any, ...] = ()
+        if chat_key is not None:
+            sql += " WHERE chat_key=?"
+            params = (chat_key,)
+        sql += " ORDER BY id DESC"
+        rows = self._ensure_db().execute(sql, params).fetchall()
+        return [self._row_to_job(row) for row in rows]
+
+    def run_maintenance(
+        self,
+        *,
+        now: datetime | None = None,
+        retention_seconds: int = 3600,
+    ) -> dict[str, Any]:
+        current_time = now.astimezone(timezone.utc) if now is not None else datetime.now(
+            timezone.utc
+        )
+        cutoff = current_time - timedelta(seconds=max(0, int(retention_seconds)))
+        orphaned_job_ids: list[str] = []
+        for job in self.list_jobs():
+            flow_id = str(job.metadata.get("flow_id", "") or "").strip()
+            updated_at = self._parse_timestamp(job.updated_at)
+            if (
+                job.state in ACTIVE_JOB_STATES
+                and updated_at <= cutoff
+                and not flow_id
+            ):
+                orphaned_job_ids.append(job.job_id)
+
+        if orphaned_job_ids:
+            placeholders = ",".join("?" for _ in orphaned_job_ids)
+            self._ensure_db().execute(
+                f"DELETE FROM runtime_jobs WHERE job_id IN ({placeholders})",
+                tuple(orphaned_job_ids),
+            )
+            self._ensure_db().commit()
+        return {
+            "orphaned_jobs_pruned": len(orphaned_job_ids),
+            "orphaned_job_ids": orphaned_job_ids,
+        }
+
     def _ensure_db(self) -> sqlite3.Connection:
         if self._db is not None:
             return self._db
@@ -184,3 +256,16 @@ class RuntimeJobStore:
     @staticmethod
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> datetime:
+        text = str(value or "").strip()
+        if not text:
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)

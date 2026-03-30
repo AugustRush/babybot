@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from babybot.orchestrator import OrchestratorAgent
+from babybot.runtime_job_store import RuntimeJobStore
 
 
 class _FakePolicyStore:
@@ -58,6 +59,7 @@ def _make_agent() -> OrchestratorAgent:
     agent._handoff_locks = {}
     agent._background_tasks = set()
     agent._policy_store = _FakePolicyStore()
+    agent._runtime_job_store = None
     agent.resource_manager = None
     agent.gateway = None
     agent.tape_store = None
@@ -139,6 +141,28 @@ async def test_policy_feedback_latest_requires_disambiguation_when_multiple_rece
     assert agent._policy_store.feedback_rows == []
 
 
+@pytest.mark.asyncio
+async def test_policy_feedback_can_target_specific_job_id(tmp_path) -> None:
+    agent = _make_agent()
+    store = RuntimeJobStore(tmp_path / "jobs.db")
+    job = store.create(
+        chat_key="feishu:c1",
+        goal="long task",
+        metadata={"flow_id": "flow-old"},
+    )
+    agent._runtime_job_store = store
+    agent._recent_flow_ids_by_chat["feishu:c1"] = "flow-new"
+    agent._recent_flows_by_chat["feishu:c1"] = ["flow-new"]
+
+    response = await agent.process_task(
+        f"@policy feedback {job.job_id} bad 轮数失控",
+        chat_key="feishu:c1",
+    )
+
+    assert "已记录" in response.text
+    assert agent._policy_store.feedback_rows[0]["flow_id"] == "flow-old"
+
+
 def test_policy_choice_payload_includes_explain() -> None:
     agent = _make_agent()
 
@@ -184,3 +208,25 @@ def test_policy_feedback_latest_requires_disambiguation_sync() -> None:
 
     assert "请指定 flow_id" in response.text
     assert agent._policy_store.feedback_rows == []
+
+
+def test_policy_feedback_can_target_specific_job_id_sync(tmp_path) -> None:
+    agent = _make_agent()
+    store = RuntimeJobStore(tmp_path / "jobs.db")
+    job = store.create(
+        chat_key="feishu:c1",
+        goal="long task",
+        metadata={"flow_id": "flow-old"},
+    )
+    agent._runtime_job_store = store
+    agent._recent_flow_ids_by_chat["feishu:c1"] = "flow-new"
+
+    response = asyncio.run(
+        agent.process_task(
+            f"@policy feedback {job.job_id} bad 轮数失控",
+            chat_key="feishu:c1",
+        )
+    )
+
+    assert "已记录" in response.text
+    assert agent._policy_store.feedback_rows[0]["flow_id"] == "flow-old"

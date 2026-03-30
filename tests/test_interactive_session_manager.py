@@ -127,3 +127,26 @@ def test_manager_status_prunes_expired_session():
 
     assert status is None
     assert summary["active_count"] == 0
+
+
+def test_manager_cleanup_prunes_all_expired_sessions():
+    from babybot.interactive_sessions.manager import InteractiveSessionManager
+
+    backend = FakeBackend()
+    manager = InteractiveSessionManager(
+        backends={"claude": backend},
+        max_age_seconds=1,
+        time_fn=lambda: 100.0,
+    )
+
+    async def _run() -> tuple[int, dict[str, object]]:
+        await manager.start(chat_key="feishu:c1", backend_name="claude")
+        await manager.start(chat_key="feishu:c2", backend_name="claude")
+        manager._time_fn = lambda: 102.0
+        pruned = manager.cleanup()
+        return pruned, manager.summary()
+
+    pruned, summary = asyncio.run(_run())
+
+    assert pruned == 2
+    assert summary["active_count"] == 0

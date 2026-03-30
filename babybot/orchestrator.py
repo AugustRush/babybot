@@ -24,6 +24,7 @@ from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
 from .context_views import build_context_view
 from .execution_plan import build_execution_plan
+from .feedback_events import normalize_runtime_feedback_event
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
@@ -35,6 +36,7 @@ from .orchestration_policy_store import OrchestrationPolicyStore
 from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
 from .runtime_job_store import RuntimeJobStore
+from .runtime_jobs import JOB_STATES
 from .runtime_feedback_commands import parse_policy_command
 from .task_contract import build_task_contract
 
@@ -636,6 +638,7 @@ class OrchestratorAgent:
         stream_callback: StreamTextCallback | None = None,
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
         send_intermediate_message: Callable[[str], Awaitable[None]] | None = None,
+        job_metadata_override: dict[str, Any] | None = None,
     ) -> TaskResponse:
         policy_control = self._parse_policy_feedback_command(user_input)
         if policy_control is not None:
@@ -694,50 +697,72 @@ class OrchestratorAgent:
             self.tape_store.save_entries(chat_key, pending_entries)
             logger.info("Tape entries saved, proceeding to _answer_with_dag")
 
-        wrapped_runtime_event_callback = runtime_event_callback
-        if tape is not None and chat_key:
-
-            async def _record_runtime_event(event: Any) -> None:
-                payload: dict[str, Any]
-                if isinstance(event, dict):
-                    payload = dict(event)
-                else:
-                    payload = {
-                        "event": getattr(event, "event", ""),
-                        "task_id": getattr(event, "task_id", ""),
-                        "flow_id": getattr(event, "flow_id", ""),
-                        "payload": dict(getattr(event, "payload", {}) or {}),
-                    }
-                entry = tape.append(
-                    "event",
-                    {
-                        "event": str(payload.get("event", "") or ""),
-                        "payload": dict(payload.get("payload") or {}),
-                    },
-                    {
-                        "task_id": str(payload.get("task_id", "") or ""),
-                        "flow_id": str(payload.get("flow_id", "") or ""),
-                    },
-                )
-                self.tape_store.save_entry(chat_key, entry)
-                if hasattr(self, "memory_store"):
-                    self.memory_store.observe_runtime_event(chat_key, payload)
-                if runtime_event_callback is not None:
-                    maybe = runtime_event_callback(event)
-                    if inspect.isawaitable(maybe):
-                        await maybe
-
-            wrapped_runtime_event_callback = _record_runtime_event
-
         runtime_job_store = getattr(self, "_runtime_job_store", None)
         runtime_job = None
         if chat_key and runtime_job_store is not None:
-            runtime_job = runtime_job_store.create(chat_key=chat_key, goal=user_input)
+            runtime_metadata = dict(job_metadata_override or {})
+            runtime_metadata.setdefault("media_paths", list(media_paths or []))
+            runtime_job = runtime_job_store.create(
+                chat_key=chat_key,
+                goal=user_input,
+                metadata=runtime_metadata,
+            )
             runtime_job_store.transition(
                 runtime_job.job_id,
                 "planning",
                 progress_message="已接收任务，准备执行",
             )
+
+        wrapped_runtime_event_callback = runtime_event_callback
+        if runtime_job is not None or (tape is not None and chat_key):
+
+            async def _record_runtime_event(event: Any) -> None:
+                payload = self._runtime_event_payload(event)
+                if runtime_job_store is not None and runtime_job is not None:
+                    payload["job_id"] = str(
+                        payload.get("job_id", "") or runtime_job.job_id
+                    )
+                    inner_payload = dict(payload.get("payload") or {})
+                    inner_payload.setdefault("job_id", runtime_job.job_id)
+                    payload["payload"] = inner_payload
+                    state, progress_message = self._job_state_from_runtime_event(payload)
+                    metadata_update: dict[str, Any] = {}
+                    flow_id = str(payload.get("flow_id", "") or "").strip()
+                    task_id = str(payload.get("task_id", "") or "").strip()
+                    stage = str(inner_payload.get("stage", "") or "").strip()
+                    if flow_id:
+                        metadata_update["flow_id"] = flow_id
+                    if task_id:
+                        metadata_update["last_task_id"] = task_id
+                    if stage:
+                        metadata_update["last_stage"] = stage
+                    runtime_job_store.transition(
+                        runtime_job.job_id,
+                        state,
+                        progress_message=progress_message,
+                        metadata=metadata_update,
+                    )
+                if tape is not None and chat_key:
+                    entry = tape.append(
+                        "event",
+                        {
+                            "event": str(payload.get("event", "") or ""),
+                            "payload": dict(payload.get("payload") or {}),
+                        },
+                        {
+                            "task_id": str(payload.get("task_id", "") or ""),
+                            "flow_id": str(payload.get("flow_id", "") or ""),
+                        },
+                    )
+                    self.tape_store.save_entry(chat_key, entry)
+                    if hasattr(self, "memory_store"):
+                        self.memory_store.observe_runtime_event(chat_key, payload)
+                if runtime_event_callback is not None:
+                    maybe = runtime_event_callback(payload)
+                    if inspect.isawaitable(maybe):
+                        await maybe
+
+            wrapped_runtime_event_callback = _record_runtime_event
 
         try:
             logger.info("Starting _answer_with_dag")
@@ -945,6 +970,85 @@ class OrchestratorAgent:
         target = parts[2].strip() if len(parts) >= 3 else "latest"
         return {"action": action, "target": target}
 
+    @staticmethod
+    def _runtime_event_payload(event: Any) -> dict[str, Any]:
+        if isinstance(event, dict):
+            payload = dict(event)
+        else:
+            payload = {
+                "event": getattr(event, "event", ""),
+                "task_id": getattr(event, "task_id", ""),
+                "flow_id": getattr(event, "flow_id", ""),
+                "payload": dict(getattr(event, "payload", {}) or {}),
+            }
+        payload["payload"] = dict(payload.get("payload") or {})
+        return payload
+
+    @staticmethod
+    def _job_state_from_runtime_event(event_payload: dict[str, Any]) -> tuple[str, str]:
+        normalized = normalize_runtime_feedback_event(event_payload)
+        state = normalized.state if normalized.state in JOB_STATES else "running"
+        if normalized.task_id and normalized.stage not in {"job", "interactive_session"}:
+            if state == "completed":
+                state = "running"
+            elif state == "failed":
+                state = "repairing"
+            elif state == "cancelled":
+                state = "running"
+        progress_message = normalized.message or normalized.stage or state
+        return state, progress_message
+
+    def _resolve_job_target(
+        self,
+        *,
+        chat_key: str,
+        target: str,
+    ) -> tuple[Any, str]:
+        store = getattr(self, "_runtime_job_store", None)
+        if store is None:
+            return None, "当前未启用作业存储。"
+        normalized_target = str(target or "latest").strip() or "latest"
+        job = (
+            store.latest_for_chat(chat_key)
+            if normalized_target == "latest"
+            else store.get(normalized_target)
+        )
+        if job is None:
+            return None, "未找到对应作业。"
+        return job, ""
+
+    def _runtime_maintenance_report(self) -> str:
+        store = getattr(self, "_runtime_job_store", None)
+        if store is None:
+            return "当前未启用作业存储。"
+        report = store.run_maintenance(retention_seconds=0)
+        interactive_manager = getattr(self, "_interactive_sessions", None)
+        stale_sessions = (
+            int(interactive_manager.cleanup()) if interactive_manager is not None else 0
+        )
+        recent_flows = getattr(self, "_recent_flows_by_chat", {}) or {}
+        known_flow_ids = store.known_flow_ids()
+        unmatched_recent_flows = sorted(
+            {
+                str(flow_id).strip()
+                for flows in recent_flows.values()
+                for flow_id in flows or []
+                if str(flow_id).strip() and str(flow_id).strip() not in known_flow_ids
+            }
+        )
+        lines = [
+            "[Runtime Maintenance]",
+            f"orphaned_jobs_pruned={int(report.get('orphaned_jobs_pruned', 0) or 0)}",
+            f"stale_interactive_sessions={stale_sessions}",
+            f"unmatched_recent_flows={len(unmatched_recent_flows)}",
+        ]
+        orphaned_job_ids = report.get("orphaned_job_ids") or []
+        if unmatched_recent_flows:
+            lines.append(f"flows={', '.join(unmatched_recent_flows[:10])}")
+        if orphaned_job_ids:
+            lines.append(f"jobs={', '.join(str(item) for item in orphaned_job_ids[:10])}")
+        return "\n".join(lines)
+
     def _resolve_policy_feedback_flow_id(
         self,
         *,
@@ -952,6 +1056,7 @@ class OrchestratorAgent:
         target: str,
     ) -> tuple[str, str]:
         normalized_target = str(target or "").strip()
+        store = getattr(self, "_runtime_job_store", None)
         recent_latest = getattr(self, "_recent_flow_ids_by_chat", {}) or {}
         recent_history = getattr(self, "_recent_flows_by_chat", {}) or {}
         history = [
@@ -959,6 +1064,13 @@ class OrchestratorAgent:
             for item in recent_history.get(chat_key, []) or []
             if str(item).strip()
         ]
+        if normalized_target and normalized_target not in {"latest"} and store is not None:
+            target_job = store.get(normalized_target)
+            if target_job is not None:
+                flow_id = str(target_job.metadata.get("flow_id", "") or "").strip()
+                if flow_id:
+                    return flow_id, ""
+                return "", "该 job 尚未关联 flow_id，请指定 flow_id 再反馈。"
         if not history:
             latest = str(recent_latest.get(chat_key, "") or "").strip()
             if latest:
@@ -1016,19 +1128,43 @@ class OrchestratorAgent:
         chat_key: str,
         control: dict[str, str],
     ) -> TaskResponse:
-        if control.get("action", "") != "status":
-            return TaskResponse(text="支持的命令：@job status <job_id|latest>")
-        store = getattr(self, "_runtime_job_store", None)
-        if store is None:
-            return TaskResponse(text="当前未启用作业存储。")
+        action = str(control.get("action", "") or "status").strip()
         target = str(control.get("target", "") or "latest").strip()
-        job = store.latest_for_chat(chat_key) if target == "latest" else store.get(target)
+        if action == "cleanup":
+            return TaskResponse(text=self._runtime_maintenance_report())
+        if action not in {"status", "resume"}:
+            return TaskResponse(text="支持的命令：@job status <job_id|latest> / @job resume <job_id|latest> / @job cleanup")
+        job, error = self._resolve_job_target(chat_key=chat_key, target=target)
+        if error:
+            return TaskResponse(text=error)
         if job is None:
             return TaskResponse(text="未找到对应作业。")
+        if action == "resume":
+            if job.state == "completed":
+                return TaskResponse(text="该作业已完成，无需恢复。")
+            if job.state == "running":
+                return TaskResponse(text="该作业仍在运行，请先使用 @job status 查询。")
+            store = getattr(self, "_runtime_job_store", None)
+            if store is not None:
+                store.transition(
+                    job.job_id,
+                    "repairing",
+                    progress_message="准备恢复执行",
+                    metadata={"resume_requested": True},
+                )
+            resume_metadata = dict(job.metadata)
+            resume_metadata["resumed_from"] = job.job_id
+            return await self.process_task(
+                job.goal,
+                chat_key=job.chat_key or chat_key,
+                media_paths=list(job.metadata.get("media_paths") or []),
+                job_metadata_override=resume_metadata,
+            )
         return TaskResponse(
             text=(
                 f"[Job]\njob_id={job.job_id}\nstate={job.state}\n"
-                f"progress={job.progress_message or '-'}"
+                f"progress={job.progress_message or '-'}\n"
+                f"flow_id={str(job.metadata.get('flow_id', '') or '-')}"
             )
         )
 

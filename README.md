@@ -128,6 +128,9 @@ uv run babybot
 @session stop
 @job status latest
 @job status <job_id>
+@job resume latest
+@job resume <job_id>
+@job cleanup
 ```
 
 - `@session start claude`：在当前 `chat_key` 下启动 Claude 交互会话
@@ -135,6 +138,8 @@ uv run babybot
 - `@session stop`：关闭当前交互会话；后续消息恢复走默认 DAG 编排路径
 - `@job status latest`：查看当前 `chat_key` 最近一次持久化长任务状态
 - `@job status <job_id>`：按显式 `job_id` 查看长任务状态
+- `@job resume latest` / `@job resume <job_id>`：按持久化的 `goal`、`media_paths` 重新发起一次恢复执行；新作业会记录 `resumed_from`
+- `@job cleanup`：执行一次轻量 runtime 维护，清理无 `flow_id` 且长期停滞的 orphaned jobs，并报告 stale session / unmatched flow
 
 当前实现说明：
 
@@ -142,6 +147,7 @@ uv run babybot
 - `@session start claude` 会先创建一个按 `chat_key` 隔离的 Claude 会话上下文
 - 后续每条消息都会重新启动一次 `claude` CLI，并通过 `--resume <session_id>` 继续该会话
 - `InteractiveSessionManager` 会在 `status()` / `send()` 前先清理过期会话；如果发送时发现已过期，会回退到默认 DAG 编排
+- `InteractiveSessionManager.cleanup()` 可被 runtime 维护入口复用，用于统一清理过期 session
 - 交互会话请求会保留 `media_paths`，因此图片/文件输入不会在 session 路径里丢失
 - 会话状态当前保存在 BabyBot 管理的隔离目录中，因此用户在默认终端里直接执行 `claude --resume <session_id>` 未必能接上
 
@@ -739,6 +745,7 @@ query=继续语音任务
 - MessageBus 会按 `(job_id, task_id, stage, state)` 去重，而不是只按消息文本去重
 - 不再在阶段完成时把完整结果提前重复发一次，避免和最终回复重复
 - 如果消息通道先超时，但任务已经创建了持久化作业，超时提示会附带 `job_id`，方便后续用 `@job status ...` 查询
+- runtime event 会反向更新 `RuntimeJob` 的 `state` / `flow_id` / 最近 stage，因此 `@job status` 不再只反映外层开始/结束两个阶段
 
 对于较慢的宿主 Python 技能脚本：
 

@@ -124,12 +124,18 @@ class InteractiveSessionManager:
         return count
 
     def summary(self) -> dict[str, object]:
-        for chat_key in list(self._sessions):
-            self._drop_expired_session(chat_key)
+        self.cleanup()
         return {
             "active_count": len(self._sessions),
             "chat_keys": sorted(self._sessions.keys()),
         }
+
+    def cleanup(self) -> int:
+        pruned = 0
+        for chat_key in list(self._sessions):
+            if self._drop_expired_session(chat_key):
+                pruned += 1
+        return pruned
 
     def _is_expired(self, session: InteractiveSession) -> bool:
         return (float(self._time_fn()) - float(session.last_active_at)) > float(
@@ -154,12 +160,14 @@ class InteractiveSessionManager:
         if current is lock:
             self._locks.pop(chat_key, None)
 
-    def _drop_expired_session(self, chat_key: str) -> None:
+    def _drop_expired_session(self, chat_key: str) -> bool:
         session = self._sessions.get(chat_key)
         if session is None:
-            return
+            return False
         if self._is_expired(session):
             self._sessions.pop(chat_key, None)
             lock = self._locks.get(chat_key)
             if lock is not None:
                 self._prune_lock(chat_key, lock)
+            return True
+        return False

@@ -30,6 +30,21 @@ JOB_STATES: tuple[JobState, ...] = (
     "cancelled",
 )
 
+ACTIVE_JOB_STATES: tuple[JobState, ...] = (
+    "queued",
+    "planning",
+    "running",
+    "waiting_tool",
+    "waiting_user",
+    "repairing",
+)
+
+TERMINAL_JOB_STATES: tuple[JobState, ...] = (
+    "completed",
+    "failed",
+    "cancelled",
+)
+
 
 @dataclass(frozen=True)
 class RuntimeJob:
