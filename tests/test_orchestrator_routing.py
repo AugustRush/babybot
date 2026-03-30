@@ -1100,6 +1100,139 @@ def test_answer_with_dag_skips_stale_or_disagreed_intent_cache(tmp_path: Path) -
     assert seen["routing_decision"].decision_source == "model"
 
 
+def test_answer_with_dag_suppresses_shadow_eval_for_unstable_bucket(tmp_path: Path) -> None:
+    class _ShadowEvalGateway(_FakeGateway):
+        async def complete_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            model_cls: type,
+            heartbeat: Any = None,
+            model_name: str | None = None,
+            timeout: float | None = None,
+        ):
+            del system_prompt, user_prompt, heartbeat, model_name, timeout
+            self.structured_calls.append(
+                {"model_cls": getattr(model_cls, "__name__", str(model_cls))}
+            )
+            return None
+
+    gateway = _ShadowEvalGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    intent_bucket = build_routing_intent_bucket("请让两个专家辩论一下这个方案", has_media=False)
+    for idx in range(3):
+        agent._policy_store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="debate",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="rule",
+            execution_style="analyze_first",
+            intent_bucket=intent_bucket,
+            shadow_routing_eval_count=1,
+            shadow_routing_agree_count=0,
+        )
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal, context
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    async def _run() -> tuple[str, list[str]]:
+        with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+            text, media = await agent._answer_with_dag("请让两个专家辩论一下这个方案", tape=tape)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return text, media
+
+    text, media = asyncio.run(_run())
+
+    assert text == "ok"
+    assert media == []
+    assert [
+        call for call in gateway.structured_calls if call["model_cls"] == "RoutingDecision"
+    ] == []
+
+
+def test_answer_with_dag_allows_shadow_probe_for_unstable_bucket(tmp_path: Path) -> None:
+    class _ShadowEvalGateway(_FakeGateway):
+        async def complete_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            model_cls: type,
+            heartbeat: Any = None,
+            model_name: str | None = None,
+            timeout: float | None = None,
+        ):
+            del system_prompt, user_prompt, heartbeat, model_name, timeout
+            self.structured_calls.append(
+                {"model_cls": getattr(model_cls, "__name__", str(model_cls))}
+            )
+            if model_cls.__name__ == "RoutingDecision":
+                return model_cls(
+                    route_mode="debate",
+                    need_clarification=False,
+                    execution_style="analyze_first",
+                    parallelism_hint="serial",
+                    worker_hint="deny",
+                    explain="周期性探测",
+                )
+            return None
+
+    gateway = _ShadowEvalGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    intent_bucket = build_routing_intent_bucket("请让两个专家辩论一下这个方案", has_media=False)
+    for idx in range(2):
+        agent._policy_store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="debate",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="rule",
+            execution_style="analyze_first",
+            intent_bucket=intent_bucket,
+            shadow_routing_eval_count=1,
+            shadow_routing_agree_count=0,
+        )
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal, context
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    async def _run() -> tuple[str, list[str]]:
+        with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+            text, media = await agent._answer_with_dag("请让两个专家辩论一下这个方案", tape=tape)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return text, media
+
+    text, media = asyncio.run(_run())
+
+    assert text == "ok"
+    assert media == []
+    assert [
+        call for call in gateway.structured_calls if call["model_cls"] == "RoutingDecision"
+    ] != []
+
+
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:
     class _RepeatableDispatchGateway(_FakeGateway):
         def __init__(self) -> None:

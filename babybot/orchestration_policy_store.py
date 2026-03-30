@@ -431,7 +431,7 @@ class OrchestrationPolicyStore:
         execution_style = str(top["execution_style"])
         weighted_wins = float(top["wins"] or 0.0)
         win_rate = weighted_wins / max(total_weight, 1e-9)
-        if weighted_wins < float(min_effective_samples) or win_rate < float(min_win_rate):
+        if weighted_wins < float(min_effective_samples) or (win_rate + 1e-6) < float(min_win_rate):
             return None
         return {
             "route_mode": route_mode,
@@ -444,6 +444,75 @@ class OrchestrationPolicyStore:
                 shadow_agree_weight / max(shadow_eval_weight, 1e-9), 6
             ) if shadow_eval_weight > 0 else 0.0,
             "source": "intent_bucket_success",
+        }
+
+    def recommend_shadow_routing_budget(
+        self,
+        *,
+        chat_key: str,
+        intent_bucket: str,
+        limit: int = 12,
+        min_shadow_samples: int = 2,
+        min_shadow_agreement_rate: float = 0.5,
+        probe_every: int = 3,
+        pending_run_recorded: bool = False,
+    ) -> dict[str, Any]:
+        bucket = str(intent_bucket or "").strip()
+        chat = str(chat_key or "").strip()
+        if not bucket or not chat:
+            return {"enabled": True, "mode": "default", "samples": 0, "shadow_samples": 0}
+        rows = self._ensure_db().execute(
+            """
+            SELECT shadow_routing_eval_count,
+                   shadow_routing_agree_count
+            FROM policy_runtime_telemetry
+            WHERE chat_key = ?
+              AND intent_bucket = ?
+              AND router_source != 'model'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (chat, bucket, max(1, int(limit))),
+        ).fetchall()
+        samples = len(rows)
+        shadow_samples = sum(
+            1 for row in rows if int(row["shadow_routing_eval_count"] or 0) > 0
+        )
+        if shadow_samples < max(1, int(min_shadow_samples)):
+            return {
+                "enabled": True,
+                "mode": "warmup",
+                "samples": samples,
+                "shadow_samples": shadow_samples,
+            }
+        shadow_agree = sum(
+            1 for row in rows if int(row["shadow_routing_agree_count"] or 0) > 0
+        )
+        agreement_rate = shadow_agree / max(1, shadow_samples)
+        if agreement_rate >= float(min_shadow_agreement_rate):
+            return {
+                "enabled": True,
+                "mode": "normal",
+                "samples": samples,
+                "shadow_samples": shadow_samples,
+                "agreement_rate": round(agreement_rate, 6),
+            }
+        interval = max(1, int(probe_every))
+        probe_index = samples if pending_run_recorded else (samples + 1)
+        if probe_index % interval == 0:
+            return {
+                "enabled": True,
+                "mode": "probe",
+                "samples": samples,
+                "shadow_samples": shadow_samples,
+                "agreement_rate": round(agreement_rate, 6),
+            }
+        return {
+            "enabled": False,
+            "mode": "suppressed",
+            "samples": samples,
+            "shadow_samples": shadow_samples,
+            "agreement_rate": round(agreement_rate, 6),
         }
 
     def record_runtime_telemetry(

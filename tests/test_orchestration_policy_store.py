@@ -312,6 +312,60 @@ def test_policy_store_suppresses_intent_bucket_after_shadow_disagreement(tmp_pat
     assert recommendation is None
 
 
+def test_policy_store_recommends_shadow_budget_probe_after_low_agreement(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
+    for idx in range(2):
+        store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="intent_cache",
+            execution_style="direct_execute",
+            intent_bucket=intent_bucket,
+            shadow_routing_eval_count=1,
+            shadow_routing_agree_count=0,
+        )
+
+    budget = store.recommend_shadow_routing_budget(
+        chat_key="feishu:c1",
+        intent_bucket=intent_bucket,
+    )
+
+    assert budget["enabled"] is True
+    assert budget["mode"] == "probe"
+
+
+def test_policy_store_recommends_shadow_budget_suppress_between_probes(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
+    for idx in range(3):
+        store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="intent_cache",
+            execution_style="direct_execute",
+            intent_bucket=intent_bucket,
+            shadow_routing_eval_count=1,
+            shadow_routing_agree_count=0,
+        )
+
+    budget = store.recommend_shadow_routing_budget(
+        chat_key="feishu:c1",
+        intent_bucket=intent_bucket,
+    )
+
+    assert budget["enabled"] is False
+    assert budget["mode"] == "suppressed"
+
+
 def test_policy_store_reflection_route_recommendation_decays_stale_successes(tmp_path) -> None:
     store = OrchestrationPolicyStore(tmp_path / "policy.db")
     state_features = {

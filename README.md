@@ -181,6 +181,7 @@ uv run babybot
 - 意图桶缓存会对旧样本做时间衰减；如果后台 shadow routing 长期不一致，会自动暂时停用该桶，回退到模型 router
 - 当某一维反思长期低命中时，会自动降低该维 reflection 注入强度；当 parallelism / worker 维长期高命中时，会在“样本稀疏但可并行”的场景里温和放宽默认保守动作，并把 guardrail 实际触发率一并写入 runtime telemetry
 - 对非模型路由命中的请求，系统会在后台做一次不阻塞主会话的影子路由评估，只记录 agreement telemetry，不会影响当次会话结果
+- 当某个桶的 shadow agreement 变差后，系统不会每次都继续探测，而是按每 chat 的轻量预算做低频 probe，避免重复消耗模型调用
 - 极短问候/寒暄（如 `hi`、`你好`）会直接跳过执行约束抽取和 router 结构化调用，避免简单消息被前置 LLM 链路拖慢
 - 对明显的请求类型（如显式辩论、多角色讨论、显式查询/检索、显式执行型任务），会先走零模型规则路由；只有模糊请求才进入一次小模型 router
 - Router 只决定宏观路由（`tool_workflow` / `debate`）和执行倾向，不直接接管整个编排

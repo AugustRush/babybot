@@ -944,16 +944,28 @@ class OrchestratorAgent:
             and self._routing_enabled()
             and self._routing_shadow_eval_enabled()
         ):
-            self._spawn_background_task(
-                self._shadow_evaluate_routing_async(
-                    flow_id=flow_id,
-                    routing_snapshot=routing_snapshot,
-                    actual_decision=routing_decision,
-                    model_name=configured_router_model,
-                    timeout=min(routing_timeout, 1.0),
-                ),
-                label="routing-shadow-eval",
-            )
+            shadow_budget = {"enabled": True, "mode": "default"}
+            if (
+                chat_key
+                and runtime_telemetry_store is not None
+                and hasattr(runtime_telemetry_store, "recommend_shadow_routing_budget")
+            ):
+                shadow_budget = runtime_telemetry_store.recommend_shadow_routing_budget(
+                    chat_key=chat_key,
+                    intent_bucket=intent_bucket,
+                    pending_run_recorded=True,
+                )
+            if bool(shadow_budget.get("enabled", True)):
+                self._spawn_background_task(
+                    self._shadow_evaluate_routing_async(
+                        flow_id=flow_id,
+                        routing_snapshot=routing_snapshot,
+                        actual_decision=routing_decision,
+                        model_name=configured_router_model,
+                        timeout=min(routing_timeout, 1.0),
+                    ),
+                    label="routing-shadow-eval",
+                )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
         policy_hints.extend(self._routing_policy_hints(routing_decision))
