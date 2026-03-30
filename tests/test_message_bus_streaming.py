@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import datetime as dt
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -464,6 +465,59 @@ def test_message_bus_chat_semaphore_uses_lru_eviction() -> None:
     assert added is bus._chat_sems["chat-new"]
     assert "chat-0" in bus._chat_sems
     assert "chat-1" not in bus._chat_sems
+
+
+def test_message_bus_caches_send_intermediate_message_signature_support(monkeypatch) -> None:
+    class _IntermediateOrchestrator:
+        async def process_task(
+            self,
+            user_input: str,
+            chat_key: str = "",
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            send_intermediate_message: Any = None,
+        ) -> TaskResponse:
+            del user_input, chat_key, heartbeat, media_paths
+            if send_intermediate_message is not None:
+                await send_intermediate_message("阶段中")
+            return TaskResponse(text="ok")
+
+    channel = _FakeFeishuChannel(stream_reply=False)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_IntermediateOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    bus._supports_stream_callback = False
+    bus._supports_runtime_event_callback = False
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+    signature_calls = 0
+    original_signature = inspect.signature
+
+    def _counting_signature(obj: Any):
+        nonlocal signature_calls
+        signature_calls += 1
+        return original_signature(obj)
+
+    async def _run() -> None:
+        await bus.start()
+        try:
+            await bus.enqueue_and_wait(msg, timeout=3)
+            await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    monkeypatch.setattr("babybot.message_bus.inspect.signature", _counting_signature)
+
+    asyncio.run(_run())
+
+    assert signature_calls == 1
 
 
 

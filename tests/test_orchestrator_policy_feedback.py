@@ -54,6 +54,7 @@ def _make_agent() -> OrchestratorAgent:
     agent._init_lock = asyncio.Lock()
     agent._interactive_sessions = None
     agent._recent_flow_ids_by_chat = {}
+    agent._recent_flows_by_chat = {}
     agent._handoff_locks = {}
     agent._background_tasks = set()
     agent._policy_store = _FakePolicyStore()
@@ -108,6 +109,36 @@ async def test_policy_inspect_command_reports_policy_summary() -> None:
     assert "action=serial_dispatch" in response.text
 
 
+@pytest.mark.asyncio
+async def test_policy_feedback_can_target_specific_flow() -> None:
+    agent = _make_agent()
+    agent._recent_flow_ids_by_chat["feishu:c1"] = "flow-new"
+    agent._recent_flows_by_chat["feishu:c1"] = ["flow-new", "flow-old"]
+
+    response = await agent.process_task(
+        "@policy feedback flow-old bad 轮数失控",
+        chat_key="feishu:c1",
+    )
+
+    assert "已记录" in response.text
+    assert agent._policy_store.feedback_rows[0]["flow_id"] == "flow-old"
+
+
+@pytest.mark.asyncio
+async def test_policy_feedback_latest_requires_disambiguation_when_multiple_recent_flows() -> None:
+    agent = _make_agent()
+    agent._recent_flow_ids_by_chat["feishu:c1"] = "flow-new"
+    agent._recent_flows_by_chat["feishu:c1"] = ["flow-new", "flow-old"]
+
+    response = await agent.process_task(
+        "@policy feedback latest good 很稳",
+        chat_key="feishu:c1",
+    )
+
+    assert "请指定 flow_id" in response.text
+    assert agent._policy_store.feedback_rows == []
+
+
 def test_policy_choice_payload_includes_explain() -> None:
     agent = _make_agent()
 
@@ -121,3 +152,35 @@ def test_policy_choice_payload_includes_explain() -> None:
 
     assert payload["action_name"] == "serial"
     assert payload["explain"]
+
+
+def test_policy_feedback_can_target_specific_flow_sync() -> None:
+    agent = _make_agent()
+    agent._recent_flow_ids_by_chat["feishu:c1"] = "flow-new"
+    agent._recent_flows_by_chat["feishu:c1"] = ["flow-new", "flow-old"]
+
+    response = asyncio.run(
+        agent.process_task(
+            "@policy feedback flow-old bad 轮数失控",
+            chat_key="feishu:c1",
+        )
+    )
+
+    assert "已记录" in response.text
+    assert agent._policy_store.feedback_rows[0]["flow_id"] == "flow-old"
+
+
+def test_policy_feedback_latest_requires_disambiguation_sync() -> None:
+    agent = _make_agent()
+    agent._recent_flow_ids_by_chat["feishu:c1"] = "flow-new"
+    agent._recent_flows_by_chat["feishu:c1"] = ["flow-new", "flow-old"]
+
+    response = asyncio.run(
+        agent.process_task(
+            "@policy feedback latest good 很稳",
+            chat_key="feishu:c1",
+        )
+    )
+
+    assert "请指定 flow_id" in response.text
+    assert agent._policy_store.feedback_rows == []

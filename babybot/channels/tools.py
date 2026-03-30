@@ -59,8 +59,6 @@ class ChannelToolContext:
         self.message_id = message_id
         self.metadata = metadata or {}
 
-    _current: "ChannelToolContext | None" = None
-
     @classmethod
     def get_current(cls) -> "ChannelToolContext | None":
         return _channel_ctx_var.get(None)

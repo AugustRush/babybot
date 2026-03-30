@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import pkgutil
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ if TYPE_CHECKING:
     from .base import BaseChannel
 
 _SKIP_MODULES = {"base", "manager", "registry", "__init__"}
+logger = logging.getLogger(__name__)
 
 
 def discover_channels() -> dict[str, type[BaseChannel]]:
@@ -24,7 +26,12 @@ def discover_channels() -> dict[str, type[BaseChannel]]:
             continue
         try:
             module = importlib.import_module(f"babybot.channels.{info.name}")
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Failed to import channel module %s: %s",
+                info.name,
+                exc,
+            )
             continue
         for attr_name in dir(module):
             obj = getattr(module, attr_name)

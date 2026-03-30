@@ -50,6 +50,24 @@ def test_policy_learning_defaults_to_automatic_mode(tmp_path, monkeypatch):
     assert cfg.system.policy_learning_explore_ratio == -1.0
 
 
+def test_timeout_defaults_to_system_config_default_when_omitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "home" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config(str(config_path))
+
+    assert cfg.system.timeout == 600
+
+
 def test_system_context_fields_loaded_from_config(tmp_path, monkeypatch):
     monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
     config_path = tmp_path / "config.json"

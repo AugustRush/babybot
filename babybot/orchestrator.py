@@ -9,7 +9,6 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .agent_kernel import ExecutionContext
@@ -17,18 +16,27 @@ from .agent_kernel.dynamic_orchestrator import (
     DynamicOrchestrator,
     InMemoryChildTaskBus,
 )
+from .agent_kernel.execution_constraints import (
+    build_execution_constraint_hints,
+    infer_execution_constraints,
+)
 from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
 from .context_views import build_context_view
+from .execution_plan import build_execution_plan
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
 from .interactive_sessions.backends import ClaudeInteractiveBackend
+from .interactive_sessions.types import InteractiveRequest
 from .model_gateway import OpenAICompatibleGateway
 from .orchestration_policy import ConservativePolicySelector
 from .orchestration_policy_store import OrchestrationPolicyStore
 from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
+from .runtime_job_store import RuntimeJobStore
+from .runtime_feedback_commands import parse_policy_command
+from .task_contract import build_task_contract
 
 if TYPE_CHECKING:
     from .heartbeat import Heartbeat
@@ -84,12 +92,16 @@ class OrchestratorAgent:
         self._policy_store = OrchestrationPolicyStore(
             self.config.home_dir / "memory" / "policy.db"
         )
+        self._runtime_job_store = RuntimeJobStore(
+            self.config.home_dir / "memory" / "jobs.db"
+        )
         self._child_task_bus = InMemoryChildTaskBus()
         self._task_heartbeat_registry = TaskHeartbeatRegistry()
         self._handoff_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._init_lock = asyncio.Lock()
         self._initialized = False
         self._recent_flow_ids_by_chat: OrderedDict[str, str] = OrderedDict()
+        self._recent_flows_by_chat: OrderedDict[str, list[str]] = OrderedDict()
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def _build_interactive_session_manager(self) -> InteractiveSessionManager:
@@ -111,6 +123,15 @@ class OrchestratorAgent:
         self._recent_flow_ids_by_chat[chat_key] = flow_id
         while len(self._recent_flow_ids_by_chat) > self._FLOW_CACHE_LIMIT:
             self._recent_flow_ids_by_chat.popitem(last=False)
+        recent_flows = getattr(self, "_recent_flows_by_chat", None)
+        if not isinstance(recent_flows, OrderedDict):
+            recent_flows = OrderedDict(recent_flows or {})
+            self._recent_flows_by_chat = recent_flows
+        history = [item for item in recent_flows.get(chat_key, []) if item != flow_id]
+        history.insert(0, flow_id)
+        recent_flows[chat_key] = history[:5]
+        while len(recent_flows) > self._FLOW_CACHE_LIMIT:
+            recent_flows.popitem(last=False)
 
     def _get_handoff_lock(self, chat_key: str) -> asyncio.Lock:
         if not isinstance(self._handoff_locks, OrderedDict):
@@ -382,7 +403,22 @@ class OrchestratorAgent:
         )
         scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
         worker_policy = self.choose_worker_policy(features=scheduling_features)
+        execution_constraints = await infer_execution_constraints(
+            self.gateway,
+            user_input,
+            heartbeat=heartbeat,
+            default_max_total_seconds=(
+                float(getattr(self.config.system, "timeout", 0) or 0) or None
+            ),
+        )
+        task_contract = build_task_contract(
+            user_input=user_input,
+            chat_key=chat_key,
+            execution_constraints=execution_constraints,
+        )
+        execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
+        policy_hints.extend(build_execution_constraint_hints(execution_constraints))
         for payload in (scheduling_policy, worker_policy):
             hint = str(payload.get("hint", "") or "").strip()
             if hint and hint not in policy_hints:
@@ -407,6 +443,9 @@ class OrchestratorAgent:
                     ("runtime_event_callback", runtime_event_callback),
                     ("send_intermediate_message", send_intermediate_message),
                     ("policy_hints", policy_hints),
+                    ("execution_constraints", execution_constraints),
+                    ("task_contract", task_contract),
+                    ("execution_plan", execution_plan),
                 ]
                 if v is not None
             },
@@ -432,10 +471,10 @@ class OrchestratorAgent:
         try:
             if heartbeat is not None:
                 result = await heartbeat.watch(
-                    orchestrator.run(goal=user_input, context=context),
+                    orchestrator.run(goal=task_contract.goal, context=context),
                 )
             else:
-                result = await orchestrator.run(goal=user_input, context=context)
+                result = await orchestrator.run(goal=task_contract.goal, context=context)
         except Exception as exc:
             self._persist_policy_events(
                 flow_id=flow_id,
@@ -601,6 +640,9 @@ class OrchestratorAgent:
         policy_control = self._parse_policy_feedback_command(user_input)
         if policy_control is not None:
             return await self._handle_policy_feedback_command(chat_key, policy_control)
+        job_control = self._parse_job_command(user_input)
+        if job_control is not None:
+            return await self._handle_job_command(chat_key, job_control)
         if not self._initialized:
             async with self._init_lock:
                 if not self._initialized:
@@ -618,13 +660,19 @@ class OrchestratorAgent:
                     chat_key, control
                 )
             if self._interactive_sessions.has_active_session(chat_key):
-                return await self._handle_interactive_session_message(
-                    chat_key, user_input
+                reply = await self._handle_interactive_session_message(
+                    chat_key,
+                    user_input,
+                    media_paths=media_paths,
+                    heartbeat=heartbeat,
+                    runtime_event_callback=runtime_event_callback,
                 )
+                if reply is not None:
+                    return reply
 
         # --- Tape context ---
         tape: Tape | None = None
-        if chat_key:
+        if chat_key and self.tape_store is not None:
             logger.info("Loading tape for chat_key=%s", chat_key)
             tape = self.tape_store.get_or_create(chat_key)
             logger.info("Tape loaded, observing user message...")
@@ -681,8 +729,24 @@ class OrchestratorAgent:
 
             wrapped_runtime_event_callback = _record_runtime_event
 
+        runtime_job_store = getattr(self, "_runtime_job_store", None)
+        runtime_job = None
+        if chat_key and runtime_job_store is not None:
+            runtime_job = runtime_job_store.create(chat_key=chat_key, goal=user_input)
+            runtime_job_store.transition(
+                runtime_job.job_id,
+                "planning",
+                progress_message="已接收任务，准备执行",
+            )
+
         try:
             logger.info("Starting _answer_with_dag")
+            if runtime_job_store is not None and runtime_job is not None:
+                runtime_job_store.transition(
+                    runtime_job.job_id,
+                    "running",
+                    progress_message="编排执行中",
+                )
             text, collected_media = await self._answer_with_dag(
                 user_input,
                 tape=tape,
@@ -706,9 +770,23 @@ class OrchestratorAgent:
                     self._maybe_handoff(tape, chat_key),
                     label=f"handoff:{chat_key}",
                 )
+            if runtime_job_store is not None and runtime_job is not None:
+                runtime_job_store.transition(
+                    runtime_job.job_id,
+                    "completed",
+                    progress_message="执行完成",
+                    result_text=text,
+                )
 
             return TaskResponse(text=text, media_paths=collected_media)
         except Exception as exc:
+            if runtime_job_store is not None and runtime_job is not None:
+                runtime_job_store.transition(
+                    runtime_job.job_id,
+                    "failed",
+                    progress_message="执行失败",
+                    error=str(exc),
+                )
             logger.exception("Error processing task")
             return TaskResponse(text=f"处理任务时出错：{exc}")
 
@@ -853,14 +931,45 @@ class OrchestratorAgent:
     def _parse_policy_feedback_command(
         user_input: str,
     ) -> dict[str, str] | None:
+        return parse_policy_command(user_input)
+
+    @staticmethod
+    def _parse_job_command(
+        user_input: str,
+    ) -> dict[str, str] | None:
         text = (user_input or "").strip()
-        if not text.lower().startswith("@policy"):
+        if not text.lower().startswith("@job"):
             return None
-        parts = text.split(maxsplit=3)
-        action = parts[1].lower() if len(parts) >= 2 else ""
-        rating = parts[2].lower() if len(parts) >= 3 else ""
-        reason = parts[3].strip() if len(parts) >= 4 else ""
-        return {"action": action, "rating": rating, "reason": reason}
+        parts = text.split()
+        action = parts[1].lower() if len(parts) >= 2 else "status"
+        target = parts[2].strip() if len(parts) >= 3 else "latest"
+        return {"action": action, "target": target}
+
+    def _resolve_policy_feedback_flow_id(
+        self,
+        *,
+        chat_key: str,
+        target: str,
+    ) -> tuple[str, str]:
+        normalized_target = str(target or "").strip()
+        recent_latest = getattr(self, "_recent_flow_ids_by_chat", {}) or {}
+        recent_history = getattr(self, "_recent_flows_by_chat", {}) or {}
+        history = [
+            str(item).strip()
+            for item in recent_history.get(chat_key, []) or []
+            if str(item).strip()
+        ]
+        if not history:
+            latest = str(recent_latest.get(chat_key, "") or "").strip()
+            if latest:
+                history = [latest]
+        if normalized_target and normalized_target not in {"latest"}:
+            return normalized_target, ""
+        if not history:
+            return "", "当前会话没有可反馈的最近任务。"
+        if normalized_target == "latest" and len(history) > 1:
+            return "", "最近有多个运行记录，请指定 flow_id 再反馈。"
+        return history[0], ""
 
     async def _handle_policy_feedback_command(
         self,
@@ -868,24 +977,32 @@ class OrchestratorAgent:
         control: dict[str, str],
     ) -> TaskResponse:
         if control.get("action", "") == "inspect":
+            target = str(control.get("target", "") or "").strip()
+            if target and not any(
+                target == decision_kind
+                for decision_kind in ("decomposition", "scheduling", "worker")
+            ):
+                return TaskResponse(text=self.inspect_runtime_flow(flow_id=target))
             return TaskResponse(
                 text=self.inspect_policy(
                     chat_key=chat_key,
-                    decision_kind=str(control.get("rating", "") or "").strip(),
+                    decision_kind=target,
                 )
             )
         if control.get("action", "") != "feedback":
-            return TaskResponse(text="支持的命令：@policy feedback good|bad <reason> / @policy inspect [decision_kind]")
+            return TaskResponse(text="支持的命令：@policy feedback <flow_id|latest> good|bad <reason> / @policy inspect [decision_kind|flow_id]")
         rating = str(control.get("rating", "") or "").strip().lower()
         reason = str(control.get("reason", "") or "").strip()
         if rating not in {"good", "bad"} or not reason:
-            return TaskResponse(text="用法：@policy feedback good|bad <reason>")
+            return TaskResponse(text="用法：@policy feedback <flow_id|latest> good|bad <reason>")
         if not chat_key:
             return TaskResponse(text="缺少 chat_key，无法记录策略反馈。")
-        recent = getattr(self, "_recent_flow_ids_by_chat", {}) or {}
-        flow_id = str(recent.get(chat_key, "") or "").strip()
-        if not flow_id:
-            return TaskResponse(text="当前会话没有可反馈的最近任务。")
+        flow_id, error = self._resolve_policy_feedback_flow_id(
+            chat_key=chat_key,
+            target=str(control.get("target", "") or "").strip(),
+        )
+        if error:
+            return TaskResponse(text=error)
         self._policy_store.record_feedback(
             flow_id=flow_id,
             chat_key=chat_key,
@@ -893,6 +1010,27 @@ class OrchestratorAgent:
             reason=reason,
         )
         return TaskResponse(text=f"已记录策略反馈：{rating}。")
+
+    async def _handle_job_command(
+        self,
+        chat_key: str,
+        control: dict[str, str],
+    ) -> TaskResponse:
+        if control.get("action", "") != "status":
+            return TaskResponse(text="支持的命令：@job status <job_id|latest>")
+        store = getattr(self, "_runtime_job_store", None)
+        if store is None:
+            return TaskResponse(text="当前未启用作业存储。")
+        target = str(control.get("target", "") or "latest").strip()
+        job = store.latest_for_chat(chat_key) if target == "latest" else store.get(target)
+        if job is None:
+            return TaskResponse(text="未找到对应作业。")
+        return TaskResponse(
+            text=(
+                f"[Job]\njob_id={job.job_id}\nstate={job.state}\n"
+                f"progress={job.progress_message or '-'}"
+            )
+        )
 
     async def _handle_interactive_session_command(
         self, chat_key: str, control: dict[str, str]
@@ -930,9 +1068,79 @@ class OrchestratorAgent:
         return TaskResponse(text="支持的命令：@session start <backend> / status / stop")
 
     async def _handle_interactive_session_message(
-        self, chat_key: str, user_input: str
-    ) -> TaskResponse:
-        reply = await self._interactive_sessions.send(chat_key, user_input)
+        self,
+        chat_key: str,
+        user_input: str,
+        *,
+        media_paths: list[str] | None = None,
+        heartbeat: Heartbeat | None = None,
+        runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
+    ) -> TaskResponse | None:
+        task_contract = build_task_contract(
+            user_input=user_input,
+            chat_key=chat_key,
+        )
+        request = InteractiveRequest(
+            text=user_input,
+            media_paths=tuple(media_paths or ()),
+            contract_mode=task_contract.mode,
+        )
+        if runtime_event_callback is not None:
+            maybe = runtime_event_callback(
+                {
+                    "event": "running",
+                    "task_id": "interactive_session",
+                    "flow_id": f"interactive:{chat_key}",
+                    "payload": {
+                        "stage": "interactive_session",
+                        "state": "running",
+                        "message": "交互会话处理中",
+                    },
+                }
+            )
+            if inspect.isawaitable(maybe):
+                await maybe
+        if heartbeat is not None:
+            async with heartbeat.keep_alive():
+                reply = await self._interactive_sessions.send(chat_key, request)
+        else:
+            reply = await self._interactive_sessions.send(chat_key, request)
+        if reply.expired:
+            return None
+        tape = self.tape_store.get_or_create(chat_key) if chat_key and self.tape_store else None
+        if tape is not None:
+            pending_entries = []
+            if tape.last_anchor() is None:
+                pending_entries.append(
+                    tape.append("anchor", {"name": "session/start", "state": {}})
+                )
+            content_for_tape = user_input
+            if media_paths:
+                content_for_tape = f"{user_input}\n[附带 {len(media_paths)} 张图片]"
+            pending_entries.append(
+                tape.append("message", {"role": "user", "content": content_for_tape})
+            )
+            pending_entries.append(
+                tape.append("message", {"role": "assistant", "content": reply.text})
+            )
+            self.tape_store.save_entries(chat_key, pending_entries)
+            if hasattr(self, "memory_store") and self.memory_store is not None:
+                self.memory_store.observe_user_message(chat_key, user_input)
+        if runtime_event_callback is not None:
+            maybe = runtime_event_callback(
+                {
+                    "event": "completed",
+                    "task_id": "interactive_session",
+                    "flow_id": f"interactive:{chat_key}",
+                    "payload": {
+                        "stage": "interactive_session",
+                        "state": "completed",
+                        "message": "交互会话完成",
+                    },
+                }
+            )
+            if inspect.isawaitable(maybe):
+                await maybe
         return TaskResponse(
             text=reply.text,
             media_paths=list(reply.media_paths or []),

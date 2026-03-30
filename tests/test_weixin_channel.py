@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import logging
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 from babybot.channels.base import InboundMessage
 from babybot.channels.registry import discover_channels
 from babybot.channels.weixin import WeixinChannel
@@ -23,6 +27,30 @@ class _Manager:
 def test_channel_registry_discovers_weixin_channel() -> None:
     channels = discover_channels()
     assert "weixin" in channels
+
+
+def test_channel_registry_logs_import_failures(caplog) -> None:
+    package = SimpleNamespace(__path__=["/tmp/fake_channels"])
+    original_import_module = importlib.import_module
+
+    def _fake_import_module(name: str):
+        if name == "babybot.channels":
+            return package
+        if name == "babybot.channels.broken":
+            raise RuntimeError("boom")
+        return original_import_module(name)
+
+    with patch("babybot.channels.registry.importlib.import_module", side_effect=_fake_import_module):
+        with patch(
+            "babybot.channels.registry.pkgutil.iter_modules",
+            return_value=[SimpleNamespace(name="broken")],
+        ):
+            with caplog.at_level(logging.WARNING):
+                channels = discover_channels()
+
+    assert channels == {}
+    assert "broken" in caplog.text
+    assert "boom" in caplog.text
 
 
 def test_weixin_send_response_sends_text_chunks() -> None:

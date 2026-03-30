@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..types import InteractiveReply
+from ..types import InteractiveReply, InteractiveRequest
 
 
 @dataclass
@@ -53,12 +53,12 @@ class ClaudeInteractiveBackend:
         )
 
     async def send(
-        self, handle: ClaudeSessionHandle, message: str
+        self, handle: ClaudeSessionHandle, message: InteractiveRequest
     ) -> InteractiveReply:
         if handle.is_stopped:
             raise RuntimeError("Claude 交互会话已关闭，请重新启动。")
         output = await self._run_claude(
-            prompt=message,
+            prompt=message.text,
             env=handle.env,
             session_id=handle.session_id,
         )

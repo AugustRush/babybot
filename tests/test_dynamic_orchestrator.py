@@ -7,10 +7,9 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock
 
-import pytest
-
 from babybot.agent_kernel import (
     ExecutionContext,
+    ModelMessage,
     ModelRequest,
     ModelResponse,
     ModelToolCall,
@@ -20,6 +19,8 @@ from babybot.agent_kernel.dynamic_orchestrator import (
     InMemoryChildTaskBus,
     _build_resource_catalog,
 )
+from babybot.execution_plan import build_execution_plan
+from babybot.task_contract import build_task_contract
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -1387,8 +1388,6 @@ def test_child_task_bus_clears_events_after_flow_completion() -> None:
 
 def test_orchestrator_accepts_executor_registry() -> None:
     """DynamicOrchestrator uses ExecutorRegistry when provided."""
-    from babybot.agent_kernel.executors import ExecutorRegistry
-
     gateway = DummyGateway([_reply_tool_call("done")])
     rm = DummyResourceManager()
     orch = DynamicOrchestrator(
@@ -1449,6 +1448,176 @@ def test_team_dispatch_and_reply() -> None:
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
     result = asyncio.run(orch.run("Should we refactor?", ExecutionContext()))
     assert "refactor" in result.conclusion.lower()
+
+
+def test_team_dispatch_enforces_user_round_cap_from_context() -> None:
+    team_args = {
+        "topic": "Should we refactor?",
+        "agents": [
+            {"id": "pro", "role": "proponent", "description": "For refactoring"},
+            {"id": "con", "role": "opponent", "description": "Against refactoring"},
+        ],
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Pro argument"),
+            ModelResponse(text="Con argument"),
+            _reply_tool_call("Debate finished."),
+        ]
+    )
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    context = ExecutionContext(
+        state={
+            "execution_constraints": {
+                "mode": "interactive",
+                "hard_limits": {
+                    "max_rounds": 1,
+                    "max_total_seconds": 600.0,
+                    "max_turn_seconds": None,
+                },
+                "soft_preferences": {"resolution_style": "single_pass"},
+                "degradation": {"on_budget_exhausted": "summarize_partial"},
+            }
+        }
+    )
+
+    result = asyncio.run(orch.run("Should we refactor?", context))
+
+    assert result.conclusion == "Debate finished."
+    assert gateway._call_idx == 4
+
+
+def test_team_dispatch_uses_task_contract_round_budget_when_present() -> None:
+    team_args = {
+        "topic": "Should we refactor?",
+        "agents": [
+            {"id": "pro", "role": "proponent", "description": "For refactoring"},
+            {"id": "con", "role": "opponent", "description": "Against refactoring"},
+        ],
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Pro argument"),
+            ModelResponse(text="Con argument"),
+            _reply_tool_call("Debate finished."),
+        ]
+    )
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    context = ExecutionContext(
+        state={
+            "task_contract": build_task_contract(
+                user_input="两个专家讨论，一轮定胜负。",
+                chat_key="feishu:c1",
+            )
+        }
+    )
+
+    result = asyncio.run(orch.run("Should we refactor?", context))
+
+    assert result.conclusion == "Debate finished."
+    assert gateway._call_idx == 4
+
+
+def test_child_task_runtime_events_include_plan_step_id() -> None:
+    class SmartGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    ModelResponse(
+                        text="",
+                        tool_calls=(
+                            ModelToolCall(
+                                call_id="c1",
+                                name="dispatch_task",
+                                arguments={
+                                    "resource_id": "skill.weather",
+                                    "description": "查询杭州天气",
+                                },
+                            ),
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                ]
+            )
+            self._task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            if self._call_idx == 0:
+                return await super().generate(request, context)
+            if self._call_idx == 1:
+                for msg in reversed(request.messages):
+                    if msg.role == "tool" and not msg.content.startswith("error:"):
+                        self._task_id = msg.content
+                        break
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c2",
+                            name="wait_for_tasks",
+                            arguments={"task_ids": [self._task_id]},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("done")
+
+    gateway = SmartGateway()
+    bus = InMemoryChildTaskBus()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway, child_task_bus=bus)
+    contract = build_task_contract(
+        user_input="请查询杭州天气",
+        chat_key="feishu:c1",
+    )
+    seen_events: list[dict[str, Any]] = []
+
+    async def _capture(event: Any) -> None:
+        if hasattr(event, "payload"):
+            seen_events.append(dict(event.payload))
+        elif isinstance(event, dict):
+            seen_events.append(dict(event.get("payload") or {}))
+
+    context = ExecutionContext(
+        session_id="flow-plan",
+        state={
+            "execution_plan": build_execution_plan(contract),
+            "runtime_event_callback": _capture,
+        },
+    )
+
+    asyncio.run(orch.run("请查询杭州天气", context))
+
+    assert seen_events
+    assert seen_events[0]["plan_step_id"] == "step_answer"
 
 
 def test_dispatch_team_too_few_agents() -> None:

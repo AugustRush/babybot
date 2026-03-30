@@ -182,7 +182,7 @@ class Config:
         self.system = SystemConfig(
             console_output=system_conf.get("console_output", False),
             enable_meta_tool=system_conf.get("enable_meta_tool", True),
-            timeout=system_conf.get("timeout", 180),
+            timeout=system_conf.get("timeout", 600),
             subtask_timeout=system_conf.get("subtask_timeout", 60),
             skill_route_timeout=system_conf.get("skill_route_timeout", 3.0),
             tracing_endpoint=system_conf.get("tracing_endpoint", ""),

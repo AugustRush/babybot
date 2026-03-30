@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from types import SimpleNamespace
 
 from babybot.agent_kernel import (
     ExecutionContext,
@@ -14,11 +16,11 @@ from babybot.agent_kernel import (
     TaskContract,
     Tool,
     ToolContext,
-    ToolLease,
     ToolRegistry,
     ToolResult,
 )
 from babybot.resource import _check_shell_safety
+from babybot.resource_workspace_tools import WorkspaceToolSuite
 
 
 # ---------------------------------------------------------------------------
@@ -297,3 +299,53 @@ def test_shell_safety_allows_safe_commands() -> None:
     assert _check_shell_safety("git status") is None
     assert _check_shell_safety("pip install requests") is None
     assert _check_shell_safety("echo hello") is None
+
+
+def test_python_safety_blocks_dangerous_code(monkeypatch, tmp_path: Path) -> None:
+    owner = SimpleNamespace(
+        _get_active_write_root=lambda: tmp_path,
+        _get_user_python=lambda: "python3",
+        _clean_env=lambda: {},
+        _coerce_timeout=lambda timeout, default=300.0: default,
+    )
+    suite = WorkspaceToolSuite(owner)
+
+    async def _unexpected_spawn(*args, **kwargs):
+        raise AssertionError("python subprocess should not be spawned")
+
+    monkeypatch.setattr(
+        "babybot.resource_workspace_tools.asyncio.create_subprocess_exec",
+        _unexpected_spawn,
+    )
+
+    result = asyncio.run(
+        suite.execute_python_code("import shutil\nshutil.rmtree('/tmp/demo')")
+    )
+
+    assert result.startswith("Blocked:")
+
+
+def test_workspace_file_operations_use_to_thread(monkeypatch, tmp_path: Path) -> None:
+    file_path = tmp_path / "demo.txt"
+    owner = SimpleNamespace(
+        _resolve_workspace_file=lambda path: (str(file_path), None),
+    )
+    suite = WorkspaceToolSuite(owner)
+    to_thread_calls: list[str] = []
+    original_to_thread = asyncio.to_thread
+
+    async def _record_to_thread(func, *args, **kwargs):
+        to_thread_calls.append(getattr(func, "__name__", type(func).__name__))
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("babybot.resource_workspace_tools.asyncio.to_thread", _record_to_thread)
+
+    async def _run() -> None:
+        await suite.write_text_file("demo.txt", "alpha\nbeta\n")
+        content = await suite.view_text_file("demo.txt")
+        assert content == "alpha\nbeta\n"
+        await suite.insert_text_file("demo.txt", "zero\n", 1)
+
+    asyncio.run(_run())
+
+    assert len(to_thread_calls) >= 3

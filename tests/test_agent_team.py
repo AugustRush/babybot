@@ -4,6 +4,7 @@
 from __future__ import annotations
 import asyncio
 import pytest
+from babybot.agent_kernel.execution_constraints import TeamExecutionPolicy
 from babybot.agent_kernel.team import Mailbox, SharedTaskList, TeamTask, TeamRunner
 
 
@@ -277,3 +278,30 @@ async def test_team_runner_on_round_start_fires_for_each_round() -> None:
 
     assert result.rounds == 2
     assert started_rounds == [1, 2]
+
+
+def test_team_runner_summarizes_partial_result_when_turn_budget_exceeded() -> None:
+    async def slow_executor(agent_id: str, prompt: str, ctx: dict) -> str:
+        del agent_id, prompt, ctx
+        await asyncio.sleep(0.05)
+        return "slow"
+
+    runner = TeamRunner(
+        executor=slow_executor,
+        max_rounds=3,
+        policy=TeamExecutionPolicy(max_turn_seconds=0.01, on_budget_exhausted="summarize_partial"),
+    )
+    result = asyncio.run(
+        runner.run_debate(
+            topic="test",
+            agents=[
+                {"id": "a", "role": "X", "description": "x"},
+                {"id": "b", "role": "Y", "description": "y"},
+            ],
+        )
+    )
+
+    assert result.rounds == 0
+    assert result.completed is False
+    assert result.termination_reason == "turn_timeout"
+    assert "partial" in result.summary.lower()

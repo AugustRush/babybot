@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import shlex
 from pathlib import Path
@@ -34,11 +33,28 @@ _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"tee\s+/etc/", "write to /etc via tee"),
 ]
 
+_DANGEROUS_PYTHON_PATTERNS: list[tuple[str, str]] = [
+    (r"shutil\.rmtree\s*\(", "recursive delete"),
+    (r"os\.(remove|unlink|rmdir)\s*\(", "file delete"),
+    (r"Path\s*\([^)]*\)\.(unlink|rmdir)\s*\(", "path delete"),
+    (r"subprocess\.(run|Popen|call|check_output)\s*\(", "subprocess execution"),
+    (r"os\.system\s*\(", "shell execution"),
+    (r"eval\s*\(", "dynamic eval"),
+    (r"exec\s*\(", "dynamic exec"),
+]
+
 
 def check_shell_safety(command: str) -> str | None:
     for pattern, label in _DANGEROUS_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return f"Blocked: command matches dangerous pattern ({label})"
+    return None
+
+
+def check_python_safety(code: str) -> str | None:
+    for pattern, label in _DANGEROUS_PYTHON_PATTERNS:
+        if re.search(pattern, code, re.IGNORECASE | re.DOTALL):
+            return f"Blocked: python code matches dangerous pattern ({label})"
     return None
 
 
@@ -53,6 +69,9 @@ class WorkspaceToolSuite:
         **kwargs: Any,
     ) -> str:
         del kwargs
+        safety_error = check_python_safety(code)
+        if safety_error:
+            return safety_error
         ws = str(self._owner._get_active_write_root())
         proc = await asyncio.create_subprocess_exec(
             self._owner._get_user_python(),
@@ -146,15 +165,19 @@ class WorkspaceToolSuite:
         resolved, err = self._owner._resolve_workspace_file(file_path)
         if err:
             return err
-        with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
+        lines = await asyncio.to_thread(
+            Path(resolved).read_text,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        line_list = lines.splitlines(keepends=True)
         if not ranges:
-            return "".join(lines)
+            return "".join(line_list)
         chunks: list[str] = []
         for i in range(0, len(ranges), 2):
             start = max(1, int(ranges[i]))
             end = int(ranges[i + 1]) if i + 1 < len(ranges) else start
-            chunks.extend(lines[start - 1 : end])
+            chunks.extend(line_list[start - 1 : end])
         return "".join(chunks)
 
     async def write_text_file(
@@ -167,20 +190,20 @@ class WorkspaceToolSuite:
         if err:
             return err
         target = Path(resolved)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         if not ranges:
-            target.write_text(content, encoding="utf-8")
+            await asyncio.to_thread(target.write_text, content, encoding="utf-8")
             return f"Wrote file: {target}"
-        lines = (
-            target.read_text(encoding="utf-8").splitlines(keepends=True)
-            if target.exists()
-            else []
-        )
+        if target.exists():
+            existing = await asyncio.to_thread(target.read_text, encoding="utf-8")
+            lines = existing.splitlines(keepends=True)
+        else:
+            lines = []
         start = max(1, int(ranges[0])) if ranges else 1
         end = int(ranges[1]) if ranges and len(ranges) > 1 else start
         replacement = content.splitlines(keepends=True)
         lines[start - 1 : end] = replacement
-        target.write_text("".join(lines), encoding="utf-8")
+        await asyncio.to_thread(target.write_text, "".join(lines), encoding="utf-8")
         return f"Updated file range in: {target}"
 
     async def insert_text_file(
@@ -193,13 +216,13 @@ class WorkspaceToolSuite:
         if err:
             return err
         target = Path(resolved)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        lines = (
-            target.read_text(encoding="utf-8").splitlines(keepends=True)
-            if target.exists()
-            else []
-        )
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        if target.exists():
+            existing = await asyncio.to_thread(target.read_text, encoding="utf-8")
+            lines = existing.splitlines(keepends=True)
+        else:
+            lines = []
         idx = max(0, min(len(lines), int(line_number) - 1))
         lines[idx:idx] = content.splitlines(keepends=True)
-        target.write_text("".join(lines), encoding="utf-8")
+        await asyncio.to_thread(target.write_text, "".join(lines), encoding="utf-8")
         return f"Inserted text into: {target}"

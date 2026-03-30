@@ -8,6 +8,15 @@ from typing import Any
 class InteractiveReply:
     text: str = ""
     media_paths: list[str] = field(default_factory=list)
+    expired: bool = False
+
+
+@dataclass(frozen=True)
+class InteractiveRequest:
+    text: str
+    media_paths: tuple[str, ...] = ()
+    job_id: str = ""
+    contract_mode: str = "interactive_session"
 
 
 @dataclass

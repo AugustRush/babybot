@@ -4,8 +4,9 @@ import asyncio
 
 import pytest
 
-from babybot.orchestrator import OrchestratorAgent, TaskResponse
+from babybot.orchestrator import OrchestratorAgent
 from babybot.interactive_sessions.types import (
+    InteractiveRequest,
     InteractiveReply,
     InteractiveSession,
     InteractiveSessionStatus,
@@ -20,6 +21,8 @@ class FakeSessionManager:
         self.stop_all_calls = 0
         self.started_backend_name = ""
         self._active_session = active_session
+        self.last_request: InteractiveRequest | None = None
+        self.expired_on_send = False
 
     async def start(self, *, chat_key: str, backend_name: str) -> InteractiveSession:
         self.start_calls += 1
@@ -34,9 +37,18 @@ class FakeSessionManager:
             handle={},
         )
 
-    async def send(self, chat_key: str, message: str) -> InteractiveReply:
+    async def send(self, chat_key: str, message: str | InteractiveRequest) -> InteractiveReply:
         del chat_key
         self.send_calls += 1
+        if isinstance(message, InteractiveRequest):
+            self.last_request = message
+            if self.expired_on_send:
+                self._active_session = False
+                return InteractiveReply(
+                    text="当前交互会话已超时关闭，请重新使用 @session start <backend> 启动。",
+                    expired=True,
+                )
+            return InteractiveReply(text="backend reply" if message.text else "")
         return InteractiveReply(text="backend reply" if message else "")
 
     async def stop(self, chat_key: str, reason: str = "user_stop") -> bool:
@@ -156,6 +168,34 @@ def test_get_status_includes_interactive_session_summary():
 
     assert "interactive_sessions" in status
     assert status["interactive_sessions"]["active_count"] == 1
+
+
+def test_process_task_interactive_session_message_keeps_media_paths() -> None:
+    agent = make_agent_with_session_manager(active_session=True)
+
+    response = asyncio.run(
+        agent.process_task(
+            "看这张图",
+            chat_key="feishu:c1",
+            media_paths=["/tmp/demo.png"],
+        )
+    )
+
+    assert response.text == "backend reply"
+    assert agent._interactive_sessions.last_request is not None
+    assert agent._interactive_sessions.last_request.media_paths == ("/tmp/demo.png",)
+
+
+def test_process_task_falls_back_to_dag_when_session_expires_on_send() -> None:
+    agent = make_agent_with_session_manager(active_session=True)
+    agent._interactive_sessions.expired_on_send = True
+
+    response = asyncio.run(
+        agent.process_task("继续", chat_key="feishu:c1")
+    )
+
+    assert response.text == "dag reply"
+    assert agent.gateway_calls == 1
 
 
 def test_reset_stops_active_sessions():

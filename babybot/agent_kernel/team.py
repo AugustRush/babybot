@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .execution_constraints import TeamExecutionPolicy
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -142,6 +144,8 @@ class DebateResult:
     rounds: int
     transcript: list[dict[str, str]]
     summary: str
+    completed: bool = True
+    termination_reason: str = "completed"
 
 
 class TeamRunner:
@@ -155,9 +159,47 @@ class TeamRunner:
         self,
         executor: Any,  # async callable(agent_id, prompt, context) -> str
         max_rounds: int = 5,
+        policy: TeamExecutionPolicy | None = None,
     ) -> None:
         self._executor = executor
-        self._max_rounds = max_rounds
+        self._policy = policy or TeamExecutionPolicy(max_rounds=max_rounds)
+        self._max_rounds = max(1, int(self._policy.max_rounds or max_rounds))
+
+    @staticmethod
+    def _build_partial_summary(
+        topic: str,
+        transcript: list[dict[str, str]],
+        agents: list[dict[str, str]],
+        reason: str,
+    ) -> str:
+        summary_parts = [
+            f"Partial debate summary for '{topic}' ({reason}).",
+        ]
+        if not transcript:
+            summary_parts.append("No agent completed a full turn before the budget was exhausted.")
+            return "\n".join(summary_parts)
+        summary_parts.append("Latest completed arguments:")
+        for entry in transcript[-len(agents) :]:
+            summary_parts.append(f"- {entry['role']}: {entry['content'][:200]}")
+        return "\n".join(summary_parts)
+
+    def _partial_result(
+        self,
+        *,
+        topic: str,
+        transcript: list[dict[str, str]],
+        agents: list[dict[str, str]],
+        rounds: int,
+        reason: str,
+    ) -> DebateResult:
+        return DebateResult(
+            topic=topic,
+            rounds=rounds,
+            transcript=transcript,
+            summary=self._build_partial_summary(topic, transcript, agents, reason),
+            completed=False,
+            termination_reason=reason,
+        )
 
     async def run_debate(
         self,
@@ -176,12 +218,26 @@ class TeamRunner:
         transcript: list[dict[str, str]] = []
         last_output = ""
         agent_ids = [a["id"] for a in agents]
+        loop = asyncio.get_running_loop()
+        deadline = (
+            loop.time() + float(self._policy.max_total_seconds)
+            if self._policy.max_total_seconds is not None
+            else None
+        )
         logger.info(
             "Debate started: topic=%r agents=%s max_rounds=%d",
             topic, agent_ids, self._max_rounds,
         )
 
         for round_num in range(1, self._max_rounds + 1):
+            if deadline is not None and loop.time() >= deadline:
+                return self._partial_result(
+                    topic=topic,
+                    transcript=transcript,
+                    agents=agents,
+                    rounds=max(0, round_num - 1),
+                    reason="budget_exhausted",
+                )
             logger.info("Debate round %d/%d started", round_num, self._max_rounds)
             if on_round_start is not None:
                 import inspect as _inspect
@@ -203,7 +259,32 @@ class TeamRunner:
                 exec_ctx: dict[str, Any] = {}
                 if agent.get("system_prompt"):
                     exec_ctx["system_prompt"] = agent["system_prompt"]
-                output = await agent_exec(agent["id"], prompt, exec_ctx)
+                if deadline is not None and loop.time() >= deadline:
+                    return self._partial_result(
+                        topic=topic,
+                        transcript=transcript,
+                        agents=agents,
+                        rounds=max(0, round_num - 1),
+                        reason="budget_exhausted",
+                    )
+                try:
+                    if self._policy.max_turn_seconds is not None:
+                        output = await asyncio.wait_for(
+                            agent_exec(agent["id"], prompt, exec_ctx),
+                            timeout=float(self._policy.max_turn_seconds),
+                        )
+                    else:
+                        output = await agent_exec(agent["id"], prompt, exec_ctx)
+                except asyncio.TimeoutError:
+                    if self._policy.on_budget_exhausted == "raise_timeout":
+                        raise
+                    return self._partial_result(
+                        topic=topic,
+                        transcript=transcript,
+                        agents=agents,
+                        rounds=max(0, round_num - 1),
+                        reason="turn_timeout",
+                    )
                 logger.info(
                     "Debate turn: round=%d agent=%s role=%s output_len=%d",
                     round_num, agent["id"], agent["role"], len(output),
@@ -237,6 +318,8 @@ class TeamRunner:
                         rounds=round_num,
                         transcript=transcript,
                         summary=reason,
+                        completed=True,
+                        termination_reason="judge_converged",
                     )
 
         # Max rounds reached -- summarize

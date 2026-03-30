@@ -39,8 +39,23 @@ class _Orchestrator:
     def __init__(self) -> None:
         self.resource_manager = _Resource()
 
-    async def process_task(self, user_input: str, chat_key: str = "", heartbeat: Any = None, media_paths: list[str] | None = None) -> TaskResponse:
+    async def process_task(self, user_input: str, chat_key: str = "", heartbeat: Any = None, media_paths: list[str] | None = None, runtime_event_callback: Any = None) -> TaskResponse:
         # Simulate a stuck task that never beats the heartbeat.
+        del user_input, chat_key, media_paths
+        if runtime_event_callback is not None:
+            await runtime_event_callback(
+                {
+                    "job_id": "job-timeout-1",
+                    "flow_id": "flow-timeout-1",
+                    "task_id": "",
+                    "event": "running",
+                    "payload": {
+                        "job_id": "job-timeout-1",
+                        "state": "running",
+                        "message": "still working",
+                    },
+                }
+            )
         await asyncio.sleep(10)
         return TaskResponse(text="late")
 
@@ -78,6 +93,7 @@ def test_channel_manager_returns_timeout_response() -> None:
     assert len(fake_channel.responses) >= 1
     # Should contain a timeout response.
     assert any("超时" in r.text for r in fake_channel.responses)
+    assert any("job-timeout-1" in r.text for r in fake_channel.responses)
 
 
 def test_scheduled_task_message_skips_ack() -> None:

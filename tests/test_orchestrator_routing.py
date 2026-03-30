@@ -19,7 +19,9 @@ from babybot.agent_kernel import (
 from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
 from babybot.context import TapeStore
 from babybot.memory_store import HybridMemoryStore
+from babybot.execution_plan import ExecutionPlan
 from babybot.orchestrator import OrchestratorAgent
+from babybot.task_contract import TaskContract
 
 
 class _FakeGateway:
@@ -37,6 +39,16 @@ class _FakeGateway:
         resp = self._responses[self._call_idx]
         self._call_idx += 1
         return resp
+
+    async def complete_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model_cls: type,
+        heartbeat: Any = None,
+    ):
+        del system_prompt, user_prompt, model_cls, heartbeat
+        return None
 
 
 class _FakeResourceManager:
@@ -283,7 +295,8 @@ def test_answer_with_dag_passes_stream_callback_into_context() -> None:
             seen.update(context.state)
             return type("R", (), {"conclusion": "ok"})()
 
-    stream_callback = lambda text: text
+    def stream_callback(text: str) -> str:
+        return text
 
     with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
         text, media = asyncio.run(agent._answer_with_dag("你好", stream_callback=stream_callback))
@@ -322,7 +335,8 @@ def test_answer_with_dag_passes_runtime_event_callback_and_shared_runtime_adapte
             seen.update(context.state)
             return type("R", (), {"conclusion": "ok"})()
 
-    runtime_event_callback = lambda event: event
+    def runtime_event_callback(event: Any) -> Any:
+        return event
 
     with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
         text, media = asyncio.run(
@@ -359,6 +373,69 @@ def test_answer_with_dag_passes_orchestrator_max_steps() -> None:
     assert text == "ok"
     assert media == []
     assert seen["max_steps"] == 12
+
+
+def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
+    rm = _FakeResourceManager()
+    class _ConstraintGateway(_FakeGateway):
+        async def complete_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            model_cls: type,
+            heartbeat: Any = None,
+        ):
+            del system_prompt, user_prompt, model_cls, heartbeat
+            class _Result:
+                def model_dump(self) -> dict[str, Any]:
+                    return {
+                        "mode": "interactive",
+                        "hard_limits": {
+                            "max_rounds": 1,
+                            "max_total_seconds": 600,
+                            "max_turn_seconds": None,
+                        },
+                        "soft_preferences": {"resolution_style": "single_pass"},
+                        "degradation": {"on_budget_exhausted": "summarize_partial"},
+                    }
+
+            return _Result()
+
+    agent = _make_agent(_ConstraintGateway([]), rm)
+    agent.config.system.timeout = 600
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok"})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("两个专家讨论，一轮定胜负。"))
+
+    assert text == "ok"
+    assert media == []
+    constraints = seen["execution_constraints"]
+    assert constraints["hard_limits"]["max_rounds"] == 1
+    assert constraints["hard_limits"]["max_total_seconds"] == 600.0
+    assert isinstance(seen["execution_plan"], ExecutionPlan)
+    assert seen["execution_plan"].round_budget == 1
+    assert seen["task_contract"] == TaskContract(
+        chat_key="",
+        goal="两个专家讨论，一轮定胜负。",
+        mode="debate",
+        deliverable="final_answer",
+        round_budget=1,
+        termination_rule="single_round",
+        allow_clarification=True,
+        allowed_tools=(),
+        allowed_agents=(),
+        metadata={"execution_constraints": constraints},
+    )
 
 
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:

@@ -575,18 +575,6 @@ def _extract_brief_phrase(text: str, *, prefix: str) -> str:
     if any(marker in candidate for marker in ("请", "需要", "希望", "回复", "回答")):
         return ""
     return candidate
-
-
-def _extract_assistant_role(text: str) -> str:
-    match = re.search(r"作为你的(.{1,24}?)继续", text)
-    if match:
-        return match.group(1).strip("：:,.，。；; ")
-    match = re.search(r"作为你的(.{1,24}?)(?:来|，|。|协助|帮助)", text)
-    if match:
-        return match.group(1).strip("：:,.，。；; ")
-    return ""
-
-
 def _detect_language_preference(text: str) -> str:
     lowered = text.lower()
     if any(token in lowered for token in ("english", "英文", "英语")):

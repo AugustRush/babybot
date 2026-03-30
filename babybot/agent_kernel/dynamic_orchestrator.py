@@ -12,9 +12,15 @@ import inspect
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
+from ..task_contract import assert_runtime_matches_contract
 from .context import ContextManager
 from .dag_ports import ResourceBridgeExecutor, build_history_summary
 from .errors import classify_error, retry_delay_seconds as default_retry_delay_seconds
+from .execution_constraints import (
+    build_team_execution_policy,
+    format_execution_constraints_for_prompt,
+    normalize_execution_constraints,
+)
 from .model import ModelMessage, ModelRequest, ModelResponse, ModelToolCall
 from .types import ExecutionContext, FinalResult, TaskContract, TaskResult, ToolLease
 
@@ -382,6 +388,7 @@ class InProcessChildTaskRuntime:
         default_timeout_s: float | None = 300.0,
         stale_after_s: float | None = None,
         progress_poll_interval_s: float = 0.05,
+        plan_step_id: str = "",
     ) -> None:
         self._flow_id = flow_id
         self._rm = resource_manager
@@ -394,6 +401,7 @@ class InProcessChildTaskRuntime:
         self._default_timeout_s = self._coerce_timeout(default_timeout_s)
         self._stale_after_s = stale_after_s
         self._progress_poll_interval_s = max(0.02, float(progress_poll_interval_s))
+        self._plan_step_id = str(plan_step_id or "").strip()
         self._semaphore = asyncio.Semaphore(max_parallel)
         self._in_flight: dict[str, asyncio.Task] = {}
         self._results: dict[str, TaskResult] = {}
@@ -447,6 +455,12 @@ class InProcessChildTaskRuntime:
             and task_id not in self._results
         }
 
+    def _event_payload(self, **payload: Any) -> dict[str, Any]:
+        normalized = dict(payload)
+        if self._plan_step_id:
+            normalized.setdefault("plan_step_id", self._plan_step_id)
+        return normalized
+
     async def _promote_stalled_tasks(self, task_ids: list[str]) -> None:
         for task_id in self._stale_task_ids(task_ids):
             running = self._in_flight.pop(task_id, None)
@@ -462,7 +476,7 @@ class InProcessChildTaskRuntime:
                     flow_id=self._flow_id,
                     task_id=task_id,
                     event="stalled",
-                    payload={"error": "child task heartbeat stalled"},
+                    payload=self._event_payload(error="child task heartbeat stalled"),
                 )
             )
 
@@ -652,12 +666,12 @@ class InProcessChildTaskRuntime:
                 flow_id=flow_id,
                 task_id=task_id,
                 event="queued",
-                payload={
-                    "resource_id": primary_resource_id,
-                    "resource_ids": list(resource_ids),
-                    "description": description,
-                    "deps": list(deps),
-                },
+                payload=self._event_payload(
+                    resource_id=primary_resource_id,
+                    resource_ids=list(resource_ids),
+                    description=description,
+                    deps=list(deps),
+                ),
             )
         )
         self._update_task_state(
@@ -691,10 +705,10 @@ class InProcessChildTaskRuntime:
                             flow_id=flow_id,
                             task_id=task_id,
                             event="started",
-                            payload={
-                                "resource_id": primary_resource_id,
-                                "description": description,
-                            },
+                            payload=self._event_payload(
+                                resource_id=primary_resource_id,
+                                description=description,
+                            ),
                         )
                     )
                     self._update_task_state(
@@ -771,13 +785,13 @@ class InProcessChildTaskRuntime:
                                 flow_id=flow_id,
                                 task_id=task_id,
                                 event="succeeded",
-                                payload={
-                                    "resource_id": primary_resource_id,
-                                    "description": description,
-                                    "status": result.status,
-                                    "output": result.output,
-                                    "error": result.error,
-                                },
+                                payload=self._event_payload(
+                                    resource_id=primary_resource_id,
+                                    description=description,
+                                    status=result.status,
+                                    output=result.output,
+                                    error=result.error,
+                                ),
                             )
                         )
                         child_media = child_context.state.get(
@@ -813,14 +827,14 @@ class InProcessChildTaskRuntime:
                                 flow_id=flow_id,
                                 task_id=task_id,
                                 event="retrying",
-                                payload={
-                                    "resource_id": primary_resource_id,
-                                    "description": description,
-                                    "attempt": attempt,
-                                    "max_attempts": max_attempts,
-                                    "error": result.error,
-                                    "error_type": decision.error_type,
-                                },
+                                payload=self._event_payload(
+                                    resource_id=primary_resource_id,
+                                    description=description,
+                                    attempt=attempt,
+                                    max_attempts=max_attempts,
+                                    error=result.error,
+                                    error_type=decision.error_type,
+                                ),
                             )
                         )
                         delay_s = float(self._retry_delay_seconds(attempt - 1))
@@ -840,15 +854,15 @@ class InProcessChildTaskRuntime:
                             flow_id=flow_id,
                             task_id=task_id,
                             event="dead_lettered",
-                            payload={
-                                "resource_id": primary_resource_id,
-                                "description": description,
-                                "status": final_result.status,
-                                "error": final_result.error,
-                                "attempts": final_result.attempts,
-                                "max_attempts": max_attempts,
-                                "error_type": decision.error_type,
-                            },
+                            payload=self._event_payload(
+                                resource_id=primary_resource_id,
+                                description=description,
+                                status=final_result.status,
+                                error=final_result.error,
+                                attempts=final_result.attempts,
+                                max_attempts=max_attempts,
+                                error_type=decision.error_type,
+                            ),
                         )
                     )
                     break
@@ -905,7 +919,7 @@ class InProcessChildTaskRuntime:
                     flow_id=self._flow_id,
                     task_id=task_id,
                     event="progress",
-                    payload=payload,
+                    payload=self._event_payload(**payload),
                 )
             )
 
@@ -1095,13 +1109,18 @@ class DynamicOrchestrator:
             flow_id=flow_id,
             resource_manager=self._rm,
             bridge=self._executor,
-            child_task_bus=self._child_task_bus,
-            task_heartbeat_registry=self._task_heartbeat_registry,
-            max_parallel=4,
-            max_tasks=self.MAX_TASKS,
-            default_timeout_s=self._default_task_timeout_s,
-            stale_after_s=self._task_stale_after_s,
-        )
+                child_task_bus=self._child_task_bus,
+                task_heartbeat_registry=self._task_heartbeat_registry,
+                max_parallel=4,
+                max_tasks=self.MAX_TASKS,
+                default_timeout_s=self._default_task_timeout_s,
+                stale_after_s=self._task_stale_after_s,
+                plan_step_id=(
+                    context.state.get("execution_plan").steps[0].step_id
+                    if getattr(context.state.get("execution_plan"), "steps", None)
+                    else ""
+                ),
+            )
         runtime_event_callback = context.state.get("runtime_event_callback")
         forwarder_task: asyncio.Task[None] | None = None
         if runtime_event_callback is not None:
@@ -1202,6 +1221,7 @@ class DynamicOrchestrator:
         memory_store = context.state.get("memory_store")
         history = build_history_summary(tape, memory_store=memory_store, query=goal)
         media_paths = context.state.get("media_paths") or ()
+        execution_constraints = context.state.get("execution_constraints")
         policy_hints = [
             str(item).strip()
             for item in (context.state.get("policy_hints") or ())
@@ -1219,6 +1239,10 @@ class DynamicOrchestrator:
             system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
         if history:
             system_parts.append(f"\n{history}")
+        if execution_constraints:
+            system_parts.append(
+                "\n执行约束：\n" + format_execution_constraints_for_prompt(execution_constraints)
+            )
         if deduped_policy_hints:
             system_parts.append("\n策略建议：\n- " + "\n- ".join(deduped_policy_hints))
 
@@ -1398,7 +1422,20 @@ class DynamicOrchestrator:
 
         topic = args.get("topic", "")
         agents = args.get("agents", [])
-        max_rounds = int(args.get("max_rounds", 5))
+        task_contract = context.state.get("task_contract")
+        execution_constraints = normalize_execution_constraints(
+            context.state.get("execution_constraints")
+        )
+        effective_args = dict(args)
+        if getattr(task_contract, "round_budget", None) is not None:
+            effective_args["max_rounds"] = int(task_contract.round_budget)
+        team_policy = build_team_execution_policy(effective_args, execution_constraints)
+        if task_contract is not None:
+            assert_runtime_matches_contract(
+                task_contract,
+                max_rounds=team_policy.max_rounds,
+            )
+        max_rounds = team_policy.max_rounds
 
         if len(agents) < 2:
             return "error: dispatch_team requires at least 2 agents"
@@ -1473,6 +1510,11 @@ class DynamicOrchestrator:
                     agent_copy["executor"] = functools.partial(resource_executor, rid)
             enriched_agents.append(agent_copy)
 
+        if team_policy.max_agents is not None and len(enriched_agents) > team_policy.max_agents:
+            enriched_agents = enriched_agents[: team_policy.max_agents]
+        if len(enriched_agents) < 2:
+            return "error: dispatch_team requires at least 2 agents after applying constraints"
+
         for ea in enriched_agents:
             logger.info(
                 "Team agent resolved: id=%s role=%s skill=%s resource=%s",
@@ -1513,7 +1555,11 @@ class DynamicOrchestrator:
         if team_streaming:
             await reset_stream()
 
-        runner = TeamRunner(executor=gateway_executor, max_rounds=max_rounds)
+        runner = TeamRunner(
+            executor=gateway_executor,
+            max_rounds=max_rounds,
+            policy=team_policy,
+        )
         result = await runner.run_debate(
             topic=topic,
             agents=enriched_agents,
@@ -1534,6 +1580,8 @@ class DynamicOrchestrator:
                 "topic": result.topic,
                 "rounds": result.rounds,
                 "summary": result.summary,
+                "completed": result.completed,
+                "termination_reason": result.termination_reason,
                 "transcript_length": len(result.transcript),
                 "last_arguments": [
                     {

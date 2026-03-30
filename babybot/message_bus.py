@@ -12,15 +12,32 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .feedback_events import (
+    feedback_dedupe_key,
+    normalize_runtime_feedback_event,
+    render_runtime_feedback_event,
+)
 from .heartbeat import Heartbeat
 
 if TYPE_CHECKING:
     from .channels.base import BaseChannel, InboundMessage
-    from .channels.tools import ChannelToolContext
     from .config import Config
     from .orchestrator import OrchestratorAgent, TaskResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_event_job_id(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        job_id = str(event.get("job_id", "") or "").strip()
+        if job_id:
+            return job_id
+        payload = event.get("payload") or {}
+        if isinstance(payload, dict):
+            job_id = str(payload.get("job_id", "") or "").strip()
+            if job_id:
+                return job_id
+    return ""
 
 
 @dataclass
@@ -83,6 +100,7 @@ class MessageBus:
         # Cache inspect.signature results to avoid per-message overhead.
         self._supports_stream_callback: bool | None = None
         self._supports_runtime_event_callback: bool | None = None
+        self._supports_intermediate_message: bool | None = None
 
     def _get_chat_sem(self, key: str) -> asyncio.Semaphore:
         if not isinstance(self._chat_sems, OrderedDict):
@@ -151,35 +169,9 @@ class MessageBus:
 
     @staticmethod
     def _format_runtime_progress_text(event_payload: dict[str, Any]) -> str:
-        event = str(event_payload.get("event", "") or "").strip().lower()
-        payload = dict(event_payload.get("payload") or {})
-        description = str(payload.get("description", "") or "").strip()
-        output = str(payload.get("output", "") or "").strip()
-        error = str(payload.get("error", "") or "").strip()
-        status = str(payload.get("status", "") or "").strip()
-        progress_raw = payload.get("progress")
-        progress_pct = ""
-        if isinstance(progress_raw, (int, float)):
-            progress_pct = f" ({int(max(0.0, min(1.0, float(progress_raw))) * 100)}%)"
-
-        if event == "progress":
-            label = status or description
-            if label:
-                return f"处理中：{label}{progress_pct}"
-            if progress_pct:
-                return f"处理中{progress_pct}"
-            return ""
-        if event == "succeeded":
-            if description:
-                return f"阶段完成：{description}"
-            if output:
-                return "阶段完成"
-            return ""
-        if event in {"failed", "dead_lettered", "stalled"} and error:
-            if description:
-                return f"阶段异常：{description}\n原因：{error}"
-            return f"阶段异常：{error}"
-        return ""
+        return render_runtime_feedback_event(
+            normalize_runtime_feedback_event(event_payload)
+        )
 
     async def start(self) -> None:
         """Start the consumer loop."""
@@ -401,10 +393,10 @@ class MessageBus:
             "media_paths": msg.media_paths,
         }
         runtime_events: list[dict[str, Any]] = []
-        last_runtime_progress_text = ""
+        last_runtime_progress_key: tuple[str, str, str, str] | None = None
 
         async def _runtime_event_callback(event: Any) -> None:
-            nonlocal stream_detached, last_runtime_progress_text
+            nonlocal stream_detached, last_runtime_progress_key
             if dataclasses.is_dataclass(event):
                 payload = dataclasses.asdict(event)
             elif isinstance(event, dict):
@@ -427,19 +419,15 @@ class MessageBus:
                 payload.get("task_id", ""),
                 payload.get("event", ""),
             )
+            normalized_event = normalize_runtime_feedback_event(payload)
             progress_text = self._format_runtime_progress_text(payload)
             if not progress_text or channel is None:
                 return
-            if progress_text == last_runtime_progress_text:
+            progress_key = feedback_dedupe_key(normalized_event)
+            if progress_key == last_runtime_progress_key:
                 return
-            last_runtime_progress_text = progress_text
-            if str(payload.get("event", "") or "").strip().lower() in {
-                "progress",
-                "succeeded",
-                "failed",
-                "dead_lettered",
-                "stalled",
-            }:
+            last_runtime_progress_key = progress_key
+            if normalized_event.state in {"running", "completed", "failed"}:
                 stream_detached = True
             try:
                 await channel.send_response(
@@ -480,11 +468,15 @@ class MessageBus:
         if self._supports_runtime_event_callback:
             process_kwargs["runtime_event_callback"] = _runtime_event_callback
         if channel is not None:
-            _supports_intermediate = (
-                "send_intermediate_message"
-                in inspect.signature(self._orchestrator.process_task).parameters
-            )
-            if _supports_intermediate:
+            if self._supports_intermediate_message is None:
+                try:
+                    self._supports_intermediate_message = (
+                        "send_intermediate_message"
+                        in inspect.signature(self._orchestrator.process_task).parameters
+                    )
+                except (TypeError, ValueError):
+                    self._supports_intermediate_message = False
+            if self._supports_intermediate_message:
                 process_kwargs["send_intermediate_message"] = _send_intermediate_message
         try:
             response = await heartbeat.watch(
@@ -501,11 +493,13 @@ class MessageBus:
                 msg.chat_id,
                 str(exc),
             )
+            job_id = _runtime_event_job_id(runtime_events)
+            job_hint = f" job_id={job_id}。" if job_id else ""
             response = TaskResponse(
                 text=(
                     f"任务执行超时（{self._config.system.idle_timeout}s 空闲 / "
                     f"{hard_timeout:.0f}s 上限）。"
-                    "请尝试更具体的指令，或要求分步骤执行。"
+                    f"{job_hint}请尝试更具体的指令，或要求分步骤执行。"
                 )
             )
         except Exception as e:

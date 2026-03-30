@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from babybot.interactive_sessions.types import InteractiveReply
@@ -61,3 +63,67 @@ async def test_manager_stops_expired_session_before_send():
 
     assert "超时关闭" in reply.text
     assert backend.stop_calls == 1
+
+
+def test_manager_cleans_up_lock_after_stop():
+    from babybot.interactive_sessions.manager import InteractiveSessionManager
+
+    backend = FakeBackend()
+    manager = InteractiveSessionManager(
+        backends={"claude": backend},
+        max_age_seconds=7200,
+    )
+
+    async def _run() -> tuple[bool, bool, bool]:
+        await manager.start(chat_key="feishu:c1", backend_name="claude")
+        has_lock_before = "feishu:c1" in manager._locks
+        stopped = await manager.stop("feishu:c1")
+        has_lock_after = "feishu:c1" in manager._locks
+        return has_lock_before, stopped, has_lock_after
+
+    has_lock_before, stopped, has_lock_after = asyncio.run(_run())
+
+    assert has_lock_before is True
+    assert stopped is True
+    assert has_lock_after is False
+
+
+def test_manager_has_active_session_ignores_expired_sessions():
+    from babybot.interactive_sessions.manager import InteractiveSessionManager
+
+    backend = FakeBackend()
+    manager = InteractiveSessionManager(
+        backends={"claude": backend},
+        max_age_seconds=1,
+        time_fn=lambda: 100.0,
+    )
+
+    async def _run() -> bool:
+        await manager.start(chat_key="feishu:c1", backend_name="claude")
+        manager._time_fn = lambda: 102.0
+        return manager.has_active_session("feishu:c1")
+
+    active = asyncio.run(_run())
+
+    assert active is False
+
+
+def test_manager_status_prunes_expired_session():
+    from babybot.interactive_sessions.manager import InteractiveSessionManager
+
+    backend = FakeBackend()
+    manager = InteractiveSessionManager(
+        backends={"claude": backend},
+        max_age_seconds=1,
+        time_fn=lambda: 100.0,
+    )
+
+    async def _run():
+        await manager.start(chat_key="feishu:c1", backend_name="claude")
+        manager._time_fn = lambda: 102.0
+        return manager.status("feishu:c1"), manager.summary()
+
+    status, summary = asyncio.run(_run())
+
+    assert status is None
+    assert summary["active_count"] == 0
