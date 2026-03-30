@@ -12,6 +12,7 @@ from .orchestration_policy import build_policy_state_buckets
 class OrchestrationPolicyStore:
     _OUTCOME_HALF_LIFE_DAYS = 21.0
     _FEEDBACK_HALF_LIFE_DAYS = 30.0
+    _REFLECTION_ROUTE_HALF_LIFE_DAYS = 14.0
     _RECENT_WINDOW_DAYS = 7.0
 
     def __init__(self, db_path: Path, *, busy_timeout_ms: int = 3000) -> None:
@@ -223,6 +224,12 @@ class OrchestrationPolicyStore:
             confidence = max(0.0, float(row["confidence"] or 0.0))
             if confidence < float(min_confidence):
                 continue
+            created_at = self._parse_time(row["created_at"])
+            weight = self._decay_weight(
+                created_at,
+                now=datetime.now(timezone.utc),
+                half_life_days=self._REFLECTION_ROUTE_HALF_LIFE_DAYS,
+            )
             route_mode = str(row["route_mode"] or "").strip()
             recommended_action = str(row["recommended_action"] or "").strip()
             if not route_mode:
@@ -234,13 +241,15 @@ class OrchestrationPolicyStore:
                     "route_mode": route_mode,
                     "recommended_action": recommended_action,
                     "samples": 0,
+                    "effective_samples": 0.0,
                     "confidence_sum": 0.0,
                     "best_bucket_rank": 0.0,
                     "latest_created_at": "",
                 },
             )
             payload["samples"] = int(payload["samples"]) + 1
-            payload["confidence_sum"] = float(payload["confidence_sum"]) + confidence
+            payload["effective_samples"] = float(payload["effective_samples"]) + weight
+            payload["confidence_sum"] = float(payload["confidence_sum"]) + (confidence * weight)
             payload["best_bucket_rank"] = max(
                 float(payload["best_bucket_rank"]),
                 float(len(buckets) - buckets.index(state_bucket)),
@@ -254,22 +263,25 @@ class OrchestrationPolicyStore:
         ranked = sorted(
             grouped.values(),
             key=lambda item: (
-                int(item["samples"]),
-                float(item["confidence_sum"]) / max(1, int(item["samples"])),
+                float(item["effective_samples"]),
+                float(item["confidence_sum"]) / max(1.0, float(item["effective_samples"])),
                 float(item["best_bucket_rank"]),
                 str(item["latest_created_at"]),
             ),
             reverse=True,
         )
         top = ranked[0]
-        if int(top["samples"]) < max(1, int(min_samples)):
+        min_samples_required = max(1, int(min_samples))
+        if int(top["samples"]) < min_samples_required:
             return None
         return {
             "route_mode": str(top["route_mode"]),
             "recommended_action": str(top["recommended_action"]),
             "samples": int(top["samples"]),
+            "effective_samples": round(float(top["effective_samples"]), 6),
+            "min_samples_required": min_samples_required,
             "confidence": round(
-                float(top["confidence_sum"]) / max(1, int(top["samples"])),
+                float(top["confidence_sum"]) / max(1.0, float(top["effective_samples"])),
                 6,
             ),
             "source": "reflection_success",
@@ -715,6 +727,7 @@ class OrchestrationPolicyStore:
                 "avg_router_latency_ms": 0.0,
                 "fallback_rate": 0.0,
                 "rule_hit_rate": 0.0,
+                "reflection_route_rate": 0.0,
                 "reflection_match_rate": 0.0,
                 "reflection_override_rate": 0.0,
                 "mean_reward": 0.0,
@@ -724,6 +737,9 @@ class OrchestrationPolicyStore:
         fallback_total = sum(int(row["router_fallback"] or 0) for row in rows)
         rule_hit_total = sum(
             1 for row in rows if str(row["router_source"] or "").strip() == "rule"
+        )
+        reflection_route_total = sum(
+            1 for row in rows if str(row["router_source"] or "").strip() == "reflection"
         )
         reflection_match_total = sum(
             1 for row in rows if int(row["reflection_hint_count"] or 0) > 0
@@ -737,6 +753,7 @@ class OrchestrationPolicyStore:
             "avg_router_latency_ms": round(latency_total / runs, 2),
             "fallback_rate": round(fallback_total / runs, 6),
             "rule_hit_rate": round(rule_hit_total / runs, 6),
+            "reflection_route_rate": round(reflection_route_total / runs, 6),
             "reflection_match_rate": round(reflection_match_total / runs, 6),
             "reflection_override_rate": round(reflection_override_total / runs, 6),
             "mean_reward": round(

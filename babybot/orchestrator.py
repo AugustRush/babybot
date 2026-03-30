@@ -438,6 +438,8 @@ class OrchestratorAgent:
             else "deny"
         )
         samples = int(payload.get("samples", 0) or 0)
+        effective_samples = float(payload.get("effective_samples", 0.0) or 0.0)
+        min_samples_required = int(payload.get("min_samples_required", 0) or 0)
         confidence = float(payload.get("confidence", 0.0) or 0.0)
         return RoutingDecision(
             route_mode=route_mode,
@@ -447,7 +449,8 @@ class OrchestratorAgent:
             worker_hint=worker_hint,
             explain=(
                 "稳定成功经验直达"
-                + f"(samples={samples}, confidence={confidence:.2f})"
+                + f"(samples={samples}, effective_samples={effective_samples:.2f}, "
+                + f"min_samples={min_samples_required}, confidence={confidence:.2f})"
             ),
             decision_source="reflection",
         )
@@ -971,6 +974,7 @@ class OrchestratorAgent:
                     + f"avg_router_latency_ms={float(overall.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
                     + f"fallback_rate={float(overall.get('fallback_rate', 0.0) or 0.0):.2f} "
                     + f"rule_hit_rate={float(overall.get('rule_hit_rate', 0.0) or 0.0):.2f} "
+                    + f"reflection_route_rate={float(overall.get('reflection_route_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_match_rate={float(overall.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_override_rate={float(overall.get('reflection_override_rate', 0.0) or 0.0):.2f} "
                     + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
@@ -986,6 +990,7 @@ class OrchestratorAgent:
                             + f"avg_router_latency_ms={float(payload.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
                             + f"fallback_rate={float(payload.get('fallback_rate', 0.0) or 0.0):.2f} "
                             + f"rule_hit_rate={float(payload.get('rule_hit_rate', 0.0) or 0.0):.2f} "
+                            + f"reflection_route_rate={float(payload.get('reflection_route_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_match_rate={float(payload.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_override_rate={float(payload.get('reflection_override_rate', 0.0) or 0.0):.2f} "
                             + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"

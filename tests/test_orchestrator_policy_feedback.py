@@ -54,6 +54,7 @@ class _FakePolicyStore:
                 "runs": 3,
                 "avg_router_latency_ms": 210.0,
                 "fallback_rate": 1 / 3,
+                "reflection_route_rate": 1 / 3,
                 "reflection_match_rate": 2 / 3,
                 "reflection_override_rate": 1 / 3,
                 "mean_reward": 0.4,
@@ -63,6 +64,7 @@ class _FakePolicyStore:
                     "runs": 2,
                     "avg_router_latency_ms": 180.0,
                     "fallback_rate": 0.0,
+                    "reflection_route_rate": 0.5,
                     "reflection_match_rate": 1.0,
                     "reflection_override_rate": 0.5,
                     "mean_reward": 0.8,
@@ -132,6 +134,7 @@ async def test_policy_inspect_command_reports_policy_summary() -> None:
     assert "decision_kind=scheduling" in response.text
     assert "action=serial_dispatch" in response.text
     assert "avg_router_latency_ms=210.00" in response.text
+    assert "reflection_route_rate=0.33" in response.text
     assert "reflection_match_rate=0.67" in response.text
 
 
@@ -213,6 +216,7 @@ def test_policy_inspect_command_reports_runtime_summary_sync() -> None:
     )
 
     assert "avg_router_latency_ms=210.00" in response.text
+    assert "reflection_route_rate=0.33" in response.text
     assert "reflection_match_rate=0.67" in response.text
 
 

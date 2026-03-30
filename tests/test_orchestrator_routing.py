@@ -756,6 +756,7 @@ def test_answer_with_dag_skips_router_model_for_stable_success_bucket(tmp_path: 
     ] == []
     assert seen["routing_decision"].decision_source == "reflection"
     assert seen["routing_decision"].execution_style == "direct_execute"
+    assert "effective_samples=" in seen["routing_decision"].explain
 
 
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:

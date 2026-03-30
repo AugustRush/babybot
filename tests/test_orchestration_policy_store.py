@@ -91,6 +91,51 @@ def test_policy_store_recommends_route_from_clean_success_reflections(tmp_path) 
     assert recommendation["samples"] == 2
 
 
+def test_policy_store_reflection_route_recommendation_decays_stale_successes(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    state_features = {
+        "task_shape": "single_step",
+        "has_media": False,
+        "independent_subtasks": 1,
+    }
+    store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="direct_execute",
+        confidence=0.9,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="analyze_first",
+        confidence=0.66,
+        created_at="2026-03-30T00:00:00+00:00",
+    )
+    store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="analyze_first",
+        confidence=0.64,
+        created_at="2026-03-30T00:10:00+00:00",
+    )
+
+    recommendation = store.recommend_route_from_reflections(
+        chat_key="feishu:c1",
+        state_features=state_features,
+    )
+
+    assert recommendation["recommended_action"] == "analyze_first"
+    assert recommendation["min_samples_required"] == 2
+    assert 1.0 < recommendation["effective_samples"] < recommendation["samples"]
+
+
 def test_policy_store_enables_wal_and_busy_timeout(tmp_path) -> None:
     store = OrchestrationPolicyStore(tmp_path / "policy.db")
 
