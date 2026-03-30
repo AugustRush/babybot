@@ -19,6 +19,13 @@ class _Orchestrator:
             "interactive_sessions": {
                 "active_count": 1,
                 "chat_keys": ["cli:local"],
+                "sessions": [
+                    {
+                        "chat_key": "cli:local",
+                        "backend_name": "claude",
+                        "backend_status": {"mode": "resident", "alive": True, "pid": 4321},
+                    }
+                ],
             },
         }
 
@@ -79,3 +86,5 @@ def test_cli_status_prints_interactive_session_summary(
     assert "Available Tools: 3" in output
     assert "Interactive Sessions: 1" in output
     assert "cli:local" in output
+    assert "resident" in output
+    assert "4321" in output

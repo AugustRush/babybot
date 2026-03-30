@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+import contextlib
 import inspect
 import json
 import logging
@@ -1875,10 +1876,23 @@ class OrchestratorAgent:
             status = manager.status(chat_key)
             if status is None:
                 return TaskResponse(text="当前没有活动中的交互会话。")
+            backend_bits: list[str] = []
+            backend_status = dict(status.backend_status or {})
+            mode = str(backend_status.get("mode", "") or status.mode).strip()
+            if mode:
+                backend_bits.append(f"mode={mode}")
+            pid = backend_status.get("pid", status.process_pid)
+            if pid:
+                backend_bits.append(f"pid={pid}")
+            alive = backend_status.get("alive")
+            if alive is not None:
+                backend_bits.append(f"alive={bool(alive)}")
             return TaskResponse(
                 text=(
                     f"当前交互会话：{status.backend_name} "
-                    f"(session_id={status.session_id})"
+                    f"(session_id={status.session_id}"
+                    + (f", {', '.join(backend_bits)}" if backend_bits else "")
+                    + ")"
                 )
             )
         return TaskResponse(text="支持的命令：@session start <backend> / status / stop")
@@ -1916,11 +1930,21 @@ class OrchestratorAgent:
             )
             if inspect.isawaitable(maybe):
                 await maybe
-        if heartbeat is not None:
-            async with heartbeat.keep_alive():
+        try:
+            if heartbeat is not None:
+                async with heartbeat.keep_alive():
+                    reply = await self._interactive_sessions.send(chat_key, request)
+            else:
                 reply = await self._interactive_sessions.send(chat_key, request)
-        else:
-            reply = await self._interactive_sessions.send(chat_key, request)
+        except RuntimeError:
+            logger.warning(
+                "Interactive session send failed; falling back to DAG chat_key=%s",
+                chat_key,
+                exc_info=True,
+            )
+            with contextlib.suppress(Exception):
+                await self._interactive_sessions.stop(chat_key, reason="backend_failed")
+            return None
         if reply.expired:
             return None
         tape = self.tape_store.get_or_create(chat_key) if chat_key and self.tape_store else None

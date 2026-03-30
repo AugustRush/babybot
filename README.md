@@ -143,23 +143,23 @@ uv run babybot
 
 当前实现说明：
 
-- 当前 Claude 交互会话是“会话恢复式交互”，不是“常驻进程式交互”
+- 当前 Claude 交互会话已经切到“常驻本地进程式交互”
 - `@session start claude` 会先创建一个按 `chat_key` 隔离的 Claude 会话上下文
-- 后续每条消息都会重新启动一次 `claude` CLI，并通过 `--resume <session_id>` 继续该会话
+- Claude backend 会为每个会话启动一个常驻 `claude` 子进程，并通过 `stream-json` stdin/stdout 进行 turn 级通信
 - `InteractiveSessionManager` 会在 `status()` / `send()` 前先清理过期会话；如果发送时发现已过期，会回退到默认 DAG 编排
 - `InteractiveSessionManager.cleanup()` 可被 runtime 维护入口复用，用于统一清理过期 session
 - 交互会话请求会保留 `media_paths`，因此图片/文件输入不会在 session 路径里丢失
-- 会话状态当前保存在 BabyBot 管理的隔离目录中，因此用户在默认终端里直接执行 `claude --resume <session_id>` 未必能接上
+- 默认隔离模式为 `same-dir`：会话进程在当前工作区内运行，同时把 `HOME/TMPDIR/CLAUDE_CONFIG_DIR` 隔离到会话 runtime 目录
+- `@session status` 和 CLI `status` 会显示更真实的运行态，例如 `mode`、`pid`、`alive`
 
 交互会话后续计划：
 
 1. 保持现有 `@session start/status/stop` 控制面不变，避免影响当前 CLI 与网关路由。
 2. 将 `InteractiveSessionManager` 继续作为按 `chat_key` 的会话注册表，不重写 MessageBus、Orchestrator 和渠道层。
-3. 把 Claude backend 从“每条消息重新执行 `claude --resume`”逐步演进为“每个会话一个常驻 Claude 进程”。
-4. 将 BabyBot 自己的 session 标识与 Claude 内部 resume id 解耦，避免状态展示误导用户。
-5. `@session status` 后续改为优先展示 backend 模式、进程存活状态、最近活跃时间，而不是只展示 `session_id`。
-6. 保留当前隔离环境策略，后续在常驻进程模式下继续沿用隔离目录管理 runtime、临时文件和状态文件。
-7. 在 backend 层补齐 reader/writer 生命周期、超时、异常退出、reset/stop 清理，不把这些复杂度扩散到渠道层。
+3. 继续补齐更细粒度的增量输出透传，让本地 CLI 和渠道都能复用同一 resident session 输出流。
+4. 将 BabyBot 自己的 session 标识与 Claude 内部 session resume 语义进一步解耦，避免状态展示误导用户。
+5. 评估在 resident session 基础上追加 `worktree` 隔离模式，而不是一开始就强推更重的会话隔离。
+6. 继续完善 backend reader/writer 生命周期、异常退出恢复和 reset/stop 清理，不把这些复杂度扩散到渠道层。
 8. 等常驻进程模式稳定后，再评估是否追加流式输出回传到飞书/微信，以及是否支持手动接管会话。
 
 ## 轻量路由与策略学习

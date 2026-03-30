@@ -60,6 +60,12 @@ class InteractiveSessionManager:
                 started_at=now,
                 last_active_at=now,
                 handle=handle,
+                mode=str(getattr(handle, "mode", "") or ""),
+                runtime_root=str(getattr(handle, "runtime_root", "") or ""),
+                process_pid=getattr(handle, "process", None).pid
+                if getattr(handle, "process", None) is not None
+                else None,
+                last_error=str(getattr(handle, "last_error", "") or ""),
             )
             self._sessions[chat_key] = session
             return session
@@ -113,6 +119,10 @@ class InteractiveSessionManager:
             backend_name=session.backend_name,
             started_at=session.started_at,
             last_active_at=session.last_active_at,
+            mode=session.mode,
+            runtime_root=session.runtime_root,
+            process_pid=session.process_pid,
+            last_error=str(getattr(session.handle, "last_error", "") or session.last_error),
             backend_status=backend_status,
         )
 
@@ -125,9 +135,26 @@ class InteractiveSessionManager:
 
     def summary(self) -> dict[str, object]:
         self.cleanup()
+        sessions: list[dict[str, object]] = []
+        for chat_key, session in sorted(self._sessions.items()):
+            backend = self._backends.get(session.backend_name)
+            backend_status = (
+                dict(backend.status(session.handle)) if backend is not None else {}
+            )
+            sessions.append(
+                {
+                    "chat_key": chat_key,
+                    "session_id": session.session_id,
+                    "backend_name": session.backend_name,
+                    "started_at": session.started_at,
+                    "last_active_at": session.last_active_at,
+                    "backend_status": backend_status,
+                }
+            )
         return {
             "active_count": len(self._sessions),
             "chat_keys": sorted(self._sessions.keys()),
+            "sessions": sessions,
         }
 
     def cleanup(self) -> int:

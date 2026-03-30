@@ -129,6 +129,28 @@ def test_manager_status_prunes_expired_session():
     assert summary["active_count"] == 0
 
 
+def test_manager_summary_includes_backend_status_details():
+    from babybot.interactive_sessions.manager import InteractiveSessionManager
+
+    backend = FakeBackend()
+    manager = InteractiveSessionManager(
+        backends={"claude": backend},
+        max_age_seconds=7200,
+    )
+
+    async def _run() -> dict[str, object]:
+        await manager.start(chat_key="feishu:c1", backend_name="claude")
+        return manager.summary()
+
+    summary = asyncio.run(_run())
+
+    assert summary["active_count"] == 1
+    sessions = list(summary["sessions"])
+    assert sessions[0]["chat_key"] == "feishu:c1"
+    assert sessions[0]["backend_name"] == "claude"
+    assert sessions[0]["backend_status"]["backend"] == "claude"
+
+
 def test_manager_cleanup_prunes_all_expired_sessions():
     from babybot.interactive_sessions.manager import InteractiveSessionManager
 

@@ -77,11 +77,22 @@ class FakeSessionManager:
             backend_name="claude",
             started_at=1.0,
             last_active_at=1.0,
-            backend_status={"backend": "claude"},
+            backend_status={"backend": "claude", "mode": "resident", "alive": True, "pid": 4321},
         )
 
     def summary(self) -> dict[str, object]:
-        return {"active_count": 1 if self._active_session else 0}
+        return {
+            "active_count": 1 if self._active_session else 0,
+            "sessions": (
+                [{
+                    "chat_key": "feishu:c1",
+                    "backend_name": "claude",
+                    "backend_status": {"mode": "resident", "alive": True, "pid": 4321},
+                }]
+                if self._active_session
+                else []
+            ),
+        }
 
 
 def make_agent_with_session_manager(*, active_session: bool = False) -> OrchestratorAgent:
@@ -159,6 +170,8 @@ async def test_session_status_command_reports_active_session():
     response = await agent.process_task("@session status", chat_key="feishu:c1")
 
     assert "当前交互会话：claude" in response.text
+    assert "resident" in response.text
+    assert "4321" in response.text
 
 
 def test_get_status_includes_interactive_session_summary():
@@ -168,6 +181,7 @@ def test_get_status_includes_interactive_session_summary():
 
     assert "interactive_sessions" in status
     assert status["interactive_sessions"]["active_count"] == 1
+    assert status["interactive_sessions"]["sessions"][0]["backend_status"]["mode"] == "resident"
 
 
 def test_process_task_interactive_session_message_keeps_media_paths() -> None:

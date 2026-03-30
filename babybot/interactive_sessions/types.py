@@ -27,6 +27,10 @@ class InteractiveSession:
     started_at: float
     last_active_at: float
     handle: Any
+    mode: str = ""
+    runtime_root: str = ""
+    process_pid: int | None = None
+    last_error: str = ""
 
 
 @dataclass
@@ -36,4 +40,8 @@ class InteractiveSessionStatus:
     backend_name: str
     started_at: float
     last_active_at: float
+    mode: str = ""
+    runtime_root: str = ""
+    process_pid: int | None = None
+    last_error: str = ""
     backend_status: dict[str, Any] = field(default_factory=dict)

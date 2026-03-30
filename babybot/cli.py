@@ -109,10 +109,27 @@ def run():
                 interactive = dict(status.get("interactive_sessions") or {})
                 active_count = int(interactive.get("active_count") or 0)
                 chat_keys = ", ".join(interactive.get("chat_keys") or [])
+                session_lines: list[str] = []
+                for item in interactive.get("sessions") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    backend_name = str(item.get("backend_name", "") or "").strip()
+                    chat_key = str(item.get("chat_key", "") or "").strip()
+                    backend_status = dict(item.get("backend_status") or {})
+                    mode = str(backend_status.get("mode", "") or "").strip()
+                    pid = backend_status.get("pid")
+                    session_lines.append(
+                        f"{chat_key or '-'} [{backend_name or '-'}] mode={mode or '-'} pid={pid or '-'}"
+                    )
                 print(
                     f"\nAvailable Tools: {status.get('available_tools', 0)}\n"
                     f"Interactive Sessions: {active_count}\n"
                     f"Interactive Chats: {chat_keys or '-'}\n"
+                    + (
+                        "Interactive Details:\n" + "\n".join(session_lines) + "\n"
+                        if session_lines
+                        else ""
+                    )
                 )
                 continue
 
