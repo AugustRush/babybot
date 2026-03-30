@@ -18,8 +18,27 @@ class RuntimeFeedbackEvent:
     progress: float | None = None
 
 
-def feedback_dedupe_key(event: RuntimeFeedbackEvent) -> tuple[str, str, str, str]:
-    return (event.job_id, event.task_id, event.stage, event.state)
+_ACTIVE_FEEDBACK_STATES = frozenset(
+    {"queued", "planning", "running", "waiting_tool", "waiting_user", "repairing"}
+)
+
+
+def feedback_dedupe_key(
+    event: RuntimeFeedbackEvent,
+) -> tuple[str, str, str, str, str, str, str]:
+    state_group = "active" if event.state in _ACTIVE_FEEDBACK_STATES else event.state
+    progress = ""
+    if isinstance(event.progress, (int, float)):
+        progress = f"{float(event.progress):.4f}"
+    return (
+        event.job_id,
+        event.task_id,
+        event.stage,
+        state_group,
+        event.message,
+        progress,
+        event.error,
+    )
 
 
 def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:

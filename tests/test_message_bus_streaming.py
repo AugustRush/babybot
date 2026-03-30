@@ -448,6 +448,67 @@ def test_message_bus_dedupes_repeated_runtime_progress_messages() -> None:
     assert channel.sent[1].text == "done"
 
 
+def test_message_bus_dedupes_queued_then_started_for_same_task() -> None:
+    class _QueuedStartedOrchestrator:
+        async def process_task(
+            self,
+            user_input: str,
+            chat_key: str = "",
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            stream_callback: Any = None,
+            runtime_event_callback: Any = None,
+        ) -> TaskResponse:
+            del user_input, chat_key, heartbeat, media_paths, stream_callback
+            if runtime_event_callback is not None:
+                await runtime_event_callback({
+                    "flow_id": "flow-1",
+                    "task_id": "task-1",
+                    "event": "queued",
+                    "payload": {
+                        "stage": "worker",
+                        "message": "下载模型",
+                    },
+                })
+                await runtime_event_callback({
+                    "flow_id": "flow-1",
+                    "task_id": "task-1",
+                    "event": "started",
+                    "payload": {
+                        "stage": "worker",
+                        "message": "下载模型",
+                    },
+                })
+            return TaskResponse(text="done")
+
+    channel = _FakeFeishuChannel(stream_reply=False)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_QueuedStartedOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> None:
+        await bus.start()
+        try:
+            await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    asyncio.run(_run())
+
+    assert len(channel.sent) == 2
+    assert channel.sent[0].text == "处理中：下载模型"
+    assert channel.sent[1].text == "done"
+
+
 def test_message_bus_chat_semaphore_uses_lru_eviction() -> None:
     cfg = _Config()
     cfg.system.max_concurrency = 2
