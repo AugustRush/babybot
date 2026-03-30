@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from babybot.runtime_job_store import RuntimeJobStore
 from babybot.orchestrator import OrchestratorAgent
+from babybot.runtime_jobs import project_job_state_from_runtime_event
 
 
 def test_runtime_job_store_persists_state_transitions(tmp_path) -> None:
@@ -158,3 +159,36 @@ def test_orchestrator_job_cleanup_command_reports_runtime_maintenance(tmp_path) 
     assert "[Runtime Maintenance]" in response.text
     assert "orphaned_jobs_pruned=1" in response.text
     assert "unmatched_recent_flows=1" in response.text
+
+
+def test_project_job_state_from_runtime_event_downgrades_child_completion() -> None:
+    state, message = project_job_state_from_runtime_event(
+        {
+            "event": "succeeded",
+            "flow_id": "flow-1",
+            "task_id": "task-1",
+            "payload": {
+                "stage": "task",
+                "message": "子任务完成",
+            },
+        }
+    )
+
+    assert state == "running"
+    assert message == "子任务完成"
+
+
+def test_project_job_state_from_runtime_event_keeps_job_completion() -> None:
+    state, message = project_job_state_from_runtime_event(
+        {
+            "event": "completed",
+            "job_id": "job-1",
+            "payload": {
+                "stage": "job",
+                "message": "整体完成",
+            },
+        }
+    )
+
+    assert state == "completed"
+    assert message == "整体完成"

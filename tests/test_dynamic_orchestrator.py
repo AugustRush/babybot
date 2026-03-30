@@ -14,6 +14,7 @@ from babybot.agent_kernel import (
     ModelResponse,
     ModelToolCall,
 )
+from babybot.agent_kernel.types import TaskResult
 from babybot.agent_kernel.dynamic_orchestrator import (
     DynamicOrchestrator,
     InMemoryChildTaskBus,
@@ -850,7 +851,7 @@ def test_dispatch_times_out_hung_child_task() -> None:
     assert was_cancelled is True
 
 
-def test_orchestrator_reply_waits_for_child_task_cancellation_cleanup() -> None:
+def test_orchestrator_reply_blocked_by_live_work_still_cleans_up_on_fallback() -> None:
     cleaned_up = asyncio.Event()
     started = asyncio.Event()
 
@@ -900,13 +901,138 @@ def test_orchestrator_reply_waits_for_child_task_cancellation_cleanup() -> None:
     )
     orch._bridge = _Bridge()  # type: ignore[assignment]
 
-    result = asyncio.run(
-        orch.run("先回复我", ExecutionContext(session_id="cancel-cleanup"))
-    )
+    result = asyncio.run(orch.run("先回复我", ExecutionContext(session_id="cancel-cleanup")))
 
-    assert result.conclusion == "先给用户回复"
+    assert "编排步数已达上限" in result.conclusion
     assert started.is_set() is True
     assert cleaned_up.is_set() is True
+
+
+def test_orchestrator_rejects_reply_when_live_tasks_are_still_running() -> None:
+    class _Gateway:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.weather", "后台慢任务", call_id="c1"
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self.calls == 2:
+                for msg in request.messages:
+                    if msg.role == "tool" and not msg.content.startswith("error:"):
+                        self.task_id = msg.content
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c2",
+                            name="reply_to_user",
+                            arguments={"text": "过早收尾"},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self.calls == 3:
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c3",
+                            name="wait_for_tasks",
+                            arguments={"task_ids": [self.task_id]},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            return _reply_tool_call("任务都完成了", call_id="c4")
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del context
+            await asyncio.sleep(0.01)
+            return TaskResult(
+                task_id=task.task_id,
+                status="succeeded",
+                output=f"done:{task.description}",
+                error="",
+                attempts=1,
+                metadata={},
+            )
+
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(), gateway=_Gateway()
+    )
+    orch._bridge = _Bridge()  # type: ignore[assignment]
+
+    result = asyncio.run(orch.run("先别抢答", ExecutionContext(session_id="reply-guard")))
+
+    assert result.conclusion == "任务都完成了"
+
+
+def test_orchestrator_rejects_reply_tool_when_mixed_with_other_calls() -> None:
+    class _Gateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "查询天气", call_id="c1"),
+                        ModelToolCall(
+                            call_id="c2",
+                            name="reply_to_user",
+                            arguments={"text": "混用 reply"},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                self._call_idx += 1
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self.task_id = msg.content
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c3",
+                            name="wait_for_tasks",
+                            arguments={"task_ids": [self.task_id]},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("done", call_id="c4")
+
+    gateway = _Gateway()
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(),
+        gateway=gateway,
+    )
+
+    result = asyncio.run(orch.run("test", ExecutionContext(session_id="reply-mix")))
+
+    assert result.conclusion == "done"
 
 
 def test_system_prompt_explains_reply_artifacts_are_auto_attached() -> None:
@@ -1450,6 +1576,57 @@ def test_team_dispatch_and_reply() -> None:
     assert "refactor" in result.conclusion.lower()
 
 
+def test_team_dispatch_emits_runtime_feedback_events() -> None:
+    team_args = {
+        "topic": "Should we refactor?",
+        "agents": [
+            {"id": "pro", "role": "proponent", "description": "For refactoring"},
+            {"id": "con", "role": "opponent", "description": "Against refactoring"},
+        ],
+        "max_rounds": 1,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Pro argument"),
+            ModelResponse(text="Con argument"),
+            _reply_tool_call("Debate finished."),
+        ]
+    )
+    seen_events: list[dict[str, Any]] = []
+
+    async def _capture(event: dict[str, Any]) -> None:
+        seen_events.append(event)
+
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(),
+        gateway=gateway,
+    )
+
+    result = asyncio.run(
+        orch.run(
+            "Should we refactor?",
+            ExecutionContext(
+                session_id="team-feedback",
+                state={"runtime_event_callback": _capture},
+            ),
+        )
+    )
+
+    assert result.conclusion == "Debate finished."
+    assert any((event.get("payload") or {}).get("stage") == "debate" for event in seen_events)
+
+
 def test_team_dispatch_enforces_user_round_cap_from_context() -> None:
     team_args = {
         "topic": "Should we refactor?",
@@ -1617,7 +1794,7 @@ def test_child_task_runtime_events_include_plan_step_id() -> None:
     asyncio.run(orch.run("请查询杭州天气", context))
 
     assert seen_events
-    assert seen_events[0]["plan_step_id"] == "step_answer"
+    assert seen_events[0]["plan_step_id"] == "step_tool_workflow"
 
 
 def test_dispatch_team_too_few_agents() -> None:

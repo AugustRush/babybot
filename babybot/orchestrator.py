@@ -24,7 +24,6 @@ from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
 from .context_views import build_context_view
 from .execution_plan import build_execution_plan
-from .feedback_events import normalize_runtime_feedback_event
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
@@ -36,7 +35,7 @@ from .orchestration_policy_store import OrchestrationPolicyStore
 from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
 from .runtime_job_store import RuntimeJobStore
-from .runtime_jobs import JOB_STATES
+from .runtime_jobs import JOB_STATES, project_job_state_from_runtime_event
 from .runtime_feedback_commands import parse_policy_command
 from .task_contract import build_task_contract
 
@@ -629,6 +628,147 @@ class OrchestratorAgent:
                 )
         return "\n".join(parts)
 
+    async def _ensure_initialized(self) -> None:
+        if self._initialized:
+            return
+        async with self._init_lock:
+            if self._initialized:
+                return
+            logger.info("Initializing resource manager...")
+            await self.resource_manager.initialize_async()
+            self._initialized = True
+            logger.info("Resource manager initialized")
+
+    def _prepare_tape(
+        self,
+        *,
+        chat_key: str,
+        user_input: str,
+        media_paths: list[str] | None = None,
+    ) -> Tape | None:
+        if not chat_key or self.tape_store is None:
+            return None
+        logger.info("Loading tape for chat_key=%s", chat_key)
+        tape = self.tape_store.get_or_create(chat_key)
+        logger.info("Tape loaded, observing user message...")
+        if hasattr(self, "memory_store"):
+            self.memory_store.observe_user_message(chat_key, user_input)
+        pending_entries = []
+        if tape.last_anchor() is None:
+            anchor = tape.append("anchor", {"name": "session/start", "state": {}})
+            pending_entries.append(anchor)
+        content_for_tape = user_input
+        if media_paths:
+            content_for_tape = f"{user_input}\n[附带 {len(media_paths)} 张图片]"
+        user_entry = tape.append(
+            "message", {"role": "user", "content": content_for_tape}
+        )
+        pending_entries.append(user_entry)
+        self.tape_store.save_entries(chat_key, pending_entries)
+        logger.info("Tape entries saved, proceeding to _answer_with_dag")
+        return tape
+
+    def _create_runtime_job(
+        self,
+        *,
+        chat_key: str,
+        user_input: str,
+        media_paths: list[str] | None = None,
+        job_metadata_override: dict[str, Any] | None = None,
+    ) -> Any | None:
+        runtime_job_store = getattr(self, "_runtime_job_store", None)
+        if not chat_key or runtime_job_store is None:
+            return None
+        runtime_metadata = dict(job_metadata_override or {})
+        runtime_metadata.setdefault("media_paths", list(media_paths or []))
+        runtime_job = runtime_job_store.create(
+            chat_key=chat_key,
+            goal=user_input,
+            metadata=runtime_metadata,
+        )
+        runtime_job_store.transition(
+            runtime_job.job_id,
+            "planning",
+            progress_message="已接收任务，准备执行",
+        )
+        return runtime_job
+
+    def _build_runtime_event_recorder(
+        self,
+        *,
+        chat_key: str,
+        tape: Tape | None,
+        runtime_job: Any | None,
+        runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None,
+    ) -> Callable[[Any], Awaitable[None] | None] | None:
+        runtime_job_store = getattr(self, "_runtime_job_store", None)
+        if runtime_job is None and (tape is None or not chat_key):
+            return runtime_event_callback
+
+        async def _record_runtime_event(event: Any) -> None:
+            payload = self._runtime_event_payload(event)
+            if runtime_job_store is not None and runtime_job is not None:
+                payload["job_id"] = str(payload.get("job_id", "") or runtime_job.job_id)
+                inner_payload = dict(payload.get("payload") or {})
+                inner_payload.setdefault("job_id", runtime_job.job_id)
+                payload["payload"] = inner_payload
+                state, progress_message = self._job_state_from_runtime_event(payload)
+                metadata_update: dict[str, Any] = {}
+                flow_id = str(payload.get("flow_id", "") or "").strip()
+                task_id = str(payload.get("task_id", "") or "").strip()
+                stage = str(inner_payload.get("stage", "") or "").strip()
+                if flow_id:
+                    metadata_update["flow_id"] = flow_id
+                if task_id:
+                    metadata_update["last_task_id"] = task_id
+                if stage:
+                    metadata_update["last_stage"] = stage
+                runtime_job_store.transition(
+                    runtime_job.job_id,
+                    state,
+                    progress_message=progress_message,
+                    metadata=metadata_update,
+                )
+            if tape is not None and chat_key:
+                entry = tape.append(
+                    "event",
+                    {
+                        "event": str(payload.get("event", "") or ""),
+                        "payload": dict(payload.get("payload") or {}),
+                    },
+                    {
+                        "task_id": str(payload.get("task_id", "") or ""),
+                        "flow_id": str(payload.get("flow_id", "") or ""),
+                    },
+                )
+                self.tape_store.save_entry(chat_key, entry)
+                if hasattr(self, "memory_store"):
+                    self.memory_store.observe_runtime_event(chat_key, payload)
+            if runtime_event_callback is not None:
+                maybe = runtime_event_callback(payload)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
+        return _record_runtime_event
+
+    def _record_assistant_reply(
+        self,
+        *,
+        chat_key: str,
+        tape: Tape | None,
+        text: str,
+    ) -> None:
+        if not tape or not chat_key:
+            return
+        asst_entry = tape.append(
+            "message", {"role": "assistant", "content": text}
+        )
+        self.tape_store.save_entry(chat_key, asst_entry)
+        self._spawn_background_task(
+            self._maybe_handoff(tape, chat_key),
+            label=f"handoff:{chat_key}",
+        )
+
     async def process_task(
         self,
         user_input: str,
@@ -646,13 +786,7 @@ class OrchestratorAgent:
         job_control = self._parse_job_command(user_input)
         if job_control is not None:
             return await self._handle_job_command(chat_key, job_control)
-        if not self._initialized:
-            async with self._init_lock:
-                if not self._initialized:
-                    logger.info("Initializing resource manager...")
-                    await self.resource_manager.initialize_async()
-                    self._initialized = True
-                    logger.info("Resource manager initialized")
+        await self._ensure_initialized()
         if heartbeat is not None:
             heartbeat.beat()
 
@@ -673,96 +807,24 @@ class OrchestratorAgent:
                 if reply is not None:
                     return reply
 
-        # --- Tape context ---
-        tape: Tape | None = None
-        if chat_key and self.tape_store is not None:
-            logger.info("Loading tape for chat_key=%s", chat_key)
-            tape = self.tape_store.get_or_create(chat_key)
-            logger.info("Tape loaded, observing user message...")
-            if hasattr(self, "memory_store"):
-                self.memory_store.observe_user_message(chat_key, user_input)
-            pending_entries = []
-            # Ensure bootstrap anchor exists
-            if tape.last_anchor() is None:
-                anchor = tape.append("anchor", {"name": "session/start", "state": {}})
-                pending_entries.append(anchor)
-            # Append user message
-            content_for_tape = user_input
-            if media_paths:
-                content_for_tape = f"{user_input}\n[附带 {len(media_paths)} 张图片]"
-            user_entry = tape.append(
-                "message", {"role": "user", "content": content_for_tape}
-            )
-            pending_entries.append(user_entry)
-            self.tape_store.save_entries(chat_key, pending_entries)
-            logger.info("Tape entries saved, proceeding to _answer_with_dag")
-
+        tape = self._prepare_tape(
+            chat_key=chat_key,
+            user_input=user_input,
+            media_paths=media_paths,
+        )
         runtime_job_store = getattr(self, "_runtime_job_store", None)
-        runtime_job = None
-        if chat_key and runtime_job_store is not None:
-            runtime_metadata = dict(job_metadata_override or {})
-            runtime_metadata.setdefault("media_paths", list(media_paths or []))
-            runtime_job = runtime_job_store.create(
-                chat_key=chat_key,
-                goal=user_input,
-                metadata=runtime_metadata,
-            )
-            runtime_job_store.transition(
-                runtime_job.job_id,
-                "planning",
-                progress_message="已接收任务，准备执行",
-            )
-
-        wrapped_runtime_event_callback = runtime_event_callback
-        if runtime_job is not None or (tape is not None and chat_key):
-
-            async def _record_runtime_event(event: Any) -> None:
-                payload = self._runtime_event_payload(event)
-                if runtime_job_store is not None and runtime_job is not None:
-                    payload["job_id"] = str(
-                        payload.get("job_id", "") or runtime_job.job_id
-                    )
-                    inner_payload = dict(payload.get("payload") or {})
-                    inner_payload.setdefault("job_id", runtime_job.job_id)
-                    payload["payload"] = inner_payload
-                    state, progress_message = self._job_state_from_runtime_event(payload)
-                    metadata_update: dict[str, Any] = {}
-                    flow_id = str(payload.get("flow_id", "") or "").strip()
-                    task_id = str(payload.get("task_id", "") or "").strip()
-                    stage = str(inner_payload.get("stage", "") or "").strip()
-                    if flow_id:
-                        metadata_update["flow_id"] = flow_id
-                    if task_id:
-                        metadata_update["last_task_id"] = task_id
-                    if stage:
-                        metadata_update["last_stage"] = stage
-                    runtime_job_store.transition(
-                        runtime_job.job_id,
-                        state,
-                        progress_message=progress_message,
-                        metadata=metadata_update,
-                    )
-                if tape is not None and chat_key:
-                    entry = tape.append(
-                        "event",
-                        {
-                            "event": str(payload.get("event", "") or ""),
-                            "payload": dict(payload.get("payload") or {}),
-                        },
-                        {
-                            "task_id": str(payload.get("task_id", "") or ""),
-                            "flow_id": str(payload.get("flow_id", "") or ""),
-                        },
-                    )
-                    self.tape_store.save_entry(chat_key, entry)
-                    if hasattr(self, "memory_store"):
-                        self.memory_store.observe_runtime_event(chat_key, payload)
-                if runtime_event_callback is not None:
-                    maybe = runtime_event_callback(payload)
-                    if inspect.isawaitable(maybe):
-                        await maybe
-
-            wrapped_runtime_event_callback = _record_runtime_event
+        runtime_job = self._create_runtime_job(
+            chat_key=chat_key,
+            user_input=user_input,
+            media_paths=media_paths,
+            job_metadata_override=job_metadata_override,
+        )
+        wrapped_runtime_event_callback = self._build_runtime_event_recorder(
+            chat_key=chat_key,
+            tape=tape,
+            runtime_job=runtime_job,
+            runtime_event_callback=runtime_event_callback,
+        )
 
         try:
             logger.info("Starting _answer_with_dag")
@@ -784,17 +846,7 @@ class OrchestratorAgent:
             if heartbeat is not None:
                 heartbeat.beat()
 
-            # Append assistant response
-            if tape and chat_key:
-                asst_entry = tape.append(
-                    "message", {"role": "assistant", "content": text}
-                )
-                self.tape_store.save_entry(chat_key, asst_entry)
-                # Fire-and-forget async handoff check
-                self._spawn_background_task(
-                    self._maybe_handoff(tape, chat_key),
-                    label=f"handoff:{chat_key}",
-                )
+            self._record_assistant_reply(chat_key=chat_key, tape=tape, text=text)
             if runtime_job_store is not None and runtime_job is not None:
                 runtime_job_store.transition(
                     runtime_job.job_id,
@@ -986,16 +1038,9 @@ class OrchestratorAgent:
 
     @staticmethod
     def _job_state_from_runtime_event(event_payload: dict[str, Any]) -> tuple[str, str]:
-        normalized = normalize_runtime_feedback_event(event_payload)
-        state = normalized.state if normalized.state in JOB_STATES else "running"
-        if normalized.task_id and normalized.stage not in {"job", "interactive_session"}:
-            if state == "completed":
-                state = "running"
-            elif state == "failed":
-                state = "repairing"
-            elif state == "cancelled":
-                state = "running"
-        progress_message = normalized.message or normalized.stage or state
+        state, progress_message = project_job_state_from_runtime_event(event_payload)
+        if state not in JOB_STATES:
+            return "running", progress_message
         return state, progress_message
 
     def _resolve_job_target(

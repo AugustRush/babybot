@@ -207,6 +207,14 @@ uv run babybot
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
 
+## 编排层当前护栏
+
+- `TaskContract.allowed_tools` / `ExecutionPlan.steps[*].payload.allowed_tools` 会约束路由模型真正可见的 orchestration tools
+- 常规回答默认走 `tool_workflow`，辩论请求默认走 `debate`
+- `reply_to_user` 必须单独收尾；如果仍有未完成的非 scheduler 子任务，编排层会拒绝提前结束
+- runtime feedback 到 `RuntimeJob.state` 的投影已集中到 `runtime_jobs.py`，避免状态映射散落在渠道层
+- `dispatch_team` 的阶段进度现在也会走规范化 runtime event，再由通道层按统一状态机渲染
+
 ### 当前策略算法（简化）
 
 可以把当前实现理解成一层“自动保守优化器”，核心流程如下：

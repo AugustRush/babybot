@@ -37,15 +37,22 @@ def build_execution_plan(contract: TaskContract) -> ExecutionPlan:
                 "participants": participants,
                 "round_budget": contract.round_budget,
                 "stopping_condition": contract.termination_rule,
+                "allowed_tools": list(contract.allowed_tools or ()),
+                "allowed_agents": list(contract.allowed_agents or ()),
             },
         )
         steps = (step,)
     else:
         step = PlanStep(
-            step_id="step_answer",
-            kind="direct_answer",
-            title="Direct answer",
-            payload={"deliverable": contract.deliverable},
+            step_id="step_tool_workflow",
+            kind="tool_workflow",
+            title="Tool-guided answer",
+            payload={
+                "deliverable": contract.deliverable,
+                "allowed_tools": list(contract.allowed_tools or ()),
+                "allowed_agents": list(contract.allowed_agents or ()),
+                "allow_clarification": contract.allow_clarification,
+            },
         )
         steps = (step,)
     return ExecutionPlan(

@@ -202,16 +202,25 @@ class SingleAgentExecutor:
                             "Executor loop guard blocked task=%s tool=%s reason=%s",
                             task.task_id, tool_call.name, verdict.reason,
                         )
-                        blocked_tool_names.add(tool_call.name)
+                        if verdict.disable_tool:
+                            blocked_tool_names.add(tool_call.name)
                         remaining = [
                             t["function"]["name"] for t in available_tools
                             if t["function"]["name"] not in blocked_tool_names
                         ]
                         hint = (
                             f"Loop guard: {verdict.reason}"
-                            f"\nTool '{tool_call.name}' is now disabled for this task."
-                            f"\nYou MUST use a different tool. Available tools: {remaining}"
                         )
+                        if verdict.disable_tool:
+                            hint += (
+                                f"\nTool '{tool_call.name}' is now disabled for this task."
+                                f"\nYou MUST use a different tool. Available tools: {remaining}"
+                            )
+                        else:
+                            hint += (
+                                "\nDo not repeat the same call immediately."
+                                f"\nAvailable tools: {remaining}"
+                            )
                         error_results.append((tool_call, hint))
                         continue
 

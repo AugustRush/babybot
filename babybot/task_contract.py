@@ -18,6 +18,17 @@ _NO_CLARIFICATION_KEYWORDS = (
 )
 _SINGLE_ROUND_KEYWORDS = ("一轮定胜负", "一轮", "单轮", "一回合")
 
+_ANSWER_ALLOWED_TOOLS = (
+    "dispatch_task",
+    "wait_for_tasks",
+    "get_task_result",
+    "reply_to_user",
+)
+_DEBATE_ALLOWED_TOOLS = (
+    "dispatch_team",
+    "reply_to_user",
+)
+
 
 @dataclass(frozen=True)
 class TaskContract:
@@ -62,6 +73,12 @@ def _infer_allow_clarification(goal: str) -> bool:
     return not any(token in goal for token in _NO_CLARIFICATION_KEYWORDS)
 
 
+def _infer_allowed_tools(mode: str) -> tuple[str, ...]:
+    if mode == "debate":
+        return _DEBATE_ALLOWED_TOOLS
+    return _ANSWER_ALLOWED_TOOLS
+
+
 def build_task_contract(
     *,
     user_input: str,
@@ -71,17 +88,19 @@ def build_task_contract(
     goal = str(user_input or "").strip()
     normalized_constraints = normalize_execution_constraints(execution_constraints)
     round_budget = _infer_round_budget(goal, normalized_constraints)
+    mode = _infer_mode(goal, round_budget)
     metadata: dict[str, Any] = {}
     if execution_constraints is not None:
         metadata["execution_constraints"] = normalized_constraints
     return TaskContract(
         chat_key=chat_key,
         goal=goal,
-        mode=_infer_mode(goal, round_budget),
+        mode=mode,
         deliverable="final_answer",
         round_budget=round_budget,
         termination_rule=_infer_termination_rule(goal, round_budget),
         allow_clarification=_infer_allow_clarification(goal),
+        allowed_tools=_infer_allowed_tools(mode),
         metadata=metadata,
     )
 

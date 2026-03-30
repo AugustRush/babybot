@@ -432,7 +432,7 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
         round_budget=1,
         termination_rule="single_round",
         allow_clarification=True,
-        allowed_tools=(),
+        allowed_tools=("dispatch_team", "reply_to_user"),
         allowed_agents=(),
         metadata={"execution_constraints": constraints},
     )

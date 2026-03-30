@@ -27,6 +27,7 @@ class LoopVerdict:
 
     blocked: bool = False
     reason: str = ""
+    disable_tool: bool = False
 
 
 class LoopGuard:
@@ -56,7 +57,8 @@ class LoopGuard:
                 reason=(
                     f"Identical call to '{tool_name}' repeated "
                     f"{self._call_counts[digest]} times "
-                    f"(max {self._config.max_identical_calls})."
+                    f"(max {self._config.max_identical_calls}). "
+                    "Wait for new state or choose a different next step before retrying."
                 ),
             )
 
@@ -68,6 +70,7 @@ class LoopGuard:
                     f"Tool '{tool_name}' exceeded call budget "
                     f"({self._config.per_tool_call_budget})."
                 ),
+                disable_tool=True,
             )
 
         self._tool_sequence.append(f"{tool_name}:{digest}")
@@ -76,6 +79,7 @@ class LoopGuard:
                 return LoopVerdict(
                     blocked=True,
                     reason="Repetitive tool-calling pattern detected.",
+                    disable_tool=True,
                 )
 
         return LoopVerdict()

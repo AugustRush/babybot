@@ -13,7 +13,7 @@ def test_build_execution_plan_for_debate_carries_round_budget() -> None:
         round_budget=1,
         termination_rule="single_round",
         allow_clarification=False,
-        allowed_tools=(),
+        allowed_tools=("dispatch_team", "reply_to_user"),
         allowed_agents=("judge_master",),
         metadata={},
     )
@@ -32,6 +32,8 @@ def test_build_execution_plan_for_debate_carries_round_budget() -> None:
                     "participants": ["judge_master"],
                     "round_budget": 1,
                     "stopping_condition": "single_round",
+                    "allowed_tools": ["dispatch_team", "reply_to_user"],
+                    "allowed_agents": ["judge_master"],
                 },
             ),
         ),
@@ -49,12 +51,23 @@ def test_build_execution_plan_for_single_answer_bypasses_debate() -> None:
         round_budget=None,
         termination_rule="final_answer",
         allow_clarification=True,
-        allowed_tools=(),
+        allowed_tools=(
+            "dispatch_task",
+            "wait_for_tasks",
+            "get_task_result",
+            "reply_to_user",
+        ),
         allowed_agents=(),
         metadata={},
     )
 
     plan = build_execution_plan(contract)
 
-    assert plan.steps[0].kind == "direct_answer"
+    assert plan.steps[0].kind == "tool_workflow"
     assert plan.round_budget is None
+    assert plan.steps[0].payload["allowed_tools"] == [
+        "dispatch_task",
+        "wait_for_tasks",
+        "get_task_result",
+        "reply_to_user",
+    ]

@@ -149,7 +149,7 @@ class DebateResult:
 
 
 class TeamRunner:
-    """Runs structured multi-agent interactions (e.g., debates).
+    """Runs structured multi-agent debate-style interactions.
 
     The runner alternates between agents, passing each agent the previous
     agent's output.  An optional judge function can signal early convergence.

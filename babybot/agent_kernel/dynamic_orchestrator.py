@@ -185,6 +185,10 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
     },
 )
 
+_ORCHESTRATION_TOOL_BY_NAME: dict[str, dict[str, Any]] = {
+    tool["function"]["name"]: tool for tool in _ORCHESTRATION_TOOLS
+}
+
 
 # ── System prompt builder ────────────────────────────────────────────────
 
@@ -428,6 +432,22 @@ class InProcessChildTaskRuntime:
     @property
     def results(self) -> dict[str, TaskResult]:
         return self._results
+
+    def pending_task_ids(self) -> list[str]:
+        return sorted(
+            task_id
+            for task_id, task in self._in_flight.items()
+            if not task.done() and task_id not in self._results
+        )
+
+    def pending_reply_blocking_task_ids(self) -> list[str]:
+        blocking: list[str] = []
+        for task_id in self.pending_task_ids():
+            resource_id = str(self._task_state.get(task_id, {}).get("resource_id", "") or "")
+            if resource_id == "group.scheduler":
+                continue
+            blocking.append(task_id)
+        return blocking
 
     def _update_task_state(self, task_id: str, **payload: Any) -> None:
         current = self._task_state.setdefault(task_id, {})
@@ -1142,6 +1162,31 @@ class DynamicOrchestrator:
                 if not response.tool_calls:
                     return FinalResult(conclusion=response.text)
 
+                reply_call_count = sum(
+                    1 for tool_call in response.tool_calls if tool_call.name == "reply_to_user"
+                )
+                if reply_call_count and len(response.tool_calls) > 1:
+                    response = ModelResponse(
+                        text=response.text,
+                        tool_calls=tuple(
+                            tool_call
+                            for tool_call in response.tool_calls
+                            if tool_call.name != "reply_to_user"
+                        )
+                        + (
+                            ModelToolCall(
+                                call_id="reply_guard",
+                                name="reply_to_user",
+                                arguments={
+                                    "text": (
+                                        "error: reply_to_user must be the only tool call in its turn"
+                                    )
+                                },
+                            ),
+                        ),
+                        finish_reason="tool_calls",
+                    )
+
                 # Append assistant message with all tool_calls
                 messages.append(
                     ModelMessage(
@@ -1189,6 +1234,8 @@ class DynamicOrchestrator:
                         )
                     )
                     if tc.name == "reply_to_user":
+                        if result_text.startswith("error:"):
+                            continue
                         reply_text = tc.arguments.get("text", result_text)
 
                 if scheduler_dispatch_succeeded_this_turn:
@@ -1315,7 +1362,7 @@ class DynamicOrchestrator:
         stream_callback = context.state.get("stream_callback")
         request = ModelRequest(
             messages=tuple(messages),
-            tools=_ORCHESTRATION_TOOLS,
+            tools=self._tool_schemas_for_context(context),
         )
         state = {
             k: v
@@ -1330,6 +1377,27 @@ class DynamicOrchestrator:
             async with heartbeat.keep_alive():
                 return await self._gateway.generate(request, ctx)
         return await self._gateway.generate(request, ctx)
+
+    @staticmethod
+    def _tool_schemas_for_context(
+        context: ExecutionContext,
+    ) -> tuple[dict[str, Any], ...]:
+        execution_plan = context.state.get("execution_plan")
+        allowed = ()
+        if getattr(execution_plan, "steps", None):
+            payload = getattr(execution_plan.steps[0], "payload", {}) or {}
+            allowed = tuple(payload.get("allowed_tools") or ())
+        if not allowed:
+            task_contract = context.state.get("task_contract")
+            allowed = tuple(getattr(task_contract, "allowed_tools", ()) or ())
+        if not allowed:
+            return _ORCHESTRATION_TOOLS
+        filtered = tuple(
+            _ORCHESTRATION_TOOL_BY_NAME[name]
+            for name in allowed
+            if name in _ORCHESTRATION_TOOL_BY_NAME
+        )
+        return filtered or _ORCHESTRATION_TOOLS
 
     async def _dispatch_tool(
         self,
@@ -1411,6 +1479,12 @@ class DynamicOrchestrator:
         if name == "get_task_result":
             return runtime.get_task_result(args.get("task_id", ""))
         if name == "reply_to_user":
+            pending = runtime.pending_reply_blocking_task_ids()
+            if pending:
+                return (
+                    "error: reply_to_user called before child tasks finished; "
+                    f"pending tasks: {', '.join(pending)}"
+                )
             return args.get("text", "")
         if name == "dispatch_team":
             return await self._run_team(args, context)
@@ -1450,6 +1524,43 @@ class DynamicOrchestrator:
         stream_callback = context.state.get("stream_callback")
         reset_stream = getattr(stream_callback, "reset", None) if stream_callback else None
         team_streaming = stream_callback is not None and reset_stream is not None
+        runtime_event_callback = context.state.get("runtime_event_callback")
+        plan_step_id = ""
+        execution_plan = context.state.get("execution_plan")
+        if getattr(execution_plan, "steps", None):
+            plan_step_id = str(execution_plan.steps[0].step_id or "").strip()
+
+        async def _emit_team_event(
+            event_name: str,
+            *,
+            state: str,
+            message: str,
+            progress: float | None = None,
+            error: str = "",
+        ) -> None:
+            if runtime_event_callback is None:
+                return
+            payload: dict[str, Any] = {
+                "state": state,
+                "stage": "debate",
+                "message": message,
+            }
+            if plan_step_id:
+                payload["plan_step_id"] = plan_step_id
+            if progress is not None:
+                payload["progress"] = progress
+            if error:
+                payload["error"] = error
+            maybe = runtime_event_callback(
+                {
+                    "event": event_name,
+                    "flow_id": context.session_id,
+                    "task_id": "team_debate",
+                    "payload": payload,
+                }
+            )
+            if inspect.isawaitable(maybe):
+                await maybe
 
         async def gateway_executor(
             agent_id: str, prompt: str, ctx: dict[str, Any]
@@ -1543,6 +1654,12 @@ class DynamicOrchestrator:
             if team_streaming and send_intermediate is not None and text.strip():
                 await send_intermediate(text)
 
+        await _emit_team_event(
+            "progress",
+            state="planning",
+            message=f"已启动 {len(enriched_agents)} 位专家讨论，最多 {max_rounds} 轮。",
+            progress=0.0,
+        )
         await notify_progress(
             f"已启动 {len(enriched_agents)} 位专家讨论，最多 {max_rounds} 轮。"
         )
@@ -1550,6 +1667,12 @@ class DynamicOrchestrator:
         async def on_round_start(round_num: int, total_rounds: int) -> None:
             if heartbeat is not None:
                 heartbeat.beat()
+            await _emit_team_event(
+                "progress",
+                state="running",
+                message=f"第 {round_num}/{total_rounds} 轮讨论进行中。",
+                progress=round_num / max(1, total_rounds + 1),
+            )
             await notify_progress(f"第 {round_num}/{total_rounds} 轮讨论进行中。")
 
         if team_streaming:
@@ -1574,6 +1697,13 @@ class DynamicOrchestrator:
 
         if team_streaming:
             await reset_stream()
+
+        await _emit_team_event(
+            "completed" if result.completed else "failed",
+            state="completed" if result.completed else "repairing",
+            message=result.summary[:200] or "讨论结束",
+            progress=1.0 if result.completed else None,
+        )
 
         return json.dumps(
             {

@@ -86,6 +86,7 @@ def test_identical_call_blocked_after_max() -> None:
     v = guard.check_call("tool_a", args)  # 3 — exceeds max of 2
     assert v.blocked
     assert "Identical call" in v.reason
+    assert v.disable_tool is False
 
 
 def test_identical_name_different_args_not_blocked_by_identical_check() -> None:
@@ -113,6 +114,7 @@ def test_per_tool_budget_blocks_after_limit() -> None:
     v = guard.check_call("tool_a", {"i": 99})  # 4th call, budget is 3
     assert v.blocked
     assert "budget" in v.reason
+    assert v.disable_tool is True
 
 
 # ---------------------------------------------------------------------------
