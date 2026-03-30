@@ -9,6 +9,15 @@
 - `ExecutorRegistry` 管理可插拔执行后端（Gateway / Claude Code），`DynamicOrchestrator` 负责子任务编排和团队协作调度（通过 `skill_id` 引用 prompt-only skill 定义角色）
 - 只有主 agent 负责最终向通道发送消息；子 agent 只执行任务并返回文本/文件路径
 
+## 运行时文档
+
+运行时合同、长任务与反馈状态机现在有单独文档，README 只保留操作入口与实现概览：
+
+- `docs/agent-runtime/interaction-contract.md`：`TaskContract` / `ExecutionPlan` 的权威字段与约束
+- `docs/agent-runtime/long-running-jobs.md`：`RuntimeJob` 状态、`job_id` 语义与长任务查询约定
+- `docs/agent-runtime/debate-and-round-budget.md`：辩论轮数预算、停止条件与执行映射
+- `docs/agent-runtime/feedback-state-machine.md`：规范化 `RuntimeFeedbackEvent`、状态渲染与去重规则
+
 ## 快速开始
 
 ```bash
@@ -75,6 +84,9 @@ uv run gateway
 | **ExecutorRegistry** | `agent_kernel/executors/__init__.py` | 可插拔执行后端注册与路由（按 backend 名称分发） |
 | **ClaudeCodeExecutor** | `agent_kernel/executors/claude_code.py` | 通过 `claude` CLI 子进程驱动 Claude Code |
 | **TeamRunner** | `agent_kernel/team.py` | 结构化多 Agent 交互（辩论模式），支持 per-agent executor |
+| **TaskContract / ExecutionPlan** | `task_contract.py` / `execution_plan.py` | 用户输入合同化、计划展开、round budget / stop condition 单点约束 |
+| **RuntimeJob / RuntimeJobStore** | `runtime_jobs.py` / `runtime_job_store.py` | 长任务状态持久化、`job_id` 查询与最近任务索引 |
+| **RuntimeFeedbackEvent** | `feedback_events.py` | 运行时反馈规范化、状态渲染与去重 identity |
 | **ResourceManager** | `resource.py` | 对外资源 facade；聚合工具/MCP/技能/子任务运行时 |
 | **SingleAgentExecutor** | `agent_kernel/executor.py` | model → tool_calls → tool_results 执行循环 |
 | **OpenAICompatibleGateway** | `model_gateway.py` | OpenAI 兼容 API 封装，支持图片 vision 格式 |
@@ -114,17 +126,23 @@ uv run babybot
 @session start claude
 @session status
 @session stop
+@job status latest
+@job status <job_id>
 ```
 
 - `@session start claude`：在当前 `chat_key` 下启动 Claude 交互会话
-- `@session status`：查看当前会话是否已启动及 session_id
-- `@session stop`：关闭当前交互会话，后续消息恢复走默认 DAG 编排路径
+- `@session status`：查看当前会话是否活跃；过期会话会先被清理，因此会直接显示“当前没有活动中的交互会话”
+- `@session stop`：关闭当前交互会话；后续消息恢复走默认 DAG 编排路径
+- `@job status latest`：查看当前 `chat_key` 最近一次持久化长任务状态
+- `@job status <job_id>`：按显式 `job_id` 查看长任务状态
 
 当前实现说明：
 
 - 当前 Claude 交互会话是“会话恢复式交互”，不是“常驻进程式交互”
 - `@session start claude` 会先创建一个按 `chat_key` 隔离的 Claude 会话上下文
 - 后续每条消息都会重新启动一次 `claude` CLI，并通过 `--resume <session_id>` 继续该会话
+- `InteractiveSessionManager` 会在 `status()` / `send()` 前先清理过期会话；如果发送时发现已过期，会回退到默认 DAG 编排
+- 交互会话请求会保留 `media_paths`，因此图片/文件输入不会在 session 路径里丢失
 - 会话状态当前保存在 BabyBot 管理的隔离目录中，因此用户在默认终端里直接执行 `claude --resume <session_id>` 未必能接上
 
 交互会话后续计划：
@@ -236,15 +254,18 @@ explain 中会包含这类信息：
 人工纠偏命令：
 
 ```text
-@policy feedback good 拆分合理
-@policy feedback bad 并行导致多次重试
+@policy feedback latest good 拆分合理
+@policy feedback flow-abc bad 并行导致多次重试
 @policy inspect
 @policy inspect scheduling
+@policy inspect flow-abc
 ```
 
-- 反馈会绑定到当前 `chat_key` 最近一次执行 flow
+- 推荐优先使用显式 `flow_id`；`latest` 仅作为兼容路径保留
+- `@policy feedback latest ...` 只会在最近运行记录唯一时自动绑定；如果最近有多个 flow，会要求显式指定 `flow_id`
+- `@policy inspect <flow_id>` 会直接返回该运行的 runtime flow 视图
 - 如果当前会话还没有最近任务，会直接返回明确错误，不会进入正常对话编排
-- `@policy inspect` 会返回当前 policy 聚合摘要，便于排查为什么系统偏向某个 action
+- `@policy inspect` 会返回当前 policy 聚合摘要，`@policy inspect scheduling` / `worker` / `decomposition` 可查看对应决策维度
 
 查看策略数据：
 
@@ -710,12 +731,14 @@ query=继续语音任务
 
 ### 运行时进度反馈
 
-当前阶段反馈比之前更轻量：
+当前进度反馈已经切到规范化状态机，通道层只渲染 `RuntimeFeedbackEvent`：
 
-- `progress` 事件会显示为 `处理中：... (xx%)`
-- `succeeded` 事件会显示为 `阶段完成：...`
-- MessageBus 会去重重复进度文案，减少刷屏
+- `queued` / `planning` / `running` / `waiting_tool` / `waiting_user` / `repairing` 会统一显示为 `处理中：...`
+- `completed` 会显示为 `阶段完成：...`
+- `failed` / `cancelled` 会按失败或取消状态单独渲染，不再混进普通进度
+- MessageBus 会按 `(job_id, task_id, stage, state)` 去重，而不是只按消息文本去重
 - 不再在阶段完成时把完整结果提前重复发一次，避免和最终回复重复
+- 如果消息通道先超时，但任务已经创建了持久化作业，超时提示会附带 `job_id`，方便后续用 `@job status ...` 查询
 
 对于较慢的宿主 Python 技能脚本：
 
@@ -745,6 +768,11 @@ babybot/
 │   ├── cli.py                   # CLI / Gateway 运行器
 │   ├── config.py                # 统一配置管理
 │   ├── orchestrator.py          # 编排 Agent
+│   ├── task_contract.py         # 任务合同模型与归一化入口
+│   ├── execution_plan.py        # 合同展开后的执行计划
+│   ├── runtime_jobs.py          # 长任务状态模型
+│   ├── runtime_job_store.py     # 长任务 SQLite 存储
+│   ├── feedback_events.py       # 运行时反馈规范化与渲染
 │   ├── memory_models.py         # 记忆数据模型
 │   ├── memory_store.py          # Hybrid Memory 存储 / 衰减 / 覆盖
 │   ├── context_views.py         # Hot / Warm / Cold 视图构建
