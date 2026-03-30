@@ -708,6 +708,56 @@ def test_answer_with_dag_uses_adaptive_router_timeout(tmp_path: Path) -> None:
     assert 0.5 <= router_timeout_calls[0] < 2.0
 
 
+def test_answer_with_dag_skips_router_model_for_stable_success_bucket(tmp_path: Path) -> None:
+    gateway = _FakeGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    state_features = {
+        "task_shape": "single_step",
+        "has_media": False,
+        "independent_subtasks": 1,
+    }
+    agent._policy_store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="direct_execute",
+        confidence=0.62,
+    )
+    agent._policy_store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="direct_execute",
+        confidence=0.66,
+    )
+    seen: dict[str, Any] = {}
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("请总结一下这段内容", tape=tape))
+
+    assert text == "ok"
+    assert media == []
+    assert [
+        call for call in gateway.structured_calls if call["model_cls"] == "RoutingDecision"
+    ] == []
+    assert seen["routing_decision"].decision_source == "reflection"
+    assert seen["routing_decision"].execution_style == "direct_execute"
+
+
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:
     class _RepeatableDispatchGateway(_FakeGateway):
         def __init__(self) -> None:

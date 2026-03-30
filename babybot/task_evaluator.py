@@ -52,6 +52,7 @@ class TaskEvaluator:
         retry_count = int(outcome.get("retry_count", 0) or 0)
         dead_letter_count = int(outcome.get("dead_letter_count", 0) or 0)
         stalled_count = int(outcome.get("stalled_count", 0) or 0)
+        task_result_count = int(outcome.get("task_result_count", 0) or 0)
         final_status = str(evaluation.final_status or "").strip().lower()
 
         if final_status and final_status != "succeeded":
@@ -89,5 +90,28 @@ class TaskEvaluator:
                 failure_pattern="retried_too_much",
                 recommended_action="analyze_first",
                 confidence=0.75,
+            )
+        if (
+            final_status == "succeeded"
+            and retry_count <= 0
+            and dead_letter_count <= 0
+            and stalled_count <= 0
+            and task_result_count > 0
+        ):
+            recommended_action = str(evaluation.execution_style or "").strip()
+            if recommended_action not in {
+                "direct_execute",
+                "analyze_first",
+                "retrieve_first",
+                "verify_first",
+            }:
+                recommended_action = "analyze_first"
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="clean_success",
+                recommended_action=recommended_action,
+                confidence=0.6,
             )
         return None

@@ -57,6 +57,40 @@ def test_policy_store_recommends_router_timeout_from_recent_model_runs(tmp_path)
     assert 0.5 <= recommendation["timeout_seconds"] < 2.0
 
 
+def test_policy_store_recommends_route_from_clean_success_reflections(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    state_features = {
+        "task_shape": "single_step",
+        "has_media": False,
+        "independent_subtasks": 1,
+    }
+    store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="direct_execute",
+        confidence=0.62,
+    )
+    store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="direct_execute",
+        confidence=0.68,
+    )
+
+    recommendation = store.recommend_route_from_reflections(
+        chat_key="feishu:c1",
+        state_features=state_features,
+    )
+
+    assert recommendation["route_mode"] == "tool_workflow"
+    assert recommendation["recommended_action"] == "direct_execute"
+    assert recommendation["samples"] == 2
+
+
 def test_policy_store_enables_wal_and_busy_timeout(tmp_path) -> None:
     store = OrchestrationPolicyStore(tmp_path / "policy.db")
 

@@ -75,3 +75,29 @@ def test_task_evaluator_skips_clean_low_signal_runs(tmp_path) -> None:
             "independent_subtasks": 1,
         },
     ) == []
+
+
+def test_task_evaluator_records_clean_success_reflection(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    evaluator = TaskEvaluator(store)
+
+    reflection = evaluator.evaluate(
+        TaskEvaluationInput(
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            state_features={
+                "task_shape": "single_step",
+                "has_media": False,
+                "independent_subtasks": 1,
+            },
+            execution_style="direct_execute",
+            parallelism_hint="serial",
+            worker_hint="deny",
+            final_status="succeeded",
+            outcome={"task_result_count": 1},
+        )
+    )
+
+    assert reflection is not None
+    assert reflection.failure_pattern == "clean_success"
+    assert reflection.recommended_action == "direct_execute"

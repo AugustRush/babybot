@@ -407,6 +407,51 @@ class OrchestratorAgent:
             "state_bucket": str(payload.get("state_bucket", "") or "reflection"),
         }
 
+    @staticmethod
+    def _routing_decision_from_reflection(
+        payload: dict[str, Any] | None,
+    ) -> RoutingDecision | None:
+        if not isinstance(payload, dict):
+            return None
+        route_mode = str(payload.get("route_mode", "") or "").strip()
+        recommended_action = str(payload.get("recommended_action", "") or "").strip()
+        if route_mode not in {"tool_workflow", "answer", "debate"}:
+            return None
+        execution_style = (
+            recommended_action
+            if recommended_action in {
+                "direct_execute",
+                "analyze_first",
+                "retrieve_first",
+                "verify_first",
+            }
+            else "analyze_first"
+        )
+        parallelism_hint = (
+            recommended_action
+            if recommended_action in {"serial", "bounded_parallel"}
+            else "serial"
+        )
+        worker_hint = (
+            "allow"
+            if recommended_action in {"allow", "allow_worker"}
+            else "deny"
+        )
+        samples = int(payload.get("samples", 0) or 0)
+        confidence = float(payload.get("confidence", 0.0) or 0.0)
+        return RoutingDecision(
+            route_mode=route_mode,
+            need_clarification=False,
+            execution_style=execution_style,
+            parallelism_hint=parallelism_hint,
+            worker_hint=worker_hint,
+            explain=(
+                "稳定成功经验直达"
+                + f"(samples={samples}, confidence={confidence:.2f})"
+            ),
+            decision_source="reflection",
+        )
+
     async def _evaluate_task_run_async(
         self,
         *,
@@ -558,6 +603,18 @@ class OrchestratorAgent:
         routing_timeout = float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0)
         runtime_telemetry_store = getattr(self, "_policy_store", None)
         if (
+            self._reflection_enabled()
+            and chat_key
+            and runtime_telemetry_store is not None
+            and hasattr(runtime_telemetry_store, "recommend_route_from_reflections")
+        ):
+            routing_decision = self._routing_decision_from_reflection(
+                runtime_telemetry_store.recommend_route_from_reflections(
+                    chat_key=chat_key,
+                    state_features=scheduling_features,
+                )
+            )
+        if (
             runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "recommend_router_timeout")
         ):
@@ -570,7 +627,7 @@ class OrchestratorAgent:
                 recommendation.get("timeout_seconds", routing_timeout) or routing_timeout
             )
         routing_started = time.perf_counter()
-        if self._routing_enabled():
+        if self._routing_enabled() and routing_decision is None:
             routing_decision = await route_task(
                 self.gateway,
                 routing_snapshot,

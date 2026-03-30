@@ -192,6 +192,89 @@ class OrchestrationPolicyStore:
         ranked.sort(key=lambda item: item[0], reverse=True)
         return [payload for _, payload in ranked[: max(0, int(limit))]]
 
+    def recommend_route_from_reflections(
+        self,
+        *,
+        state_features: dict[str, Any],
+        chat_key: str | None = None,
+        min_confidence: float = 0.55,
+        min_samples: int = 2,
+        limit: int = 12,
+    ) -> dict[str, Any] | None:
+        buckets = build_policy_state_buckets(state_features)
+        rows = self._ensure_db().execute(
+            """
+            SELECT chat_key, route_mode, state_bucket, recommended_action,
+                   confidence, created_at, failure_pattern
+            FROM policy_reflections
+            WHERE failure_pattern='clean_success'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            if chat_key and str(row["chat_key"] or "").strip() != str(chat_key).strip():
+                continue
+            state_bucket = str(row["state_bucket"] or "")
+            if state_bucket not in buckets:
+                continue
+            confidence = max(0.0, float(row["confidence"] or 0.0))
+            if confidence < float(min_confidence):
+                continue
+            route_mode = str(row["route_mode"] or "").strip()
+            recommended_action = str(row["recommended_action"] or "").strip()
+            if not route_mode:
+                continue
+            key = (route_mode, recommended_action)
+            payload = grouped.setdefault(
+                key,
+                {
+                    "route_mode": route_mode,
+                    "recommended_action": recommended_action,
+                    "samples": 0,
+                    "confidence_sum": 0.0,
+                    "best_bucket_rank": 0.0,
+                    "latest_created_at": "",
+                },
+            )
+            payload["samples"] = int(payload["samples"]) + 1
+            payload["confidence_sum"] = float(payload["confidence_sum"]) + confidence
+            payload["best_bucket_rank"] = max(
+                float(payload["best_bucket_rank"]),
+                float(len(buckets) - buckets.index(state_bucket)),
+            )
+            payload["latest_created_at"] = max(
+                str(payload["latest_created_at"] or ""),
+                str(row["created_at"] or ""),
+            )
+        if not grouped:
+            return None
+        ranked = sorted(
+            grouped.values(),
+            key=lambda item: (
+                int(item["samples"]),
+                float(item["confidence_sum"]) / max(1, int(item["samples"])),
+                float(item["best_bucket_rank"]),
+                str(item["latest_created_at"]),
+            ),
+            reverse=True,
+        )
+        top = ranked[0]
+        if int(top["samples"]) < max(1, int(min_samples)):
+            return None
+        return {
+            "route_mode": str(top["route_mode"]),
+            "recommended_action": str(top["recommended_action"]),
+            "samples": int(top["samples"]),
+            "confidence": round(
+                float(top["confidence_sum"]) / max(1, int(top["samples"])),
+                6,
+            ),
+            "source": "reflection_success",
+        }
+
     def record_runtime_telemetry(
         self,
         *,

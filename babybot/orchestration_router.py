@@ -110,7 +110,7 @@ class RoutingDecision(BaseModel):
     parallelism_hint: Literal["serial", "bounded_parallel"] = "serial"
     worker_hint: Literal["allow", "deny"] = "deny"
     explain: str = Field(default="", max_length=200)
-    decision_source: Literal["model", "rule"] = "model"
+    decision_source: Literal["model", "rule", "reflection"] = "model"
 
 
 @dataclass(frozen=True)
