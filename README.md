@@ -162,11 +162,23 @@ uv run babybot
 7. 在 backend 层补齐 reader/writer 生命周期、超时、异常退出、reset/stop 清理，不把这些复杂度扩散到渠道层。
 8. 等常驻进程模式稳定后，再评估是否追加流式输出回传到飞书/微信，以及是否支持手动接管会话。
 
-## 编排策略学习
+## 轻量路由与策略学习
 
-当前实现增加了一层保守型 orchestration policy learning，用来优化“任务怎么拆、什么时候并行、什么时候不要再开 worker”，而不是去微调底层模型。
+当前实现把编排优化拆成三层，目标是提升智能和效率，但保持本地 CPU 友好、低延迟、不过度设计：
+
+- `ContextRouter`：非 interactive session 的 DAG 路径里，只做一次结构化小模型判定；超时或失败立即回退旧逻辑
+- `ConservativePolicySelector`：继续负责局部动作选择，例如拆解、串并行和 worker gate
+- `TaskEvaluator + ReflectionStore`：任务结束后异步总结失败模式/稳态经验，下次只回注少量 hint
 
 默认行为：
+
+- `routing_enabled` 默认开启，但只影响 `_answer_with_dag()` 路径，不会打断 `@session` 交互式会话
+- `routing_model_name` 可单独配置；为空时回退到当前会话同一模型
+- `routing_timeout` 默认 `2.0` 秒；超过预算直接 fallback，不阻塞主会话流程
+- `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
+- Router 只决定宏观路由（`tool_workflow` / `debate`）和执行倾向，不直接接管整个编排
+
+当前实现增加了一层保守型 orchestration policy learning，用来优化“任务怎么拆、什么时候并行、什么时候不要再开 worker”，而不是去微调底层模型。
 
 - 默认自动开启 policy learning，不需要手工打开
 - `policy_learning_enabled` 现在更适合当作开发/回滚开关；只有你想强制关闭时才需要配置
@@ -206,11 +218,13 @@ uv run babybot
 - 当前调度/worker 策略选择会附带 explain 摘要，便于在日志、debug 和 `@policy inspect` 时直接看出命中 bucket、分数与风险项
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
+- Reflection hint 只按当前稳定 bucket 回注，不做向量检索、不做本地训练、不引入重 retrieval
 
 ## 编排层当前护栏
 
-- `TaskContract.allowed_tools` / `ExecutionPlan.steps[*].payload.allowed_tools` 会约束路由模型真正可见的 orchestration tools
+- `TaskContract.allowed_tools` / `ExecutionPlan.steps[*].payload.allowed_tools` 会约束编排模型真正可见的 orchestration tools
 - 常规回答默认走 `tool_workflow`，辩论请求默认走 `debate`
+- 轻量 Router 只在合同冻结前做一次判定；如果失败、超时或返回无效结构，会直接退回默认合同推断
 - `reply_to_user` 必须单独收尾；如果仍有未完成的非 scheduler 子任务，编排层会拒绝提前结束
 - runtime feedback 到 `RuntimeJob.state` 的投影已集中到 `runtime_jobs.py`，避免状态映射散落在渠道层
 - `dispatch_team` 的阶段进度现在也会走规范化 runtime event，再由通道层按统一状态机渲染

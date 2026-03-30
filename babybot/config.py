@@ -66,6 +66,11 @@ class SystemConfig:
     context_compact_threshold: int = 3000
     context_max_chats: int = 500
     interactive_session_max_age_seconds: int = 7200
+    routing_enabled: bool = True
+    routing_model_name: str = ""
+    routing_timeout: float = 2.0
+    reflection_enabled: bool = True
+    reflection_max_hints: int = 3
     policy_learning_enabled: bool = True
     policy_learning_min_samples: int = 0
     policy_learning_explore_ratio: float = -1.0
@@ -207,6 +212,11 @@ class Config:
             interactive_session_max_age_seconds=system_conf.get(
                 "interactive_session_max_age_seconds", 7200
             ),
+            routing_enabled=system_conf.get("routing_enabled", True),
+            routing_model_name=system_conf.get("routing_model_name", ""),
+            routing_timeout=system_conf.get("routing_timeout", 2.0),
+            reflection_enabled=system_conf.get("reflection_enabled", True),
+            reflection_max_hints=system_conf.get("reflection_max_hints", 3),
             policy_learning_enabled=system_conf.get("policy_learning_enabled", True),
             policy_learning_min_samples=system_conf.get(
                 "policy_learning_min_samples", 0
@@ -364,6 +374,11 @@ class Config:
                 "context_compact_threshold": 3000,
                 "context_max_chats": 500,
                 "interactive_session_max_age_seconds": 7200,
+                "routing_enabled": True,
+                "routing_model_name": "",
+                "routing_timeout": 2.0,
+                "reflection_enabled": True,
+                "reflection_max_hints": 3,
                 "policy_learning_enabled": True,
                 "policy_learning_min_samples": 0,
                 "policy_learning_explore_ratio": -1.0,
@@ -470,6 +485,11 @@ class Config:
                 "context_compact_threshold": self.system.context_compact_threshold,
                 "context_max_chats": self.system.context_max_chats,
                 "interactive_session_max_age_seconds": self.system.interactive_session_max_age_seconds,
+                "routing_enabled": self.system.routing_enabled,
+                "routing_model_name": self.system.routing_model_name,
+                "routing_timeout": self.system.routing_timeout,
+                "reflection_enabled": self.system.reflection_enabled,
+                "reflection_max_hints": self.system.reflection_max_hints,
                 "policy_learning_enabled": self.system.policy_learning_enabled,
                 "policy_learning_min_samples": self.system.policy_learning_min_samples,
                 "policy_learning_explore_ratio": self.system.policy_learning_explore_ratio,

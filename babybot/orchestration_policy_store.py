@@ -112,6 +112,86 @@ class OrchestrationPolicyStore:
         )
         db.commit()
 
+    def record_reflection(
+        self,
+        *,
+        chat_key: str,
+        route_mode: str,
+        state_features: dict[str, Any],
+        failure_pattern: str,
+        recommended_action: str,
+        confidence: float,
+        created_at: str | None = None,
+    ) -> None:
+        db = self._ensure_db()
+        db.execute(
+            """
+            INSERT INTO policy_reflections (
+                chat_key, route_mode, state_bucket, state_features_json,
+                failure_pattern, recommended_action, confidence, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_key,
+                route_mode,
+                build_policy_state_buckets(state_features)[0],
+                json.dumps(state_features, ensure_ascii=False, sort_keys=True),
+                failure_pattern,
+                recommended_action,
+                max(0.0, min(1.0, float(confidence))),
+                created_at or self._utc_now(),
+            ),
+        )
+        db.commit()
+
+    def list_reflection_hints(
+        self,
+        *,
+        route_mode: str,
+        state_features: dict[str, Any],
+        limit: int = 3,
+        chat_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        buckets = build_policy_state_buckets(state_features)
+        rows = self._ensure_db().execute(
+            """
+            SELECT chat_key, route_mode, state_bucket, state_features_json,
+                   failure_pattern, recommended_action, confidence, created_at
+            FROM policy_reflections
+            WHERE route_mode=?
+            """,
+            (route_mode,),
+        ).fetchall()
+        ranked: list[tuple[tuple[float, float, str], dict[str, Any]]] = []
+        for row in rows:
+            if chat_key and str(row["chat_key"] or "").strip() != str(chat_key).strip():
+                continue
+            state_bucket = str(row["state_bucket"] or "")
+            if state_bucket not in buckets:
+                continue
+            payload = {
+                "chat_key": str(row["chat_key"] or ""),
+                "route_mode": str(row["route_mode"] or ""),
+                "state_bucket": state_bucket,
+                "state_features": self._decode_json_object(row["state_features_json"]),
+                "failure_pattern": str(row["failure_pattern"] or ""),
+                "recommended_action": str(row["recommended_action"] or ""),
+                "confidence": float(row["confidence"] or 0.0),
+                "created_at": str(row["created_at"] or ""),
+            }
+            ranked.append(
+                (
+                    (
+                        float(len(buckets) - buckets.index(state_bucket)),
+                        payload["confidence"],
+                        payload["created_at"],
+                    ),
+                    payload,
+                )
+            )
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [payload for _, payload in ranked[: max(0, int(limit))]]
+
     def latest_feedback(self, flow_id: str) -> dict[str, Any] | None:
         row = self._ensure_db().execute(
             """
@@ -356,6 +436,21 @@ class OrchestrationPolicyStore:
                     chat_key TEXT NOT NULL,
                     rating TEXT NOT NULL,
                     reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS policy_reflections (
+                    id INTEGER PRIMARY KEY,
+                    chat_key TEXT NOT NULL,
+                    route_mode TEXT NOT NULL,
+                    state_bucket TEXT NOT NULL,
+                    state_features_json TEXT NOT NULL,
+                    failure_pattern TEXT NOT NULL,
+                    recommended_action TEXT NOT NULL,
+                    confidence REAL NOT NULL,
                     created_at TEXT NOT NULL
                 )
                 """

@@ -13,6 +13,12 @@
 - `allowed_agents`：白名单 agent
 - `metadata`：附加约束与 runtime 绑定信息
 
+当前补充语义：
+
+- `metadata.execution_constraints`：执行约束抽取后的归一化结果
+- `metadata.routing_decision`：轻量 Router 的结构化判定快照（可选）
+- Router 只允许在 `TaskContract` 冻结前覆写 `answer/debate` 路由与澄清倾向；冻结后下游运行时不得再次放宽
+
 当前约束：
 
 - 普通编排回答默认只允许 `dispatch_task` / `wait_for_tasks` / `get_task_result` / `reply_to_user`
@@ -36,5 +42,6 @@
 
 1. `orchestrator.process_task()` 只构建一次 `TaskContract` 和 `ExecutionPlan`
 2. 下游运行时只读取合同/计划，不再直接推断原始用户文案
-3. 若 runtime 参数与 `TaskContract` 冲突，必须立即报错，不能静默放宽
-4. `DynamicOrchestrator` 发给模型的 orchestration tool 集，必须受 `TaskContract.allowed_tools` / `ExecutionPlan.steps[*].payload.allowed_tools` 约束
+3. 轻量 Router 若返回无效结构、超时或失败，必须回退默认合同推断，不能阻塞主流程
+4. 若 runtime 参数与 `TaskContract` 冲突，必须立即报错，不能静默放宽
+5. `DynamicOrchestrator` 发给模型的 orchestration tool 集，必须受 `TaskContract.allowed_tools` / `ExecutionPlan.steps[*].payload.allowed_tools` 约束

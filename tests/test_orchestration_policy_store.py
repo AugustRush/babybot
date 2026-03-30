@@ -373,3 +373,44 @@ def test_policy_store_tracks_recent_reward_drift(tmp_path) -> None:
 
     assert stats["bounded_parallel"]["recent_mean_reward"] < 0.3
     assert stats["bounded_parallel"]["drift_score"] > 0.4
+
+
+def test_policy_store_records_and_queries_reflection_hints(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features={
+            "task_shape": "multi_step",
+            "has_media": False,
+            "independent_subtasks": 2,
+        },
+        failure_pattern="retried_too_much",
+        recommended_action="analyze_first",
+        confidence=0.9,
+    )
+    store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features={
+            "task_shape": "multi_step",
+            "has_media": False,
+            "independent_subtasks": 2,
+        },
+        failure_pattern="none",
+        recommended_action="bounded_parallel",
+        confidence=0.4,
+    )
+
+    hints = store.list_reflection_hints(
+        route_mode="tool_workflow",
+        state_features={
+            "task_shape": "multi_step",
+            "has_media": False,
+            "independent_subtasks": 2,
+        },
+        limit=1,
+    )
+
+    assert len(hints) == 1
+    assert hints[0]["recommended_action"] == "analyze_first"

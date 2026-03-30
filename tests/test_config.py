@@ -50,6 +50,53 @@ def test_policy_learning_defaults_to_automatic_mode(tmp_path, monkeypatch):
     assert cfg.system.policy_learning_explore_ratio == -1.0
 
 
+def test_routing_config_defaults_to_lightweight_fallback_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "home" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"model": {"api_key": "test"}}),
+        encoding="utf-8",
+    )
+
+    cfg = Config(str(config_path))
+
+    assert cfg.system.routing_enabled is True
+    assert cfg.system.routing_model_name == ""
+    assert cfg.system.routing_timeout == 2.0
+    assert cfg.system.reflection_enabled is True
+    assert cfg.system.reflection_max_hints == 3
+
+
+def test_routing_config_fields_loaded_from_system(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "home" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "system": {
+                    "routing_enabled": False,
+                    "routing_model_name": "mini-router",
+                    "routing_timeout": 1.2,
+                    "reflection_enabled": False,
+                    "reflection_max_hints": 2,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config(str(config_path))
+
+    assert cfg.system.routing_enabled is False
+    assert cfg.system.routing_model_name == "mini-router"
+    assert cfg.system.routing_timeout == 1.2
+    assert cfg.system.reflection_enabled is False
+    assert cfg.system.reflection_max_hints == 2
+
+
 def test_timeout_defaults_to_system_config_default_when_omitted(tmp_path, monkeypatch):
     monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
     config_path = tmp_path / "home" / "config.json"

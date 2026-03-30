@@ -32,12 +32,20 @@ from .interactive_sessions.types import InteractiveRequest
 from .model_gateway import OpenAICompatibleGateway
 from .orchestration_policy import ConservativePolicySelector
 from .orchestration_policy_store import OrchestrationPolicyStore
+from .orchestration_router import (
+    RoutingDecision,
+    build_routing_snapshot,
+    route_mode_to_contract_mode,
+    route_mode_to_step_kind,
+    route_task,
+)
 from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
 from .runtime_job_store import RuntimeJobStore
 from .runtime_jobs import JOB_STATES, project_job_state_from_runtime_event
 from .runtime_feedback_commands import parse_policy_command
 from .task_contract import build_task_contract
+from .task_evaluator import TaskEvaluationInput, TaskEvaluator
 
 if TYPE_CHECKING:
     from .heartbeat import Heartbeat
@@ -173,6 +181,14 @@ class OrchestratorAgent:
     def _policy_learning_enabled(self) -> bool:
         system = getattr(getattr(self, "config", None), "system", None)
         return bool(getattr(system, "policy_learning_enabled", False))
+
+    def _routing_enabled(self) -> bool:
+        system = getattr(getattr(self, "config", None), "system", None)
+        return bool(getattr(system, "routing_enabled", True))
+
+    def _reflection_enabled(self) -> bool:
+        system = getattr(getattr(self, "config", None), "system", None)
+        return bool(getattr(system, "reflection_enabled", True))
 
     @staticmethod
     def _build_policy_state_features(
@@ -319,6 +335,112 @@ class OrchestratorAgent:
             )
 
     @staticmethod
+    def _routing_policy_hints(decision: RoutingDecision | None) -> list[str]:
+        if decision is None:
+            return []
+        hints: list[str] = []
+        explain = str(decision.explain or "").strip()
+        if explain:
+            hints.append(f"路由判定：{explain}")
+        execution_hints = {
+            "direct_execute": "路由建议：信息充分时可直接执行，但仍需避免猜测。",
+            "analyze_first": "路由建议：先分析边界与依赖，再开始执行。",
+            "retrieve_first": "路由建议：先补足上下文或外部信息，再执行。",
+            "verify_first": "路由建议：在收尾前优先做局部验证。",
+        }
+        parallel_hints = {
+            "serial": "路由建议：默认串行推进，优先保证收敛。",
+            "bounded_parallel": "路由建议：仅对明确独立子任务做有限并行。",
+        }
+        worker_hints = {
+            "allow": "路由建议：必要时可启用少量 worker。",
+            "deny": "路由建议：优先在当前主链路完成，不轻易扩散 worker。",
+        }
+        for mapping, key in (
+            (execution_hints, decision.execution_style),
+            (parallel_hints, decision.parallelism_hint),
+            (worker_hints, decision.worker_hint),
+        ):
+            hint = mapping.get(str(key or "").strip())
+            if hint and hint not in hints:
+                hints.append(hint)
+        return hints
+
+    @staticmethod
+    def _format_reflection_hint(payload: dict[str, Any]) -> str:
+        return (
+            "历史反思："
+            f"曾出现 {str(payload.get('failure_pattern', '') or 'unknown')}，"
+            f"下次优先考虑 {str(payload.get('recommended_action', '') or 'safe_action')} "
+            f"(置信度 {float(payload.get('confidence', 0.0) or 0.0):.2f})。"
+        )
+
+    @staticmethod
+    def _select_reflection_override(
+        hints: list[dict[str, Any]],
+        *,
+        allowed_actions: set[str],
+    ) -> str:
+        for payload in hints:
+            action = str(payload.get("recommended_action", "") or "").strip()
+            if action in allowed_actions:
+                return action
+        return ""
+
+    def _maybe_override_policy_from_reflection(
+        self,
+        payload: dict[str, Any],
+        *,
+        preferred_action: str,
+        hint_prefix: str,
+    ) -> dict[str, Any]:
+        if not preferred_action:
+            return payload
+        explain = str(payload.get("explain", "") or "")
+        if "insufficient_samples" not in explain and payload.get("state_bucket") != "global_default":
+            return payload
+        return {
+            "action_name": preferred_action,
+            "hint": f"{hint_prefix}{preferred_action}",
+            "explain": f"reflection_override; preferred_action={preferred_action}; base={explain}",
+            "state_bucket": str(payload.get("state_bucket", "") or "reflection"),
+        }
+
+    async def _evaluate_task_run_async(
+        self,
+        *,
+        chat_key: str,
+        route_mode: str,
+        state_features: dict[str, Any],
+        routing_decision: RoutingDecision | None,
+        final_status: str,
+        outcome: dict[str, Any],
+    ) -> None:
+        if not self._reflection_enabled():
+            return
+        store = getattr(self, "_policy_store", None)
+        if store is None or not hasattr(store, "record_reflection"):
+            return
+        TaskEvaluator(store).evaluate(
+            TaskEvaluationInput(
+                chat_key=chat_key,
+                route_mode=route_mode,
+                state_features=state_features,
+                execution_style=(
+                    routing_decision.execution_style if routing_decision is not None else ""
+                ),
+                parallelism_hint=(
+                    routing_decision.parallelism_hint if routing_decision is not None else ""
+                ),
+                worker_hint=(
+                    routing_decision.worker_hint if routing_decision is not None else ""
+                ),
+                final_status=final_status,
+                outcome=outcome,
+            )
+        )
+
+    @staticmethod
     def _policy_reward(events: list[dict[str, Any]], final_status: str) -> float:
         reward = 1.0 if final_status == "succeeded" else -1.0
         retry_count = sum(1 for event in events if event.get("event") == "retrying")
@@ -402,8 +524,6 @@ class OrchestratorAgent:
             user_input,
             media_paths=media_paths,
         )
-        scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
-        worker_policy = self.choose_worker_policy(features=scheduling_features)
         execution_constraints = await infer_execution_constraints(
             self.gateway,
             user_input,
@@ -412,17 +532,92 @@ class OrchestratorAgent:
                 float(getattr(self.config.system, "timeout", 0) or 0) or None
             ),
         )
+        runtime_job = (
+            self._runtime_job_store.latest_for_chat(chat_key)
+            if chat_key and getattr(self, "_runtime_job_store", None) is not None
+            else None
+        )
+        routing_snapshot = build_routing_snapshot(
+            chat_key=chat_key,
+            goal=user_input,
+            tape=tape,
+            memory_store=self.memory_store if tape else None,
+            runtime_job=runtime_job,
+            recent_flow_ids=list(getattr(self, "_recent_flows_by_chat", {}).get(chat_key, [])),
+            execution_constraints=execution_constraints,
+        )
+        routing_decision = None
+        if self._routing_enabled():
+            routing_decision = await route_task(
+                self.gateway,
+                routing_snapshot,
+                heartbeat=heartbeat,
+                model_name=getattr(self.config.system, "routing_model_name", ""),
+                timeout=float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0),
+            )
         task_contract = build_task_contract(
             user_input=user_input,
             chat_key=chat_key,
             execution_constraints=execution_constraints,
+            route_mode_override=(
+                route_mode_to_contract_mode(routing_decision.route_mode)
+                if routing_decision is not None
+                else None
+            ),
+            allow_clarification_override=(
+                True if routing_decision is not None and routing_decision.need_clarification else None
+            ),
+            metadata_overrides=(
+                {"routing_decision": routing_decision.model_dump()}
+                if routing_decision is not None
+                else None
+            ),
+        )
+        route_mode = (
+            route_mode_to_step_kind(routing_decision.route_mode)
+            if routing_decision is not None
+            else ("debate" if task_contract.mode == "debate" else "tool_workflow")
+        )
+        reflection_hints_payload: list[dict[str, Any]] = []
+        if (
+            self._reflection_enabled()
+            and getattr(self, "_policy_store", None) is not None
+            and hasattr(self._policy_store, "list_reflection_hints")
+        ):
+            reflection_hints_payload = self._policy_store.list_reflection_hints(
+                route_mode=route_mode,
+                state_features=scheduling_features,
+                limit=int(getattr(self.config.system, "reflection_max_hints", 3) or 3),
+            )
+        scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
+        worker_policy = self.choose_worker_policy(features=scheduling_features)
+        scheduling_policy = self._maybe_override_policy_from_reflection(
+            scheduling_policy,
+            preferred_action=self._select_reflection_override(
+                reflection_hints_payload,
+                allowed_actions={"serial", "bounded_parallel"},
+            ),
+            hint_prefix="历史反思建议调度动作：",
+        )
+        worker_policy = self._maybe_override_policy_from_reflection(
+            worker_policy,
+            preferred_action=self._select_reflection_override(
+                reflection_hints_payload,
+                allowed_actions={"allow_worker", "deny_worker"},
+            ),
+            hint_prefix="历史反思建议 worker 动作：",
         )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
+        policy_hints.extend(self._routing_policy_hints(routing_decision))
         policy_hints.extend(build_execution_constraint_hints(execution_constraints))
         for payload in (scheduling_policy, worker_policy):
             hint = str(payload.get("hint", "") or "").strip()
             if hint and hint not in policy_hints:
+                policy_hints.append(hint)
+        for payload in reflection_hints_payload:
+            hint = self._format_reflection_hint(payload)
+            if hint not in policy_hints:
                 policy_hints.append(hint)
 
         context = ExecutionContext(
@@ -444,6 +639,8 @@ class OrchestratorAgent:
                     ("runtime_event_callback", runtime_event_callback),
                     ("send_intermediate_message", send_intermediate_message),
                     ("policy_hints", policy_hints),
+                    ("routing_snapshot", routing_snapshot),
+                    ("routing_decision", routing_decision),
                     ("execution_constraints", execution_constraints),
                     ("task_contract", task_contract),
                     ("execution_plan", execution_plan),
@@ -482,17 +679,29 @@ class OrchestratorAgent:
                 chat_key=chat_key,
                 events=list(context.events),
             )
+            failed_outcome = self._policy_outcome_details(
+                context.events,
+                error=str(exc),
+            )
             self._record_policy_outcome(
                 PolicyOutcomeRecord(
                     flow_id=flow_id,
                     chat_key=chat_key,
                     final_status="failed",
                     reward=self._policy_reward(context.events, "failed"),
-                    outcome=self._policy_outcome_details(
-                        context.events,
-                        error=str(exc),
-                    ),
+                    outcome=failed_outcome,
                 )
+            )
+            self._spawn_background_task(
+                self._evaluate_task_run_async(
+                    chat_key=chat_key,
+                    route_mode=route_mode,
+                    state_features=scheduling_features,
+                    routing_decision=routing_decision,
+                    final_status="failed",
+                    outcome=failed_outcome,
+                ),
+                label="task-evaluator-failed",
             )
             raise
         self._persist_policy_events(
@@ -500,17 +709,29 @@ class OrchestratorAgent:
             chat_key=chat_key,
             events=list(context.events),
         )
+        succeeded_outcome = self._policy_outcome_details(
+            context.events,
+            result=result,
+        )
         self._record_policy_outcome(
             PolicyOutcomeRecord(
                 flow_id=flow_id,
                 chat_key=chat_key,
                 final_status="succeeded",
                 reward=self._policy_reward(context.events, "succeeded"),
-                outcome=self._policy_outcome_details(
-                    context.events,
-                    result=result,
-                ),
+                outcome=succeeded_outcome,
             )
+        )
+        self._spawn_background_task(
+            self._evaluate_task_run_async(
+                chat_key=chat_key,
+                route_mode=route_mode,
+                state_features=scheduling_features,
+                routing_decision=routing_decision,
+                final_status="succeeded",
+                outcome=succeeded_outcome,
+            ),
+            label="task-evaluator-succeeded",
         )
 
         text = result.conclusion or "任务完成，但没有可返回的结果。"

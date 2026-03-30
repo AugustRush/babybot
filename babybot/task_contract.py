@@ -84,14 +84,22 @@ def build_task_contract(
     user_input: str,
     chat_key: str,
     execution_constraints: Any = None,
+    route_mode_override: str | None = None,
+    allow_clarification_override: bool | None = None,
+    metadata_overrides: dict[str, Any] | None = None,
 ) -> TaskContract:
     goal = str(user_input or "").strip()
     normalized_constraints = normalize_execution_constraints(execution_constraints)
     round_budget = _infer_round_budget(goal, normalized_constraints)
     mode = _infer_mode(goal, round_budget)
+    if route_mode_override is not None:
+        normalized_mode = str(route_mode_override or "").strip().lower()
+        mode = "debate" if normalized_mode == "debate" else "answer"
     metadata: dict[str, Any] = {}
     if execution_constraints is not None:
         metadata["execution_constraints"] = normalized_constraints
+    if metadata_overrides:
+        metadata.update(dict(metadata_overrides))
     return TaskContract(
         chat_key=chat_key,
         goal=goal,
@@ -99,7 +107,11 @@ def build_task_contract(
         deliverable="final_answer",
         round_budget=round_budget,
         termination_rule=_infer_termination_rule(goal, round_budget),
-        allow_clarification=_infer_allow_clarification(goal),
+        allow_clarification=(
+            _infer_allow_clarification(goal)
+            if allow_clarification_override is None
+            else bool(allow_clarification_override)
+        ),
         allowed_tools=_infer_allowed_tools(mode),
         metadata=metadata,
     )

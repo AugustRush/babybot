@@ -43,6 +43,11 @@
     "context_compact_threshold": 3000,
     "context_max_chats": 500,
     "interactive_session_max_age_seconds": 7200,
+    "routing_enabled": true,
+    "routing_model_name": "",
+    "routing_timeout": 2.0,
+    "reflection_enabled": true,
+    "reflection_max_hints": 3,
     "policy_learning_enabled": true,
     "policy_learning_min_samples": 0,
     "policy_learning_explore_ratio": -1.0

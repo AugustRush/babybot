@@ -351,7 +351,7 @@ class OpenAICompatibleGateway(ModelProvider):
                     "completion_tokens": 0,
                     "total_tokens": 0,
                 },
-                "model": self._config.model.model_name,
+                "model": str(kwargs.get("model", self._config.model.model_name)),
             },
         )
 
@@ -362,8 +362,10 @@ class OpenAICompatibleGateway(ModelProvider):
     ) -> ModelResponse:
         client = self._ensure_client()
         messages = [self._to_openai_message(msg) for msg in request.messages]
+        meta = request.metadata or {}
+        requested_model = str(meta.get("model_name") or self._config.model.model_name)
         kwargs: dict[str, Any] = {
-            "model": self._config.model.model_name,
+            "model": requested_model,
             "messages": messages,
             "temperature": self._config.model.temperature,
             "max_tokens": self._config.model.max_tokens,
@@ -374,18 +376,20 @@ class OpenAICompatibleGateway(ModelProvider):
             kwargs["tool_choice"] = "auto"
             tool_count = len(request.tools)
 
-        meta = request.metadata or {}
         task_id = meta.get("task_id", "?")
         step = meta.get("step", "?")
         logger.info(
             "LLM request task=%s step=%s model=%s tools=%d msgs=%d",
             task_id,
             step,
-            self._config.model.model_name,
+            requested_model,
             tool_count,
             len(messages),
         )
-        per_call_timeout = max(1.0, float(self._config.system.subtask_timeout))
+        per_call_timeout = max(
+            1.0,
+            float(meta.get("timeout", self._config.system.subtask_timeout) or 0.0),
+        )
         logger.info(
             "LLM request timeout task=%s step=%s timeout=%.1fs",
             task_id,
@@ -463,7 +467,7 @@ class OpenAICompatibleGateway(ModelProvider):
                 "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
             },
-            "model": getattr(completion, "model", self._config.model.model_name),
+            "model": getattr(completion, "model", requested_model),
         }
         return ModelResponse(
             text=content,
@@ -478,6 +482,8 @@ class OpenAICompatibleGateway(ModelProvider):
         user_prompt: str,
         heartbeat: Any = None,
         on_stream_text: StreamTextCallback | None = None,
+        model_name: str | None = None,
+        timeout: float | None = None,
     ) -> str:
         if on_stream_text is not None:
             return await self._complete_streaming(
@@ -496,7 +502,15 @@ class OpenAICompatibleGateway(ModelProvider):
             messages=(
                 ModelMessage(role="system", content=system_prompt),
                 ModelMessage(role="user", content=user_prompt),
-            )
+            ),
+            metadata={
+                k: v
+                for k, v in {
+                    "model_name": model_name,
+                    "timeout": timeout,
+                }.items()
+                if v not in {None, ""}
+            },
         )
         state: dict[str, Any] = {}
         if heartbeat is not None:
@@ -509,6 +523,8 @@ class OpenAICompatibleGateway(ModelProvider):
         messages: list[ModelMessage],
         heartbeat: Any = None,
         on_stream_text: StreamTextCallback | None = None,
+        model_name: str | None = None,
+        timeout: float | None = None,
     ) -> str:
         """Send a full multi-turn message list to the model and return text."""
         if on_stream_text is not None:
@@ -518,7 +534,17 @@ class OpenAICompatibleGateway(ModelProvider):
                 heartbeat=heartbeat,
                 on_stream_text=on_stream_text,
             )
-        req = ModelRequest(messages=tuple(messages))
+        req = ModelRequest(
+            messages=tuple(messages),
+            metadata={
+                k: v
+                for k, v in {
+                    "model_name": model_name,
+                    "timeout": timeout,
+                }.items()
+                if v not in {None, ""}
+            },
+        )
         state: dict[str, Any] = {}
         if heartbeat is not None:
             state["heartbeat"] = heartbeat
@@ -531,6 +557,8 @@ class OpenAICompatibleGateway(ModelProvider):
         user_prompt: str,
         model_cls: type[T],
         heartbeat: Any = None,
+        model_name: str | None = None,
+        timeout: float | None = None,
     ) -> T | None:
         instruction = (
             "请严格输出 JSON 对象，不要输出 markdown 或额外解释。"
@@ -540,6 +568,8 @@ class OpenAICompatibleGateway(ModelProvider):
             system_prompt=system_prompt,
             user_prompt=f"{user_prompt}\n\n{instruction}",
             heartbeat=heartbeat,
+            model_name=model_name,
+            timeout=timeout,
         )
         # Strip markdown code fences if present
         cleaned = text.strip()

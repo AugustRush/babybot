@@ -21,6 +21,7 @@ from babybot.context import TapeStore
 from babybot.memory_store import HybridMemoryStore
 from babybot.execution_plan import ExecutionPlan
 from babybot.orchestrator import OrchestratorAgent
+from babybot.orchestration_policy_store import OrchestrationPolicyStore
 from babybot.task_contract import TaskContract
 
 
@@ -112,10 +113,28 @@ def _make_agent(gateway: _FakeGateway, rm: _FakeResourceManager) -> Orchestrator
     agent.gateway = gateway
     agent.resource_manager = rm
     agent.tape_store = None
+    agent.memory_store = None
+    agent._policy_store = None
     agent._child_task_bus = None
     agent._task_heartbeat_registry = None
+    agent._recent_flow_ids_by_chat = {}
+    agent._recent_flows_by_chat = {}
+    agent._handoff_locks = {}
+    agent._background_tasks = set()
     agent.config = type("C", (), {
-        "system": type("S", (), {"context_history_tokens": 2000, "idle_timeout": 30})(),
+        "system": type("S", (), {
+            "context_history_tokens": 2000,
+            "idle_timeout": 30,
+            "timeout": 600,
+            "routing_enabled": True,
+            "routing_model_name": "",
+            "routing_timeout": 2.0,
+            "reflection_enabled": True,
+            "reflection_max_hints": 3,
+            "policy_learning_enabled": True,
+            "policy_learning_min_samples": 0,
+            "policy_learning_explore_ratio": -1.0,
+        })(),
     })()
     return agent
 
@@ -436,6 +455,106 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
         allowed_agents=(),
         metadata={"execution_constraints": constraints},
     )
+
+
+def test_answer_with_dag_uses_router_decision_to_override_contract() -> None:
+    class _RoutingGateway(_FakeGateway):
+        async def complete_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            model_cls: type,
+            heartbeat: Any = None,
+        ):
+            del system_prompt, user_prompt, heartbeat
+            if model_cls.__name__ == "RoutingDecision":
+                return model_cls(
+                    route_mode="debate",
+                    need_clarification=False,
+                    execution_style="analyze_first",
+                    parallelism_hint="serial",
+                    worker_hint="deny",
+                    explain="需要专家讨论",
+                )
+            return None
+
+    rm = _FakeResourceManager()
+    agent = _make_agent(_RoutingGateway([]), rm)
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("帮我比较两个方案"))
+
+    assert text == "ok"
+    assert media == []
+    assert seen["task_contract"].mode == "debate"
+    assert seen["routing_decision"].route_mode == "debate"
+    assert any("需要专家讨论" in hint for hint in seen["policy_hints"])
+
+
+def test_answer_with_dag_router_falls_back_when_model_returns_none() -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, _ = asyncio.run(agent._answer_with_dag("请查一下天气"))
+
+    assert text == "ok"
+    assert seen["task_contract"].mode == "answer"
+
+
+def test_answer_with_dag_includes_reflection_hints_in_policy_hints(tmp_path: Path) -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    agent._policy_store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features={
+            "task_shape": "single_step",
+            "has_media": False,
+            "independent_subtasks": 1,
+        },
+        failure_pattern="retried_too_much",
+        recommended_action="analyze_first",
+        confidence=0.8,
+    )
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("请查一下天气"))
+
+    assert text == "ok"
+    assert media == []
+    assert any("analyze_first" in hint for hint in seen["policy_hints"])
 
 
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:

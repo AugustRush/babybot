@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ReflectionRecord:
+    chat_key: str
+    route_mode: str
+    state_features: dict[str, Any]
+    failure_pattern: str
+    recommended_action: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class TaskEvaluationInput:
+    chat_key: str
+    route_mode: str
+    state_features: dict[str, Any] = field(default_factory=dict)
+    execution_style: str = ""
+    parallelism_hint: str = ""
+    worker_hint: str = ""
+    final_status: str = ""
+    outcome: dict[str, Any] = field(default_factory=dict)
+
+
+class TaskEvaluator:
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    def evaluate(self, evaluation: TaskEvaluationInput) -> ReflectionRecord | None:
+        reflection = self._build_reflection(evaluation)
+        if reflection is None:
+            return None
+        self._store.record_reflection(
+            chat_key=reflection.chat_key,
+            route_mode=reflection.route_mode,
+            state_features=reflection.state_features,
+            failure_pattern=reflection.failure_pattern,
+            recommended_action=reflection.recommended_action,
+            confidence=reflection.confidence,
+        )
+        return reflection
+
+    @staticmethod
+    def _build_reflection(
+        evaluation: TaskEvaluationInput,
+    ) -> ReflectionRecord | None:
+        outcome = dict(evaluation.outcome or {})
+        retry_count = int(outcome.get("retry_count", 0) or 0)
+        dead_letter_count = int(outcome.get("dead_letter_count", 0) or 0)
+        stalled_count = int(outcome.get("stalled_count", 0) or 0)
+        final_status = str(evaluation.final_status or "").strip().lower()
+
+        if final_status and final_status != "succeeded":
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="failed_run",
+                recommended_action="analyze_first",
+                confidence=0.85,
+            )
+        if dead_letter_count > 0:
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="dead_lettered",
+                recommended_action="serial",
+                confidence=0.8,
+            )
+        if stalled_count > 0:
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="stalled",
+                recommended_action="serial",
+                confidence=0.75,
+            )
+        if retry_count >= 2:
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="retried_too_much",
+                recommended_action="analyze_first",
+                confidence=0.75,
+            )
+        return None
