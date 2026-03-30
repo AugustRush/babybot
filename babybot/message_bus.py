@@ -393,7 +393,8 @@ class MessageBus:
             "media_paths": msg.media_paths,
         }
         runtime_events: list[dict[str, Any]] = []
-        last_runtime_progress_key: tuple[str, str, str, str] | None = None
+        last_runtime_progress_key: tuple[str, str, str, str, str, str, str] | None = None
+        last_runtime_progress_text_by_scope: dict[tuple[str, str, str, str], str] = {}
 
         async def _runtime_event_callback(event: Any) -> None:
             nonlocal stream_detached, last_runtime_progress_key
@@ -426,7 +427,16 @@ class MessageBus:
             progress_key = feedback_dedupe_key(normalized_event)
             if progress_key == last_runtime_progress_key:
                 return
+            progress_scope = (
+                normalized_event.job_id,
+                normalized_event.flow_id,
+                normalized_event.task_id,
+                normalized_event.stage,
+            )
+            if last_runtime_progress_text_by_scope.get(progress_scope) == progress_text:
+                return
             last_runtime_progress_key = progress_key
+            last_runtime_progress_text_by_scope[progress_scope] = progress_text
             if normalized_event.state in {"running", "completed", "failed"}:
                 stream_detached = True
             try:

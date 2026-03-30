@@ -775,8 +775,9 @@ query=继续语音任务
 - `queued` / `planning` / `running` / `waiting_tool` / `waiting_user` / `repairing` 会统一显示为 `处理中：...`
 - `completed` 会显示为 `阶段完成：...`
 - `failed` / `cancelled` 会按失败或取消状态单独渲染，不再混进普通进度
-- MessageBus 会按 `(job_id, task_id, stage, state)` 去重，而不是只按消息文本去重
+- MessageBus 会先按 runtime identity 去重；对同一 task 作用域内重复出现的相同展示文案，也会在事件交错时继续折叠，避免阶段反馈重复刷屏
 - 不再在阶段完成时把完整结果提前重复发一次，避免和最终回复重复
+- 飞书阶段反馈固定走 `post`；模型流式输出固定走 `interactive` patch，两条链路分开，不混用消息类型
 - 如果消息通道先超时，但任务已经创建了持久化作业，超时提示会附带 `job_id`，方便后续用 `@job status ...` 查询
 - runtime event 会反向更新 `RuntimeJob` 的 `state` / `flow_id` / 最近 stage，因此 `@job status` 不再只反映外层开始/结束两个阶段
 
