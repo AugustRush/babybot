@@ -619,6 +619,110 @@ def test_answer_with_dag_uses_success_reflections_for_sparse_policy_defaults(
     assert any("历史反思建议 worker 动作：allow_worker" in hint for hint in seen["policy_hints"])
 
 
+def test_answer_with_dag_softens_sparse_defaults_from_guardrails(tmp_path: Path) -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    for idx in range(8):
+        agent._policy_store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="model",
+            parallelism_reflection_count=1 if idx < 6 else 0,
+            worker_reflection_count=1 if idx < 6 else 0,
+        )
+    seen: dict[str, Any] = {}
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("请同时查北京和上海天气", tape=tape))
+
+    assert text == "ok"
+    assert media == []
+    assert any("guardrail 放宽默认调度：bounded_parallel" in hint for hint in seen["policy_hints"])
+    assert any("guardrail 放宽默认 worker：allow_worker" in hint for hint in seen["policy_hints"])
+    summary = agent._policy_store.summarize_runtime_telemetry(chat_key="feishu:c1")
+    assert summary["overall"]["parallelism_guardrail_soften_rate"] == pytest.approx(1 / 9)
+    assert summary["overall"]["worker_guardrail_soften_rate"] == pytest.approx(1 / 9)
+
+
+def test_answer_with_dag_uses_router_when_execution_style_guardrail_is_reduced(
+    tmp_path: Path,
+) -> None:
+    gateway = _FakeGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    state_features = {
+        "task_shape": "single_step",
+        "has_media": False,
+        "independent_subtasks": 1,
+    }
+    for idx in range(8):
+        agent._policy_store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=100.0 + idx,
+            router_fallback=False,
+            router_source="model",
+            execution_style_reflection_count=0,
+        )
+    agent._policy_store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="direct_execute",
+        confidence=0.68,
+    )
+    agent._policy_store.record_reflection(
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        state_features=state_features,
+        failure_pattern="clean_success",
+        recommended_action="direct_execute",
+        confidence=0.66,
+    )
+    seen: dict[str, Any] = {}
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("这个该怎么办", tape=tape))
+
+    assert text == "ok"
+    assert media == []
+    assert [
+        call for call in gateway.structured_calls if call["model_cls"] == "RoutingDecision"
+    ] != []
+    assert "routing_decision" not in seen
+    summary = agent._policy_store.summarize_runtime_telemetry(chat_key="feishu:c1")
+    assert summary["overall"]["execution_style_guardrail_reduce_rate"] == pytest.approx(1 / 9)
+
+
 def test_answer_with_dag_records_runtime_telemetry(tmp_path: Path) -> None:
     rm = _FakeResourceManager()
     agent = _make_agent(_FakeGateway([]), rm)

@@ -177,6 +177,7 @@ uv run babybot
 - `routing_timeout` 默认 `2.0` 秒；只有进入小模型 router 时才使用，并会根据最近模型路由 telemetry 做保守 fail-fast 调整，优先不阻塞主会话流程
 - `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
 - 对稳定命中的成功 bucket，会优先复用带时间衰减的历史成功反思直达同类路由；这些成功经验也会回流到调度/worker gate 的保守选择，并单独统计 execution_style / parallelism / worker_gate 命中率
+- 当某一维反思长期低命中时，会自动降低该维 reflection 注入强度；当 parallelism / worker 维长期高命中时，会在“样本稀疏但可并行”的场景里温和放宽默认保守动作，并把 guardrail 实际触发率一并写入 runtime telemetry
 - 极短问候/寒暄（如 `hi`、`你好`）会直接跳过执行约束抽取和 router 结构化调用，避免简单消息被前置 LLM 链路拖慢
 - 对明显的请求类型（如显式辩论、多角色讨论、显式查询/检索、显式执行型任务），会先走零模型规则路由；只有模糊请求才进入一次小模型 router
 - Router 只决定宏观路由（`tool_workflow` / `debate`）和执行倾向，不直接接管整个编排
@@ -218,6 +219,7 @@ uv run babybot
 - 历史 outcome 会做时间衰减，越旧的经验影响越小，不会长期主导当前策略
 - `good/bad` 反馈不会直接覆盖 reward，而是先做时间衰减，再按 `feedback_confidence` 进行有限幅度 shaping
 - 如果某个 action 在最近窗口内出现明显失败或负反馈，会触发 safeguard，优先退回更保守的动作
+- `inspect_policy` 除了原有路由/反思命中率外，也会输出 `execution_style_guardrail_reduce_rate`、`parallelism_guardrail_soften_rate`、`worker_guardrail_soften_rate`，用于判断 guardrail 是不是在真正发挥作用
 - 当前调度/worker 策略选择会附带 explain 摘要，便于在日志、debug 和 `@policy inspect` 时直接看出命中 bucket、分数与风险项
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参

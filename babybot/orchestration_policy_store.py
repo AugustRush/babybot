@@ -287,6 +287,60 @@ class OrchestrationPolicyStore:
             "source": "reflection_success",
         }
 
+    def recommend_reflection_guardrails(
+        self,
+        *,
+        chat_key: str | None = None,
+        limit: int = 24,
+        min_runs: int = 6,
+        low_rate: float = 0.15,
+        high_rate: float = 0.6,
+    ) -> dict[str, Any]:
+        rows = self._ensure_db().execute(
+            """
+            SELECT execution_style_reflection_count,
+                   parallelism_reflection_count,
+                   worker_reflection_count
+            FROM policy_runtime_telemetry
+            WHERE (? IS NULL OR chat_key = ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (chat_key, chat_key, max(1, int(limit))),
+        ).fetchall()
+        runs = len(rows)
+
+        def _build_dimension(rate: float) -> dict[str, Any]:
+            normalized = float(rate or 0.0)
+            return {
+                "hit_rate": round(normalized, 6),
+                "injection_level": "reduced" if runs >= min_runs and normalized <= low_rate else "normal",
+                "soften_default": bool(runs >= min_runs and normalized >= high_rate),
+            }
+
+        if not rows:
+            return {
+                "samples": 0,
+                "execution_style": _build_dimension(0.0),
+                "parallelism": _build_dimension(0.0),
+                "worker": _build_dimension(0.0),
+            }
+        execution_style_rate = sum(
+            1 for row in rows if int(row["execution_style_reflection_count"] or 0) > 0
+        ) / runs
+        parallelism_rate = sum(
+            1 for row in rows if int(row["parallelism_reflection_count"] or 0) > 0
+        ) / runs
+        worker_rate = sum(
+            1 for row in rows if int(row["worker_reflection_count"] or 0) > 0
+        ) / runs
+        return {
+            "samples": runs,
+            "execution_style": _build_dimension(execution_style_rate),
+            "parallelism": _build_dimension(parallelism_rate),
+            "worker": _build_dimension(worker_rate),
+        }
+
     def record_runtime_telemetry(
         self,
         *,
@@ -302,6 +356,9 @@ class OrchestrationPolicyStore:
         execution_style_reflection_count: int = 0,
         parallelism_reflection_count: int = 0,
         worker_reflection_count: int = 0,
+        execution_style_guardrail_reduce_count: int = 0,
+        parallelism_guardrail_soften_count: int = 0,
+        worker_guardrail_soften_count: int = 0,
         created_at: str | None = None,
     ) -> None:
         db = self._ensure_db()
@@ -311,8 +368,11 @@ class OrchestrationPolicyStore:
                 flow_id, chat_key, route_mode, router_model, router_latency_ms,
                 router_fallback, router_source, reflection_hint_count,
                 reflection_override_count, execution_style_reflection_count,
-                parallelism_reflection_count, worker_reflection_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parallelism_reflection_count, worker_reflection_count,
+                execution_style_guardrail_reduce_count,
+                parallelism_guardrail_soften_count,
+                worker_guardrail_soften_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow_id,
@@ -327,6 +387,9 @@ class OrchestrationPolicyStore:
                 max(0, int(execution_style_reflection_count)),
                 max(0, int(parallelism_reflection_count)),
                 max(0, int(worker_reflection_count)),
+                max(0, int(execution_style_guardrail_reduce_count)),
+                max(0, int(parallelism_guardrail_soften_count)),
+                max(0, int(worker_guardrail_soften_count)),
                 created_at or self._utc_now(),
             ),
         )
@@ -411,6 +474,9 @@ class OrchestrationPolicyStore:
                    t.execution_style_reflection_count,
                    t.parallelism_reflection_count,
                    t.worker_reflection_count,
+                   t.execution_style_guardrail_reduce_count,
+                   t.parallelism_guardrail_soften_count,
+                   t.worker_guardrail_soften_count,
                    o.reward
             FROM policy_runtime_telemetry AS t
             LEFT JOIN policy_outcomes AS o
@@ -711,6 +777,9 @@ class OrchestrationPolicyStore:
                     execution_style_reflection_count INTEGER NOT NULL DEFAULT 0,
                     parallelism_reflection_count INTEGER NOT NULL DEFAULT 0,
                     worker_reflection_count INTEGER NOT NULL DEFAULT 0,
+                    execution_style_guardrail_reduce_count INTEGER NOT NULL DEFAULT 0,
+                    parallelism_guardrail_soften_count INTEGER NOT NULL DEFAULT 0,
+                    worker_guardrail_soften_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 )
                 """
@@ -747,6 +816,27 @@ class OrchestrationPolicyStore:
                     ADD COLUMN worker_reflection_count INTEGER NOT NULL DEFAULT 0
                     """
                 )
+            if "execution_style_guardrail_reduce_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN execution_style_guardrail_reduce_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+            if "parallelism_guardrail_soften_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN parallelism_guardrail_soften_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+            if "worker_guardrail_soften_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN worker_guardrail_soften_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
             db.commit()
             self._db = db
         return self._db
@@ -767,6 +857,9 @@ class OrchestrationPolicyStore:
                 "execution_style_reflection_rate": 0.0,
                 "parallelism_reflection_rate": 0.0,
                 "worker_reflection_rate": 0.0,
+                "execution_style_guardrail_reduce_rate": 0.0,
+                "parallelism_guardrail_soften_rate": 0.0,
+                "worker_guardrail_soften_rate": 0.0,
                 "mean_reward": 0.0,
             }
         runs = len(rows)
@@ -793,6 +886,15 @@ class OrchestrationPolicyStore:
         worker_reflection_total = sum(
             1 for row in rows if int(row["worker_reflection_count"] or 0) > 0
         )
+        execution_style_guardrail_reduce_total = sum(
+            1 for row in rows if int(row["execution_style_guardrail_reduce_count"] or 0) > 0
+        )
+        parallelism_guardrail_soften_total = sum(
+            1 for row in rows if int(row["parallelism_guardrail_soften_count"] or 0) > 0
+        )
+        worker_guardrail_soften_total = sum(
+            1 for row in rows if int(row["worker_guardrail_soften_count"] or 0) > 0
+        )
         reward_values = [float(row["reward"]) for row in rows if row["reward"] is not None]
         return {
             "runs": runs,
@@ -809,6 +911,15 @@ class OrchestrationPolicyStore:
                 parallelism_reflection_total / runs, 6
             ),
             "worker_reflection_rate": round(worker_reflection_total / runs, 6),
+            "execution_style_guardrail_reduce_rate": round(
+                execution_style_guardrail_reduce_total / runs, 6
+            ),
+            "parallelism_guardrail_soften_rate": round(
+                parallelism_guardrail_soften_total / runs, 6
+            ),
+            "worker_guardrail_soften_rate": round(
+                worker_guardrail_soften_total / runs, 6
+            ),
             "mean_reward": round(
                 sum(reward_values) / len(reward_values), 6
             ) if reward_values else 0.0,

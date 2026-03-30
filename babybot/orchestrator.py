@@ -408,6 +408,30 @@ class OrchestratorAgent:
         }
 
     @staticmethod
+    def _maybe_soften_policy_from_guardrail(
+        payload: dict[str, Any],
+        *,
+        soften_default: bool,
+        current_default_action: str,
+        softened_action: str,
+        hint: str,
+    ) -> dict[str, Any]:
+        if not soften_default:
+            return payload
+        action_name = str(payload.get("action_name", "") or "").strip()
+        explain = str(payload.get("explain", "") or "")
+        if action_name != current_default_action:
+            return payload
+        if "insufficient_samples" not in explain and payload.get("state_bucket") != "global_default":
+            return payload
+        return {
+            "action_name": softened_action,
+            "hint": hint,
+            "explain": f"reflection_guardrail_softened; base={explain}",
+            "state_bucket": str(payload.get("state_bucket", "") or "guardrail"),
+        }
+
+    @staticmethod
     def _routing_decision_from_reflection(
         payload: dict[str, Any] | None,
     ) -> RoutingDecision | None:
@@ -605,18 +629,53 @@ class OrchestratorAgent:
         resolved_router_model = configured_router_model or fallback_router_model
         routing_timeout = float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0)
         runtime_telemetry_store = getattr(self, "_policy_store", None)
+        reflection_guardrails = {
+            "samples": 0,
+            "execution_style": {"injection_level": "normal", "soften_default": False},
+            "parallelism": {"injection_level": "normal", "soften_default": False},
+            "worker": {"injection_level": "normal", "soften_default": False},
+        }
+        if (
+            runtime_telemetry_store is not None
+            and hasattr(runtime_telemetry_store, "recommend_reflection_guardrails")
+        ):
+            reflection_guardrails = runtime_telemetry_store.recommend_reflection_guardrails(
+                chat_key=chat_key or None
+            )
         if (
             self._reflection_enabled()
             and chat_key
             and runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "recommend_route_from_reflections")
         ):
-            routing_decision = self._routing_decision_from_reflection(
+            execution_style_guardrail_reduced = (
+                str(
+                    reflection_guardrails.get("execution_style", {}).get(
+                        "injection_level", "normal"
+                    )
+                )
+                == "reduced"
+            )
+            relaxed_reflection_route_payload = (
                 runtime_telemetry_store.recommend_route_from_reflections(
                     chat_key=chat_key,
                     state_features=scheduling_features,
+                    min_confidence=0.55,
                 )
             )
+            reflection_route_payload = relaxed_reflection_route_payload
+            if execution_style_guardrail_reduced:
+                reflection_route_payload = runtime_telemetry_store.recommend_route_from_reflections(
+                    chat_key=chat_key,
+                    state_features=scheduling_features,
+                    min_confidence=0.72,
+                )
+            routing_decision = self._routing_decision_from_reflection(
+                reflection_route_payload
+            )
+        else:
+            execution_style_guardrail_reduced = False
+            relaxed_reflection_route_payload = None
         if (
             runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "recommend_router_timeout")
@@ -675,12 +734,44 @@ class OrchestratorAgent:
             )
         scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
         worker_policy = self.choose_worker_policy(features=scheduling_features)
+        guardrail_softened_scheduling = False
+        guardrail_softened_worker = False
+        if int(scheduling_features.get("independent_subtasks", 1) or 1) >= 2:
+            softened_scheduling_policy = self._maybe_soften_policy_from_guardrail(
+                scheduling_policy,
+                soften_default=bool(
+                    reflection_guardrails.get("parallelism", {}).get("soften_default")
+                ),
+                current_default_action="serial",
+                softened_action="bounded_parallel",
+                hint="guardrail 放宽默认调度：bounded_parallel",
+            )
+            guardrail_softened_scheduling = softened_scheduling_policy is not scheduling_policy
+            scheduling_policy = softened_scheduling_policy
+            softened_worker_policy = self._maybe_soften_policy_from_guardrail(
+                worker_policy,
+                soften_default=bool(
+                    reflection_guardrails.get("worker", {}).get("soften_default")
+                ),
+                current_default_action="deny_worker",
+                softened_action="allow_worker",
+                hint="guardrail 放宽默认 worker：allow_worker",
+            )
+            guardrail_softened_worker = softened_worker_policy is not worker_policy
+            worker_policy = softened_worker_policy
         scheduling_base_action = str(scheduling_policy.get("action_name", "") or "")
         worker_base_action = str(worker_policy.get("action_name", "") or "")
         scheduling_policy = self._maybe_override_policy_from_reflection(
             scheduling_policy,
             preferred_action=self._select_reflection_override(
-                reflection_hints_payload,
+                (
+                    reflection_hints_payload
+                    if str(
+                        reflection_guardrails.get("parallelism", {}).get("injection_level", "normal")
+                    )
+                    != "reduced"
+                    else []
+                ),
                 allowed_actions={"serial", "bounded_parallel"},
             ),
             hint_prefix="历史反思建议调度动作：",
@@ -688,7 +779,14 @@ class OrchestratorAgent:
         worker_policy = self._maybe_override_policy_from_reflection(
             worker_policy,
             preferred_action=self._select_reflection_override(
-                reflection_hints_payload,
+                (
+                    reflection_hints_payload
+                    if str(
+                        reflection_guardrails.get("worker", {}).get("injection_level", "normal")
+                    )
+                    != "reduced"
+                    else []
+                ),
                 allowed_actions={"allow_worker", "deny_worker"},
             ),
             hint_prefix="历史反思建议 worker 动作：",
@@ -697,14 +795,27 @@ class OrchestratorAgent:
         execution_style_reflection_count = 0
         parallelism_reflection_count = 0
         worker_reflection_count = 0
+        execution_style_guardrail_reduce_count = 0
+        parallelism_guardrail_soften_count = 0
+        worker_guardrail_soften_count = 0
         if routing_decision is not None and routing_decision.decision_source == "reflection":
             execution_style_reflection_count = 1
+        if (
+            execution_style_guardrail_reduced
+            and relaxed_reflection_route_payload is not None
+            and routing_decision is None
+        ):
+            execution_style_guardrail_reduce_count = 1
         if str(scheduling_policy.get("action_name", "") or "") != scheduling_base_action:
             reflection_override_count += 1
             parallelism_reflection_count = 1
         if str(worker_policy.get("action_name", "") or "") != worker_base_action:
             reflection_override_count += 1
             worker_reflection_count = 1
+        if guardrail_softened_scheduling:
+            parallelism_guardrail_soften_count = 1
+        if guardrail_softened_worker:
+            worker_guardrail_soften_count = 1
         if (
             chat_key
             and runtime_telemetry_store is not None
@@ -725,6 +836,9 @@ class OrchestratorAgent:
                 execution_style_reflection_count=execution_style_reflection_count,
                 parallelism_reflection_count=parallelism_reflection_count,
                 worker_reflection_count=worker_reflection_count,
+                execution_style_guardrail_reduce_count=execution_style_guardrail_reduce_count,
+                parallelism_guardrail_soften_count=parallelism_guardrail_soften_count,
+                worker_guardrail_soften_count=worker_guardrail_soften_count,
             )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
@@ -990,6 +1104,9 @@ class OrchestratorAgent:
                     + f"execution_style_reflection_rate={float(overall.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
                     + f"parallelism_reflection_rate={float(overall.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
                     + f"worker_reflection_rate={float(overall.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
+                    + f"execution_style_guardrail_reduce_rate={float(overall.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
+                    + f"parallelism_guardrail_soften_rate={float(overall.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
+                    + f"worker_guardrail_soften_rate={float(overall.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
                     + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
                 )
                 if isinstance(by_route_mode, dict):
@@ -1009,6 +1126,9 @@ class OrchestratorAgent:
                             + f"execution_style_reflection_rate={float(payload.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
                             + f"parallelism_reflection_rate={float(payload.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
                             + f"worker_reflection_rate={float(payload.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
+                            + f"execution_style_guardrail_reduce_rate={float(payload.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
+                            + f"parallelism_guardrail_soften_rate={float(payload.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
+                            + f"worker_guardrail_soften_rate={float(payload.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
                             + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"
                         )
         return "\n".join(parts)

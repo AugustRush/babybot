@@ -95,6 +95,64 @@ def test_policy_store_summarizes_reflection_dimension_rates(tmp_path) -> None:
     assert summary["overall"]["worker_reflection_rate"] == 0.5
 
 
+def test_policy_store_recommends_reflection_guardrails(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    for idx in range(8):
+        store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=120.0 + idx,
+            router_fallback=False,
+            router_source="model",
+            execution_style_reflection_count=0,
+            parallelism_reflection_count=1 if idx < 6 else 0,
+            worker_reflection_count=0,
+        )
+
+    guardrails = store.recommend_reflection_guardrails(chat_key="feishu:c1")
+
+    assert guardrails["samples"] == 8
+    assert guardrails["execution_style"]["injection_level"] == "reduced"
+    assert guardrails["parallelism"]["soften_default"] is True
+    assert guardrails["worker"]["injection_level"] == "reduced"
+
+
+def test_policy_store_summarizes_guardrail_hit_rates(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_runtime_telemetry(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=120.0,
+        router_fallback=False,
+        router_source="model",
+        execution_style_guardrail_reduce_count=1,
+        parallelism_guardrail_soften_count=1,
+        worker_guardrail_soften_count=0,
+    )
+    store.record_runtime_telemetry(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=180.0,
+        router_fallback=False,
+        router_source="model",
+        execution_style_guardrail_reduce_count=0,
+        parallelism_guardrail_soften_count=0,
+        worker_guardrail_soften_count=1,
+    )
+
+    summary = store.summarize_runtime_telemetry()
+
+    assert summary["overall"]["execution_style_guardrail_reduce_rate"] == 0.5
+    assert summary["overall"]["parallelism_guardrail_soften_rate"] == 0.5
+    assert summary["overall"]["worker_guardrail_soften_rate"] == 0.5
+
+
 def test_policy_store_recommends_route_from_clean_success_reflections(tmp_path) -> None:
     store = OrchestrationPolicyStore(tmp_path / "policy.db")
     state_features = {

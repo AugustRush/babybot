@@ -19,6 +19,12 @@
 - `metadata.routing_decision`：轻量 Router 的结构化判定快照（可选）
 - Router 只允许在 `TaskContract` 冻结前覆写 `answer/debate` 路由与澄清倾向；冻结后下游运行时不得再次放宽
 
+当前观测补充：
+
+- `inspect_policy` 会输出 runtime routing telemetry，包括 `reflection_route_rate`、`execution_style_reflection_rate`、`parallelism_reflection_rate`、`worker_reflection_rate`
+- 同时会输出 guardrail 实际触发率：`execution_style_guardrail_reduce_rate`、`parallelism_guardrail_soften_rate`、`worker_guardrail_soften_rate`
+- 这些字段只做轻量统计与观测，不会改变 `TaskContract` 对下游 runtime 的硬约束
+
 当前约束：
 
 - 普通编排回答默认只允许 `dispatch_task` / `wait_for_tasks` / `get_task_result` / `reply_to_user`
