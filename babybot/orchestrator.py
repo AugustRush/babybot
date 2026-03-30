@@ -35,6 +35,7 @@ from .orchestration_policy import ConservativePolicySelector
 from .orchestration_policy_store import OrchestrationPolicyStore
 from .orchestration_router import (
     RoutingDecision,
+    build_routing_intent_bucket,
     build_routing_snapshot,
     route_mode_to_contract_mode,
     route_mode_to_step_kind,
@@ -186,6 +187,10 @@ class OrchestratorAgent:
     def _routing_enabled(self) -> bool:
         system = getattr(getattr(self, "config", None), "system", None)
         return bool(getattr(system, "routing_enabled", True))
+
+    def _routing_shadow_eval_enabled(self) -> bool:
+        system = getattr(getattr(self, "config", None), "system", None)
+        return bool(getattr(system, "routing_shadow_eval_enabled", True))
 
     def _reflection_enabled(self) -> bool:
         system = getattr(getattr(self, "config", None), "system", None)
@@ -479,6 +484,75 @@ class OrchestratorAgent:
             decision_source="reflection",
         )
 
+    def _routing_decision_from_intent_cache(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        goal: str,
+    ) -> RoutingDecision | None:
+        if not isinstance(payload, dict):
+            return None
+        route_mode = str(payload.get("route_mode", "") or "").strip()
+        execution_style = str(payload.get("execution_style", "") or "").strip()
+        if route_mode not in {"tool_workflow", "answer", "debate"}:
+            return None
+        if execution_style not in {
+            "direct_execute",
+            "analyze_first",
+            "retrieve_first",
+            "verify_first",
+        }:
+            execution_style = "analyze_first"
+        subtasks = int(
+            self._build_scheduling_state_features(goal).get("independent_subtasks", 1) or 1
+        )
+        return RoutingDecision(
+            route_mode=route_mode,
+            need_clarification=False,
+            execution_style=execution_style,
+            parallelism_hint="bounded_parallel" if subtasks >= 2 else "serial",
+            worker_hint="deny",
+            explain=(
+                "稳定意图桶直达"
+                + f"(samples={int(payload.get('samples', 0) or 0)}, "
+                + f"wins={int(payload.get('wins', 0) or 0)})"
+            ),
+            decision_source="intent_cache",
+        )
+
+    async def _shadow_evaluate_routing_async(
+        self,
+        *,
+        flow_id: str,
+        routing_snapshot: Any,
+        actual_decision: RoutingDecision,
+        model_name: str,
+        timeout: float,
+    ) -> None:
+        store = getattr(self, "_policy_store", None)
+        if (
+            store is None
+            or not hasattr(store, "record_shadow_routing_eval")
+            or actual_decision.decision_source == "model"
+        ):
+            return
+        shadow_decision = await route_task(
+            self.gateway,
+            routing_snapshot,
+            model_name=model_name,
+            timeout=max(0.5, min(1.0, float(timeout or 0.0))),
+            allow_rule_based=False,
+        )
+        if shadow_decision is None:
+            return
+        store.record_shadow_routing_eval(
+            flow_id=flow_id,
+            agreed=(
+                shadow_decision.route_mode == actual_decision.route_mode
+                and shadow_decision.execution_style == actual_decision.execution_style
+            ),
+        )
+
     async def _evaluate_task_run_async(
         self,
         *,
@@ -629,6 +703,10 @@ class OrchestratorAgent:
         resolved_router_model = configured_router_model or fallback_router_model
         routing_timeout = float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0)
         runtime_telemetry_store = getattr(self, "_policy_store", None)
+        intent_bucket = build_routing_intent_bucket(
+            user_input,
+            has_media=bool(media_paths),
+        )
         reflection_guardrails = {
             "samples": 0,
             "execution_style": {"injection_level": "normal", "soften_default": False},
@@ -676,6 +754,20 @@ class OrchestratorAgent:
         else:
             execution_style_guardrail_reduced = False
             relaxed_reflection_route_payload = None
+        if (
+            routing_decision is None
+            and chat_key
+            and runtime_telemetry_store is not None
+            and hasattr(runtime_telemetry_store, "recommend_route_from_intent_bucket")
+            and intent_bucket.startswith("other|")
+        ):
+            routing_decision = self._routing_decision_from_intent_cache(
+                runtime_telemetry_store.recommend_route_from_intent_bucket(
+                    chat_key=chat_key,
+                    intent_bucket=intent_bucket,
+                ),
+                goal=user_input,
+            )
         if (
             runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "recommend_router_timeout")
@@ -831,6 +923,12 @@ class OrchestratorAgent:
                 router_source=(
                     routing_decision.decision_source if routing_decision is not None else "fallback"
                 ),
+                execution_style=(
+                    str(routing_decision.execution_style or "")
+                    if routing_decision is not None
+                    else ""
+                ),
+                intent_bucket=intent_bucket,
                 reflection_hint_count=len(reflection_hints_payload),
                 reflection_override_count=reflection_override_count,
                 execution_style_reflection_count=execution_style_reflection_count,
@@ -839,6 +937,22 @@ class OrchestratorAgent:
                 execution_style_guardrail_reduce_count=execution_style_guardrail_reduce_count,
                 parallelism_guardrail_soften_count=parallelism_guardrail_soften_count,
                 worker_guardrail_soften_count=worker_guardrail_soften_count,
+            )
+        if (
+            routing_decision is not None
+            and routing_decision.decision_source != "model"
+            and self._routing_enabled()
+            and self._routing_shadow_eval_enabled()
+        ):
+            self._spawn_background_task(
+                self._shadow_evaluate_routing_async(
+                    flow_id=flow_id,
+                    routing_snapshot=routing_snapshot,
+                    actual_decision=routing_decision,
+                    model_name=configured_router_model,
+                    timeout=min(routing_timeout, 1.0),
+                ),
+                label="routing-shadow-eval",
             )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
@@ -1107,6 +1221,8 @@ class OrchestratorAgent:
                     + f"execution_style_guardrail_reduce_rate={float(overall.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
                     + f"parallelism_guardrail_soften_rate={float(overall.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
                     + f"worker_guardrail_soften_rate={float(overall.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
+                    + f"shadow_routing_eval_rate={float(overall.get('shadow_routing_eval_rate', 0.0) or 0.0):.2f} "
+                    + f"shadow_routing_agreement_rate={float(overall.get('shadow_routing_agreement_rate', 0.0) or 0.0):.2f} "
                     + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
                 )
                 if isinstance(by_route_mode, dict):
@@ -1129,6 +1245,8 @@ class OrchestratorAgent:
                             + f"execution_style_guardrail_reduce_rate={float(payload.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
                             + f"parallelism_guardrail_soften_rate={float(payload.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
                             + f"worker_guardrail_soften_rate={float(payload.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
+                            + f"shadow_routing_eval_rate={float(payload.get('shadow_routing_eval_rate', 0.0) or 0.0):.2f} "
+                            + f"shadow_routing_agreement_rate={float(payload.get('shadow_routing_agreement_rate', 0.0) or 0.0):.2f} "
                             + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"
                         )
         return "\n".join(parts)

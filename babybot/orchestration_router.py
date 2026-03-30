@@ -110,7 +110,36 @@ class RoutingDecision(BaseModel):
     parallelism_hint: Literal["serial", "bounded_parallel"] = "serial"
     worker_hint: Literal["allow", "deny"] = "deny"
     explain: str = Field(default="", max_length=200)
-    decision_source: Literal["model", "rule", "reflection"] = "model"
+    decision_source: Literal["model", "rule", "reflection", "intent_cache"] = "model"
+
+
+def build_routing_intent_bucket(goal: str, *, has_media: bool = False) -> str:
+    text = str(goal or "").strip()
+    if is_trivial_social_message(text):
+        kind = "social"
+    elif any(marker in text for marker in _EXPLICIT_DEBATE_MARKERS):
+        kind = "debate"
+    elif any(marker in text for marker in _RETRIEVE_FIRST_MARKERS):
+        kind = "retrieve"
+    elif any(marker in text for marker in _ANALYZE_FIRST_MARKERS):
+        kind = "analyze"
+    else:
+        kind = "other"
+    question_flag = (
+        "q1"
+        if any(token in text for token in ("?", "？", "吗", "么", "是否", "可不可以"))
+        else "q0"
+    )
+    subtask_flag = "s2p" if _estimate_subtask_count(text) >= 2 else "s1"
+    text_length = len(text)
+    if text_length <= 12:
+        length_flag = "l_short"
+    elif text_length <= 32:
+        length_flag = "l_medium"
+    else:
+        length_flag = "l_long"
+    media_flag = "m1" if has_media else "m0"
+    return "|".join((kind, question_flag, subtask_flag, length_flag, media_flag))
 
 
 @dataclass(frozen=True)
@@ -256,13 +285,15 @@ async def route_task(
     heartbeat: Any = None,
     model_name: str = "",
     timeout: float = 2.0,
+    allow_rule_based: bool = True,
 ) -> RoutingDecision | None:
     goal = str(snapshot.goal or "").strip()
     if not goal:
         return None
-    rule_match = match_rule_based_routing(snapshot)
-    if rule_match is not None:
-        return rule_match
+    if allow_rule_based:
+        rule_match = match_rule_based_routing(snapshot)
+        if rule_match is not None:
+            return rule_match
     complete_structured = getattr(gateway, "complete_structured", None)
     if not callable(complete_structured):
         return None

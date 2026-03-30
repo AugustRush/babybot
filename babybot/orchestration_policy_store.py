@@ -341,6 +341,66 @@ class OrchestrationPolicyStore:
             "worker": _build_dimension(worker_rate),
         }
 
+    def recommend_route_from_intent_bucket(
+        self,
+        *,
+        intent_bucket: str,
+        chat_key: str | None = None,
+        limit: int = 24,
+        min_samples: int = 3,
+        min_win_rate: float = 0.75,
+    ) -> dict[str, Any] | None:
+        bucket = str(intent_bucket or "").strip()
+        if not bucket:
+            return None
+        rows = self._ensure_db().execute(
+            """
+            SELECT t.route_mode,
+                   t.execution_style,
+                   o.final_status
+            FROM policy_runtime_telemetry AS t
+            JOIN policy_outcomes AS o
+              ON o.flow_id = t.flow_id
+            WHERE t.intent_bucket = ?
+              AND (? IS NULL OR t.chat_key = ?)
+            ORDER BY t.id DESC
+            LIMIT ?
+            """,
+            (bucket, chat_key, chat_key, max(1, int(limit))),
+        ).fetchall()
+        if len(rows) < max(1, int(min_samples)):
+            return None
+        grouped: dict[tuple[str, str], int] = {}
+        for row in rows:
+            route_mode = str(row["route_mode"] or "").strip()
+            execution_style = str(row["execution_style"] or "").strip()
+            if route_mode not in {"tool_workflow", "answer", "debate"}:
+                continue
+            if str(row["final_status"] or "").strip().lower() != "succeeded":
+                continue
+            key = (route_mode, execution_style)
+            grouped[key] = grouped.get(key, 0) + 1
+        if not grouped:
+            return None
+        ranked = sorted(
+            grouped.items(),
+            key=lambda item: (int(item[1]), item[0][0], item[0][1]),
+            reverse=True,
+        )
+        (route_mode, execution_style), wins = ranked[0]
+        total = len(rows)
+        win_rate = wins / max(1, total)
+        if wins < max(1, int(min_samples)) or win_rate < float(min_win_rate):
+            return None
+        return {
+            "route_mode": route_mode,
+            "execution_style": execution_style or "analyze_first",
+            "samples": total,
+            "wins": wins,
+            "win_rate": round(win_rate, 6),
+            "source": "intent_bucket_success",
+        }
+
     def record_runtime_telemetry(
         self,
         *,
@@ -351,6 +411,8 @@ class OrchestrationPolicyStore:
         router_latency_ms: float,
         router_fallback: bool,
         router_source: str = "model",
+        execution_style: str = "",
+        intent_bucket: str = "",
         reflection_hint_count: int = 0,
         reflection_override_count: int = 0,
         execution_style_reflection_count: int = 0,
@@ -359,6 +421,8 @@ class OrchestrationPolicyStore:
         execution_style_guardrail_reduce_count: int = 0,
         parallelism_guardrail_soften_count: int = 0,
         worker_guardrail_soften_count: int = 0,
+        shadow_routing_eval_count: int = 0,
+        shadow_routing_agree_count: int = 0,
         created_at: str | None = None,
     ) -> None:
         db = self._ensure_db()
@@ -366,13 +430,15 @@ class OrchestrationPolicyStore:
             """
             INSERT OR REPLACE INTO policy_runtime_telemetry (
                 flow_id, chat_key, route_mode, router_model, router_latency_ms,
-                router_fallback, router_source, reflection_hint_count,
+                router_fallback, router_source, execution_style, intent_bucket,
+                reflection_hint_count,
                 reflection_override_count, execution_style_reflection_count,
                 parallelism_reflection_count, worker_reflection_count,
                 execution_style_guardrail_reduce_count,
                 parallelism_guardrail_soften_count,
-                worker_guardrail_soften_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                worker_guardrail_soften_count,
+                shadow_routing_eval_count, shadow_routing_agree_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow_id,
@@ -382,6 +448,8 @@ class OrchestrationPolicyStore:
                 max(0.0, float(router_latency_ms)),
                 1 if router_fallback else 0,
                 str(router_source or "model").strip() or "model",
+                str(execution_style or "").strip(),
+                str(intent_bucket or "").strip(),
                 max(0, int(reflection_hint_count)),
                 max(0, int(reflection_override_count)),
                 max(0, int(execution_style_reflection_count)),
@@ -390,8 +458,28 @@ class OrchestrationPolicyStore:
                 max(0, int(execution_style_guardrail_reduce_count)),
                 max(0, int(parallelism_guardrail_soften_count)),
                 max(0, int(worker_guardrail_soften_count)),
+                max(0, int(shadow_routing_eval_count)),
+                max(0, int(shadow_routing_agree_count)),
                 created_at or self._utc_now(),
             ),
+        )
+        db.commit()
+
+    def record_shadow_routing_eval(
+        self,
+        *,
+        flow_id: str,
+        agreed: bool,
+    ) -> None:
+        db = self._ensure_db()
+        db.execute(
+            """
+            UPDATE policy_runtime_telemetry
+            SET shadow_routing_eval_count = 1,
+                shadow_routing_agree_count = ?
+            WHERE flow_id = ?
+            """,
+            (1 if agreed else 0, flow_id),
         )
         db.commit()
 
@@ -469,6 +557,8 @@ class OrchestrationPolicyStore:
                    t.router_latency_ms,
                    t.router_fallback,
                    t.router_source,
+                   t.execution_style,
+                   t.intent_bucket,
                    t.reflection_hint_count,
                    t.reflection_override_count,
                    t.execution_style_reflection_count,
@@ -477,6 +567,8 @@ class OrchestrationPolicyStore:
                    t.execution_style_guardrail_reduce_count,
                    t.parallelism_guardrail_soften_count,
                    t.worker_guardrail_soften_count,
+                   t.shadow_routing_eval_count,
+                   t.shadow_routing_agree_count,
                    o.reward
             FROM policy_runtime_telemetry AS t
             LEFT JOIN policy_outcomes AS o
@@ -772,6 +864,8 @@ class OrchestrationPolicyStore:
                     router_latency_ms REAL NOT NULL,
                     router_fallback INTEGER NOT NULL DEFAULT 0,
                     router_source TEXT NOT NULL DEFAULT 'model',
+                    execution_style TEXT NOT NULL DEFAULT '',
+                    intent_bucket TEXT NOT NULL DEFAULT '',
                     reflection_hint_count INTEGER NOT NULL DEFAULT 0,
                     reflection_override_count INTEGER NOT NULL DEFAULT 0,
                     execution_style_reflection_count INTEGER NOT NULL DEFAULT 0,
@@ -780,6 +874,8 @@ class OrchestrationPolicyStore:
                     execution_style_guardrail_reduce_count INTEGER NOT NULL DEFAULT 0,
                     parallelism_guardrail_soften_count INTEGER NOT NULL DEFAULT 0,
                     worker_guardrail_soften_count INTEGER NOT NULL DEFAULT 0,
+                    shadow_routing_eval_count INTEGER NOT NULL DEFAULT 0,
+                    shadow_routing_agree_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 )
                 """
@@ -793,6 +889,20 @@ class OrchestrationPolicyStore:
                     """
                     ALTER TABLE policy_runtime_telemetry
                     ADD COLUMN router_source TEXT NOT NULL DEFAULT 'model'
+                    """
+                )
+            if "execution_style" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN execution_style TEXT NOT NULL DEFAULT ''
+                    """
+                )
+            if "intent_bucket" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN intent_bucket TEXT NOT NULL DEFAULT ''
                     """
                 )
             if "execution_style_reflection_count" not in columns:
@@ -837,6 +947,20 @@ class OrchestrationPolicyStore:
                     ADD COLUMN worker_guardrail_soften_count INTEGER NOT NULL DEFAULT 0
                     """
                 )
+            if "shadow_routing_eval_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN shadow_routing_eval_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+            if "shadow_routing_agree_count" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN shadow_routing_agree_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
             db.commit()
             self._db = db
         return self._db
@@ -860,6 +984,8 @@ class OrchestrationPolicyStore:
                 "execution_style_guardrail_reduce_rate": 0.0,
                 "parallelism_guardrail_soften_rate": 0.0,
                 "worker_guardrail_soften_rate": 0.0,
+                "shadow_routing_eval_rate": 0.0,
+                "shadow_routing_agreement_rate": 0.0,
                 "mean_reward": 0.0,
             }
         runs = len(rows)
@@ -895,6 +1021,12 @@ class OrchestrationPolicyStore:
         worker_guardrail_soften_total = sum(
             1 for row in rows if int(row["worker_guardrail_soften_count"] or 0) > 0
         )
+        shadow_routing_eval_total = sum(
+            1 for row in rows if int(row["shadow_routing_eval_count"] or 0) > 0
+        )
+        shadow_routing_agree_total = sum(
+            1 for row in rows if int(row["shadow_routing_agree_count"] or 0) > 0
+        )
         reward_values = [float(row["reward"]) for row in rows if row["reward"] is not None]
         return {
             "runs": runs,
@@ -919,6 +1051,12 @@ class OrchestrationPolicyStore:
             ),
             "worker_guardrail_soften_rate": round(
                 worker_guardrail_soften_total / runs, 6
+            ),
+            "shadow_routing_eval_rate": round(
+                shadow_routing_eval_total / runs, 6
+            ),
+            "shadow_routing_agreement_rate": round(
+                shadow_routing_agree_total / max(1, shadow_routing_eval_total), 6
             ),
             "mean_reward": round(
                 sum(reward_values) / len(reward_values), 6

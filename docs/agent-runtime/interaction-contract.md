@@ -23,6 +23,7 @@
 
 - `inspect_policy` 会输出 runtime routing telemetry，包括 `reflection_route_rate`、`execution_style_reflection_rate`、`parallelism_reflection_rate`、`worker_reflection_rate`
 - 同时会输出 guardrail 实际触发率：`execution_style_guardrail_reduce_rate`、`parallelism_guardrail_soften_rate`、`worker_guardrail_soften_rate`
+- 对被规则 / reflection / intent cache 直接命中的请求，后台可异步记录 shadow routing agreement，不改变本次 `TaskContract`，只增加 `shadow_routing_eval_rate`、`shadow_routing_agreement_rate` 观测
 - 这些字段只做轻量统计与观测，不会改变 `TaskContract` 对下游 runtime 的硬约束
 
 当前约束：
