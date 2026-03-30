@@ -28,6 +28,35 @@ def test_policy_store_persists_decisions_and_feedback(tmp_path) -> None:
     assert row["reason"] == "拆分合理"
 
 
+def test_policy_store_recommends_router_timeout_from_recent_model_runs(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    for idx, latency_ms in enumerate((180.0, 220.0, 240.0, 200.0, 260.0), start=1):
+        store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=latency_ms,
+            router_fallback=False,
+            router_source="model",
+        )
+    store.record_runtime_telemetry(
+        flow_id="flow-rule",
+        chat_key="feishu:c1",
+        route_mode="answer",
+        router_model="mini-router",
+        router_latency_ms=1.0,
+        router_fallback=False,
+        router_source="rule",
+    )
+
+    recommendation = store.recommend_router_timeout(base_timeout=2.0)
+
+    assert recommendation["samples"] == 5
+    assert recommendation["router_source"] == "model_recent"
+    assert 0.5 <= recommendation["timeout_seconds"] < 2.0
+
+
 def test_policy_store_enables_wal_and_busy_timeout(tmp_path) -> None:
     store = OrchestrationPolicyStore(tmp_path / "policy.db")
 

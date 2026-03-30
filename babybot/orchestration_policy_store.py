@@ -201,6 +201,7 @@ class OrchestrationPolicyStore:
         router_model: str,
         router_latency_ms: float,
         router_fallback: bool,
+        router_source: str = "model",
         reflection_hint_count: int = 0,
         reflection_override_count: int = 0,
         created_at: str | None = None,
@@ -210,8 +211,9 @@ class OrchestrationPolicyStore:
             """
             INSERT OR REPLACE INTO policy_runtime_telemetry (
                 flow_id, chat_key, route_mode, router_model, router_latency_ms,
-                router_fallback, reflection_hint_count, reflection_override_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                router_fallback, router_source, reflection_hint_count,
+                reflection_override_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow_id,
@@ -220,12 +222,73 @@ class OrchestrationPolicyStore:
                 router_model,
                 max(0.0, float(router_latency_ms)),
                 1 if router_fallback else 0,
+                str(router_source or "model").strip() or "model",
                 max(0, int(reflection_hint_count)),
                 max(0, int(reflection_override_count)),
                 created_at or self._utc_now(),
             ),
         )
         db.commit()
+
+    def recommend_router_timeout(
+        self,
+        *,
+        base_timeout: float,
+        chat_key: str | None = None,
+        router_model: str = "",
+        limit: int = 24,
+    ) -> dict[str, Any]:
+        configured_base = max(0.5, float(base_timeout or 0.0))
+        rows = self._ensure_db().execute(
+            """
+            SELECT router_latency_ms, router_fallback, router_source
+            FROM policy_runtime_telemetry
+            WHERE router_source='model'
+              AND (? IS NULL OR chat_key = ?)
+              AND (? = '' OR router_model = ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (
+                chat_key,
+                chat_key,
+                str(router_model or "").strip(),
+                str(router_model or "").strip(),
+                max(1, int(limit)),
+            ),
+        ).fetchall()
+        if not rows:
+            return {
+                "timeout_seconds": configured_base,
+                "samples": 0,
+                "avg_latency_ms": 0.0,
+                "fallback_rate": 0.0,
+                "router_source": "configured_base",
+            }
+        latencies = sorted(max(0.0, float(row["router_latency_ms"] or 0.0)) for row in rows)
+        avg_latency_ms = sum(latencies) / len(latencies)
+        fallback_rate = sum(int(row["router_fallback"] or 0) for row in rows) / len(rows)
+        if len(latencies) < 4:
+            timeout_seconds = configured_base
+        else:
+            p75_latency_ms = latencies[min(len(latencies) - 1, int(len(latencies) * 0.75))]
+            target = max(
+                0.8,
+                avg_latency_ms * 1.8 / 1000.0,
+                p75_latency_ms * 1.35 / 1000.0,
+            )
+            if fallback_rate >= 0.5:
+                target = min(target, max(0.7, configured_base * 0.7))
+            elif fallback_rate >= 0.25:
+                target = min(target, max(0.8, configured_base * 0.85))
+            timeout_seconds = min(configured_base, max(0.5, target))
+        return {
+            "timeout_seconds": round(timeout_seconds, 3),
+            "samples": len(rows),
+            "avg_latency_ms": round(avg_latency_ms, 2),
+            "fallback_rate": round(fallback_rate, 6),
+            "router_source": "model_recent",
+        }
 
     def summarize_runtime_telemetry(
         self,
@@ -240,6 +303,7 @@ class OrchestrationPolicyStore:
                    t.router_model,
                    t.router_latency_ms,
                    t.router_fallback,
+                   t.router_source,
                    t.reflection_hint_count,
                    t.reflection_override_count,
                    o.reward
@@ -536,12 +600,24 @@ class OrchestrationPolicyStore:
                     router_model TEXT NOT NULL,
                     router_latency_ms REAL NOT NULL,
                     router_fallback INTEGER NOT NULL DEFAULT 0,
+                    router_source TEXT NOT NULL DEFAULT 'model',
                     reflection_hint_count INTEGER NOT NULL DEFAULT 0,
                     reflection_override_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {
+                str(row["name"] or "")
+                for row in db.execute("PRAGMA table_info(policy_runtime_telemetry)").fetchall()
+            }
+            if "router_source" not in columns:
+                db.execute(
+                    """
+                    ALTER TABLE policy_runtime_telemetry
+                    ADD COLUMN router_source TEXT NOT NULL DEFAULT 'model'
+                    """
+                )
             db.commit()
             self._db = db
         return self._db
@@ -555,6 +631,7 @@ class OrchestrationPolicyStore:
                 "runs": 0,
                 "avg_router_latency_ms": 0.0,
                 "fallback_rate": 0.0,
+                "rule_hit_rate": 0.0,
                 "reflection_match_rate": 0.0,
                 "reflection_override_rate": 0.0,
                 "mean_reward": 0.0,
@@ -562,6 +639,9 @@ class OrchestrationPolicyStore:
         runs = len(rows)
         latency_total = sum(float(row["router_latency_ms"] or 0.0) for row in rows)
         fallback_total = sum(int(row["router_fallback"] or 0) for row in rows)
+        rule_hit_total = sum(
+            1 for row in rows if str(row["router_source"] or "").strip() == "rule"
+        )
         reflection_match_total = sum(
             1 for row in rows if int(row["reflection_hint_count"] or 0) > 0
         )
@@ -573,6 +653,7 @@ class OrchestrationPolicyStore:
             "runs": runs,
             "avg_router_latency_ms": round(latency_total / runs, 2),
             "fallback_rate": round(fallback_total / runs, 6),
+            "rule_hit_rate": round(rule_hit_total / runs, 6),
             "reflection_match_rate": round(reflection_match_total / runs, 6),
             "reflection_override_rate": round(reflection_override_total / runs, 6),
             "mean_reward": round(

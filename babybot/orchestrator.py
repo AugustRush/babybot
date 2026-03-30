@@ -548,14 +548,35 @@ class OrchestratorAgent:
             execution_constraints=execution_constraints,
         )
         routing_decision = None
+        configured_router_model = str(
+            getattr(self.config.system, "routing_model_name", "") or ""
+        ).strip()
+        fallback_router_model = str(
+            getattr(getattr(self.config, "model", None), "model_name", "") or ""
+        ).strip()
+        resolved_router_model = configured_router_model or fallback_router_model
+        routing_timeout = float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0)
+        runtime_telemetry_store = getattr(self, "_policy_store", None)
+        if (
+            runtime_telemetry_store is not None
+            and hasattr(runtime_telemetry_store, "recommend_router_timeout")
+        ):
+            recommendation = runtime_telemetry_store.recommend_router_timeout(
+                base_timeout=routing_timeout,
+                chat_key=chat_key or None,
+                router_model=resolved_router_model,
+            )
+            routing_timeout = float(
+                recommendation.get("timeout_seconds", routing_timeout) or routing_timeout
+            )
         routing_started = time.perf_counter()
         if self._routing_enabled():
             routing_decision = await route_task(
                 self.gateway,
                 routing_snapshot,
                 heartbeat=heartbeat,
-                model_name=getattr(self.config.system, "routing_model_name", ""),
-                timeout=float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0),
+                model_name=configured_router_model,
+                timeout=routing_timeout,
             )
         routing_latency_ms = (time.perf_counter() - routing_started) * 1000.0
         task_contract = build_task_contract(
@@ -617,25 +638,21 @@ class OrchestratorAgent:
             reflection_override_count += 1
         if str(worker_policy.get("action_name", "") or "") != worker_base_action:
             reflection_override_count += 1
-        runtime_telemetry_store = getattr(self, "_policy_store", None)
         if (
             chat_key
             and runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "record_runtime_telemetry")
         ):
-            configured_router_model = str(
-                getattr(self.config.system, "routing_model_name", "") or ""
-            ).strip()
-            fallback_model = str(
-                getattr(getattr(self.config, "model", None), "model_name", "") or ""
-            ).strip()
             runtime_telemetry_store.record_runtime_telemetry(
                 flow_id=flow_id,
                 chat_key=chat_key,
                 route_mode=route_mode,
-                router_model=configured_router_model or fallback_model,
+                router_model=resolved_router_model,
                 router_latency_ms=routing_latency_ms,
                 router_fallback=routing_decision is None,
+                router_source=(
+                    routing_decision.decision_source if routing_decision is not None else "fallback"
+                ),
                 reflection_hint_count=len(reflection_hints_payload),
                 reflection_override_count=reflection_override_count,
             )
@@ -896,6 +913,7 @@ class OrchestratorAgent:
                     + f"runs={int(overall.get('runs', 0) or 0)} "
                     + f"avg_router_latency_ms={float(overall.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
                     + f"fallback_rate={float(overall.get('fallback_rate', 0.0) or 0.0):.2f} "
+                    + f"rule_hit_rate={float(overall.get('rule_hit_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_match_rate={float(overall.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_override_rate={float(overall.get('reflection_override_rate', 0.0) or 0.0):.2f} "
                     + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
@@ -910,6 +928,7 @@ class OrchestratorAgent:
                             + f"runs={int(payload.get('runs', 0) or 0)} "
                             + f"avg_router_latency_ms={float(payload.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
                             + f"fallback_rate={float(payload.get('fallback_rate', 0.0) or 0.0):.2f} "
+                            + f"rule_hit_rate={float(payload.get('rule_hit_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_match_rate={float(payload.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_override_rate={float(payload.get('reflection_override_rate', 0.0) or 0.0):.2f} "
                             + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"

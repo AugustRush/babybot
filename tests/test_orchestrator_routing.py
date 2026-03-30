@@ -453,7 +453,8 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
     assert constraints["hard_limits"]["max_total_seconds"] == 600.0
     assert isinstance(seen["execution_plan"], ExecutionPlan)
     assert seen["execution_plan"].round_budget == 1
-    assert seen["task_contract"] == TaskContract(
+    contract = seen["task_contract"]
+    assert contract == TaskContract(
         chat_key="",
         goal="两个专家讨论，一轮定胜负。",
         mode="debate",
@@ -463,8 +464,10 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
         allow_clarification=True,
         allowed_tools=("dispatch_team", "reply_to_user"),
         allowed_agents=(),
-        metadata={"execution_constraints": constraints},
+        metadata=contract.metadata,
     )
+    assert contract.metadata["execution_constraints"] == constraints
+    assert contract.metadata["routing_decision"]["route_mode"] == "debate"
 
 
 def test_answer_with_dag_uses_router_decision_to_override_contract() -> None:
@@ -613,6 +616,96 @@ def test_answer_with_dag_skips_preflight_structured_calls_for_short_greeting() -
     assert text == "hi there"
     assert media == []
     assert gateway.structured_calls == []
+
+
+def test_answer_with_dag_uses_rule_router_for_explicit_debate_request() -> None:
+    gateway = _FakeGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("请让两个专家辩论一下这个方案"))
+
+    assert text == "ok"
+    assert media == []
+    assert [
+        call for call in gateway.structured_calls if call["model_cls"] == "RoutingDecision"
+    ] == []
+    assert seen["routing_decision"].route_mode == "debate"
+    assert seen["routing_decision"].decision_source == "rule"
+    assert seen["task_contract"].mode == "debate"
+
+
+def test_answer_with_dag_uses_adaptive_router_timeout(tmp_path: Path) -> None:
+    class _TimeoutAwareGateway(_FakeGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.timeout_calls: list[float] = []
+
+        async def complete_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            model_cls: type,
+            heartbeat: Any = None,
+            model_name: str | None = None,
+            timeout: float | None = None,
+        ):
+            del system_prompt, user_prompt, heartbeat, model_name, model_cls
+            self.timeout_calls.append(float(timeout or 0.0))
+            return None
+
+    gateway = _TimeoutAwareGateway()
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    for idx, latency_ms in enumerate((180.0, 220.0, 240.0, 260.0, 200.0), start=1):
+        agent._policy_store.record_runtime_telemetry(
+            flow_id=f"flow-{idx}",
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            router_model="mini-router",
+            router_latency_ms=latency_ms,
+            router_fallback=False,
+            router_source="model",
+        )
+    agent._policy_store.record_runtime_telemetry(
+        flow_id="rule-flow",
+        chat_key="feishu:c1",
+        route_mode="answer",
+        router_model="mini-router",
+        router_latency_ms=1.0,
+        router_fallback=False,
+        router_source="rule",
+    )
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal, context
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("帮我想一下这个方案是否合理", tape=tape))
+
+    assert text == "ok"
+    assert media == []
+    router_timeout_calls = [value for value in gateway.timeout_calls if value > 0.0]
+    assert len(router_timeout_calls) == 1
+    assert 0.5 <= router_timeout_calls[0] < 2.0
 
 
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:

@@ -27,8 +27,53 @@ _TRIVIAL_SOCIAL_MESSAGES = {
     "晚上好",
 }
 
+_EXPLICIT_DEBATE_MARKERS = (
+    "辩论",
+    "专家讨论",
+    "正方",
+    "反方",
+    "支持方",
+    "反对方",
+    "不同角色",
+    "不同观点",
+)
 
-def _is_trivial_social_message(text: str) -> bool:
+_RETRIEVE_FIRST_MARKERS = (
+    "查一下",
+    "查询",
+    "搜索",
+    "检索",
+    "找一下",
+    "看看",
+    "浏览",
+    "打开",
+    "天气",
+    "汇率",
+    "股价",
+    "文档",
+    "资料",
+    "状态",
+)
+
+_ANALYZE_FIRST_MARKERS = (
+    "修复",
+    "修改",
+    "实现",
+    "编写",
+    "生成",
+    "画",
+    "创建",
+    "整理",
+    "总结",
+    "分析",
+    "提取",
+    "翻译",
+    "测试",
+    "运行",
+)
+
+
+def is_trivial_social_message(text: str) -> bool:
     normalized = (
         str(text or "")
         .strip()
@@ -46,6 +91,13 @@ def _is_trivial_social_message(text: str) -> bool:
     return normalized in _TRIVIAL_SOCIAL_MESSAGES
 
 
+def _estimate_subtask_count(text: str) -> int:
+    count = 1
+    for token in ("同时", "分别", "并行", "并且"):
+        count += str(text or "").count(token)
+    return max(1, count)
+
+
 class RoutingDecision(BaseModel):
     route_mode: Literal["tool_workflow", "answer", "debate"] = "tool_workflow"
     need_clarification: bool = False
@@ -58,6 +110,7 @@ class RoutingDecision(BaseModel):
     parallelism_hint: Literal["serial", "bounded_parallel"] = "serial"
     worker_hint: Literal["allow", "deny"] = "deny"
     explain: str = Field(default="", max_length=200)
+    decision_source: Literal["model", "rule"] = "model"
 
 
 @dataclass(frozen=True)
@@ -145,6 +198,57 @@ def route_mode_to_step_kind(route_mode: str) -> str:
     return "debate" if str(route_mode or "").strip().lower() == "debate" else "tool_workflow"
 
 
+def match_rule_based_routing(snapshot: RoutingContextSnapshot) -> RoutingDecision | None:
+    goal = str(snapshot.goal or "").strip()
+    if not goal:
+        return None
+    if is_trivial_social_message(goal):
+        return RoutingDecision(
+            route_mode="answer",
+            need_clarification=False,
+            execution_style="direct_execute",
+            parallelism_hint="serial",
+            worker_hint="deny",
+            explain="简单问候直接回复",
+            decision_source="rule",
+        )
+    if any(marker in goal for marker in _EXPLICIT_DEBATE_MARKERS):
+        return RoutingDecision(
+            route_mode="debate",
+            need_clarification=False,
+            execution_style="analyze_first",
+            parallelism_hint="serial",
+            worker_hint="deny",
+            explain="显式多观点讨论请求",
+            decision_source="rule",
+        )
+    subtask_count = _estimate_subtask_count(goal)
+    parallelism_hint: Literal["serial", "bounded_parallel"] = (
+        "bounded_parallel" if subtask_count >= 2 else "serial"
+    )
+    if any(marker in goal for marker in _RETRIEVE_FIRST_MARKERS):
+        return RoutingDecision(
+            route_mode="tool_workflow",
+            need_clarification=False,
+            execution_style="retrieve_first",
+            parallelism_hint=parallelism_hint,
+            worker_hint="deny",
+            explain="显式查询或检索请求",
+            decision_source="rule",
+        )
+    if any(marker in goal for marker in _ANALYZE_FIRST_MARKERS):
+        return RoutingDecision(
+            route_mode="tool_workflow",
+            need_clarification=False,
+            execution_style="analyze_first",
+            parallelism_hint=parallelism_hint,
+            worker_hint="deny",
+            explain="显式执行型任务请求",
+            decision_source="rule",
+        )
+    return None
+
+
 async def route_task(
     gateway: Any,
     snapshot: RoutingContextSnapshot,
@@ -153,21 +257,15 @@ async def route_task(
     model_name: str = "",
     timeout: float = 2.0,
 ) -> RoutingDecision | None:
-    complete_structured = getattr(gateway, "complete_structured", None)
-    if not callable(complete_structured):
-        return None
     goal = str(snapshot.goal or "").strip()
     if not goal:
         return None
-    if _is_trivial_social_message(goal):
-        return RoutingDecision(
-            route_mode="answer",
-            need_clarification=False,
-            execution_style="direct_execute",
-            parallelism_hint="serial",
-            worker_hint="deny",
-            explain="简单问候直接回复",
-        )
+    rule_match = match_rule_based_routing(snapshot)
+    if rule_match is not None:
+        return rule_match
+    complete_structured = getattr(gateway, "complete_structured", None)
+    if not callable(complete_structured):
+        return None
     system_prompt = (
         "你是一个轻量任务路由器，只做一次保守判定。"
         "优先保持 tool_workflow，只有明显需要多方比较时才升级为 debate。"

@@ -174,9 +174,10 @@ uv run babybot
 
 - `routing_enabled` 默认开启，但只影响 `_answer_with_dag()` 路径，不会打断 `@session` 交互式会话
 - `routing_model_name` 可单独配置；为空时回退到当前会话同一模型
-- `routing_timeout` 默认 `2.0` 秒；超过预算直接 fallback，不阻塞主会话流程
+- `routing_timeout` 默认 `2.0` 秒；只有进入小模型 router 时才使用，并会根据最近模型路由 telemetry 做保守 fail-fast 调整，优先不阻塞主会话流程
 - `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
 - 极短问候/寒暄（如 `hi`、`你好`）会直接跳过执行约束抽取和 router 结构化调用，避免简单消息被前置 LLM 链路拖慢
+- 对明显的请求类型（如显式辩论、多角色讨论、显式查询/检索、显式执行型任务），会先走零模型规则路由；只有模糊请求才进入一次小模型 router
 - Router 只决定宏观路由（`tool_workflow` / `debate`）和执行倾向，不直接接管整个编排
 
 当前实现增加了一层保守型 orchestration policy learning，用来优化“任务怎么拆、什么时候并行、什么时候不要再开 worker”，而不是去微调底层模型。
@@ -226,6 +227,7 @@ uv run babybot
 - `TaskContract.allowed_tools` / `ExecutionPlan.steps[*].payload.allowed_tools` 会约束编排模型真正可见的 orchestration tools
 - 常规回答默认走 `tool_workflow`，辩论请求默认走 `debate`
 - 轻量 Router 只在合同冻结前做一次判定；如果失败、超时或返回无效结构，会直接退回默认合同推断
+- runtime telemetry 会区分 `rule` / `model` / `fallback` 三类 router 来源，便于观察规则命中率与模型开销
 - `reply_to_user` 必须单独收尾；如果仍有未完成的非 scheduler 子任务，编排层会拒绝提前结束
 - runtime feedback 到 `RuntimeJob.state` 的投影已集中到 `runtime_jobs.py`，避免状态映射散落在渠道层
 - `dispatch_team` 的阶段进度现在也会走规范化 runtime event，再由通道层按统一状态机渲染
