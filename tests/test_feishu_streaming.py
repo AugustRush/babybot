@@ -119,3 +119,33 @@ def test_send_response_keeps_opus_as_audio_media(tmp_path: Path) -> None:
     )
 
     assert sent == [("media", '{"file_key": "file_key_2"}')]
+
+
+def test_send_response_honors_forced_post_format() -> None:
+    channel = FeishuChannel(FeishuConfig(enabled=False, stream_reply=True), manager=None)
+
+    sent: list[tuple[str, str]] = []
+
+    def _fake_send(
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+    ) -> bool:
+        del receive_id_type, receive_id
+        sent.append((msg_type, content))
+        return True
+
+    channel._send_message_sync = _fake_send  # type: ignore[method-assign]
+
+    asyncio.run(
+        channel.send_response(
+            "oc_mock_chat",
+            TaskResponse(text="处理中：下载模型"),
+            sender_id="ou_user_1",
+            message_format="post",
+        )
+    )
+
+    assert len(sent) == 1
+    assert sent[0][0] == "post"

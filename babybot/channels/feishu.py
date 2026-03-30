@@ -1080,7 +1080,12 @@ class FeishuChannel(BaseChannel):
             else:
                 return
 
-        fmt = self._detect_msg_format(text)
+        forced_format = str(kwargs.get("message_format", "") or "").strip().lower()
+        fmt = (
+            forced_format
+            if forced_format in {"text", "post", "interactive"}
+            else self._detect_msg_format(text)
+        )
 
         if fmt == "text":
             text_body = json.dumps({"text": text.strip()}, ensure_ascii=False)

@@ -435,6 +435,7 @@ class MessageBus:
                     TaskResponse(text=progress_text),
                     sender_id=msg.sender_id,
                     metadata=msg.metadata,
+                    message_format="post",
                 )
             except Exception:
                 logger.warning(

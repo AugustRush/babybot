@@ -154,6 +154,7 @@ class _FakeFeishuChannel:
         self.created: list[str] = []
         self.patched: list[str] = []
         self.sent: list[TaskResponse] = []
+        self.sent_kwargs: list[dict[str, Any]] = []
 
     async def create_stream_message(
         self,
@@ -175,8 +176,9 @@ class _FakeFeishuChannel:
     async def send_response(
         self, chat_id: str, response: TaskResponse, **kwargs: Any
     ) -> None:
-        del chat_id, kwargs
+        del chat_id
         self.sent.append(response)
+        self.sent_kwargs.append(dict(kwargs))
 
 
 def test_message_bus_uses_stream_callback_and_skips_duplicate_text_send() -> None:
@@ -301,7 +303,9 @@ def test_message_bus_sends_progress_reply_when_runtime_stage_completes() -> None
     assert len(channel.sent) == 3
     assert "处理中" in channel.sent[0].text
     assert "50%" in channel.sent[0].text
+    assert channel.sent_kwargs[0]["message_format"] == "post"
     assert channel.sent[1].text == "阶段完成：先查询杭州天气"
+    assert channel.sent_kwargs[1]["message_format"] == "post"
     assert channel.sent[2].text == "最终结果"
 
 
@@ -388,7 +392,9 @@ def test_message_bus_sends_final_reply_as_new_message_after_runtime_progress() -
     assert len(channel.sent) == 3
     assert "处理中" in channel.sent[0].text
     assert "50%" in channel.sent[0].text
+    assert channel.sent_kwargs[0]["message_format"] == "post"
     assert channel.sent[1].text == "阶段完成：先查询杭州天气"
+    assert channel.sent_kwargs[1]["message_format"] == "post"
     assert channel.sent[2].text == "最终结果"
 
 
