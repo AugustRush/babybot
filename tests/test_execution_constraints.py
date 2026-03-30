@@ -80,3 +80,24 @@ def test_infer_execution_constraints_falls_back_to_default_budget_when_model_fai
     assert constraints["hard_limits"]["max_rounds"] is None
     assert constraints["hard_limits"]["max_total_seconds"] == 600.0
     assert constraints["degradation"]["on_budget_exhausted"] == "summarize_partial"
+
+
+def test_infer_execution_constraints_skips_short_greeting() -> None:
+    gateway = _FakeGateway(
+        {
+            "mode": "deferred",
+            "hard_limits": {"max_rounds": 99},
+        }
+    )
+
+    constraints = asyncio.run(
+        infer_execution_constraints(
+            gateway,
+            "hi",
+            default_max_total_seconds=600.0,
+        )
+    )
+
+    assert gateway.calls == []
+    assert constraints["mode"] == "interactive"
+    assert constraints["hard_limits"]["max_rounds"] is None

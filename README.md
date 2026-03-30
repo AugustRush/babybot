@@ -176,6 +176,7 @@ uv run babybot
 - `routing_model_name` 可单独配置；为空时回退到当前会话同一模型
 - `routing_timeout` 默认 `2.0` 秒；超过预算直接 fallback，不阻塞主会话流程
 - `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
+- 极短问候/寒暄（如 `hi`、`你好`）会直接跳过执行约束抽取和 router 结构化调用，避免简单消息被前置 LLM 链路拖慢
 - Router 只决定宏观路由（`tool_workflow` / `debate`）和执行倾向，不直接接管整个编排
 
 当前实现增加了一层保守型 orchestration policy learning，用来优化“任务怎么拆、什么时候并行、什么时候不要再开 worker”，而不是去微调底层模型。

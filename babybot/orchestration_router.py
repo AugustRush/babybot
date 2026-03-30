@@ -12,6 +12,39 @@ from .context_views import build_context_view
 
 logger = logging.getLogger(__name__)
 
+_TRIVIAL_SOCIAL_MESSAGES = {
+    "hi",
+    "hello",
+    "hey",
+    "你好",
+    "您好",
+    "嗨",
+    "哈喽",
+    "在吗",
+    "早上好",
+    "中午好",
+    "下午好",
+    "晚上好",
+}
+
+
+def _is_trivial_social_message(text: str) -> bool:
+    normalized = (
+        str(text or "")
+        .strip()
+        .lower()
+        .replace("！", "")
+        .replace("!", "")
+        .replace("。", "")
+        .replace(".", "")
+        .replace("？", "")
+        .replace("?", "")
+        .replace("呀", "")
+        .replace("啊", "")
+        .replace("哈", "")
+    )
+    return normalized in _TRIVIAL_SOCIAL_MESSAGES
+
 
 class RoutingDecision(BaseModel):
     route_mode: Literal["tool_workflow", "answer", "debate"] = "tool_workflow"
@@ -126,6 +159,15 @@ async def route_task(
     goal = str(snapshot.goal or "").strip()
     if not goal:
         return None
+    if _is_trivial_social_message(goal):
+        return RoutingDecision(
+            route_mode="answer",
+            need_clarification=False,
+            execution_style="direct_execute",
+            parallelism_hint="serial",
+            worker_hint="deny",
+            explain="简单问候直接回复",
+        )
     system_prompt = (
         "你是一个轻量任务路由器，只做一次保守判定。"
         "优先保持 tool_workflow，只有明显需要多方比较时才升级为 debate。"
@@ -163,6 +205,12 @@ async def route_task(
                 ),
                 timeout=max(0.5, float(timeout or 0.0) + 0.2),
             )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Routing decision timed out after %.2fs; falling back to default contract",
+            max(0.5, float(timeout or 0.0)),
+        )
+        return None
     except Exception:
         logger.exception("Routing decision failed; falling back to default contract")
         return None

@@ -8,6 +8,40 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+_TRIVIAL_SOCIAL_MESSAGES = {
+    "hi",
+    "hello",
+    "hey",
+    "你好",
+    "您好",
+    "嗨",
+    "哈喽",
+    "在吗",
+    "早上好",
+    "中午好",
+    "下午好",
+    "晚上好",
+}
+
+
+def _is_trivial_social_message(text: str) -> bool:
+    normalized = (
+        str(text or "")
+        .strip()
+        .lower()
+        .replace("！", "")
+        .replace("!", "")
+        .replace("。", "")
+        .replace(".", "")
+        .replace("？", "")
+        .replace("?", "")
+        .replace("呀", "")
+        .replace("啊", "")
+        .replace("哈", "")
+    )
+    return normalized in _TRIVIAL_SOCIAL_MESSAGES
+
+
 @dataclass(frozen=True)
 class ExecutionHardLimits:
     max_rounds: int | None = None
@@ -199,6 +233,8 @@ async def infer_execution_constraints(
         return defaults
     goal = str(text or "").strip()
     if not goal:
+        return defaults
+    if _is_trivial_social_message(goal):
         return defaults
     system_prompt = (
         "你负责从用户请求中抽取执行约束，输出结构化 JSON。"

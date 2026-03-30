@@ -32,6 +32,7 @@ class _FakeGateway:
     def __init__(self, responses: list[ModelResponse]) -> None:
         self._responses = list(responses)
         self._call_idx = 0
+        self.structured_calls: list[dict[str, Any]] = []
 
     async def generate(
         self, request: ModelRequest, context: ExecutionContext,
@@ -49,7 +50,14 @@ class _FakeGateway:
         model_cls: type,
         heartbeat: Any = None,
     ):
-        del system_prompt, user_prompt, model_cls, heartbeat
+        self.structured_calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "model_cls": getattr(model_cls, "__name__", str(model_cls)),
+            }
+        )
+        del heartbeat
         return None
 
 
@@ -161,6 +169,7 @@ def test_direct_reply_without_tools() -> None:
     assert text == "你好！有什么可以帮你的？"
     assert media == []
     assert len(rm.calls) == 0
+    assert gateway.structured_calls == []
 
 
 def test_dispatch_subagent_with_resource_scope() -> None:
@@ -580,6 +589,30 @@ def test_answer_with_dag_records_runtime_telemetry(tmp_path: Path) -> None:
     summary = agent._policy_store.summarize_runtime_telemetry()
     assert summary["overall"]["runs"] == 1
     assert "tool_workflow" in summary["by_route_mode"]
+
+
+def test_answer_with_dag_skips_preflight_structured_calls_for_short_greeting() -> None:
+    gateway = _FakeGateway([
+        ModelResponse(
+            text="",
+            tool_calls=(
+                ModelToolCall(
+                    call_id="c1",
+                    name="reply_to_user",
+                    arguments={"text": "hi there"},
+                ),
+            ),
+            finish_reason="tool_calls",
+        ),
+    ])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+
+    text, media = asyncio.run(agent._answer_with_dag("hi"))
+
+    assert text == "hi there"
+    assert media == []
+    assert gateway.structured_calls == []
 
 
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:
