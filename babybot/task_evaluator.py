@@ -34,6 +34,12 @@ class TaskEvaluator:
         reflection = self._build_reflection(evaluation)
         if reflection is None:
             return None
+        self._record_reflection(reflection)
+        for extra in self._build_additional_reflections(evaluation, primary=reflection):
+            self._record_reflection(extra)
+        return reflection
+
+    def _record_reflection(self, reflection: ReflectionRecord) -> None:
         self._store.record_reflection(
             chat_key=reflection.chat_key,
             route_mode=reflection.route_mode,
@@ -42,7 +48,49 @@ class TaskEvaluator:
             recommended_action=reflection.recommended_action,
             confidence=reflection.confidence,
         )
-        return reflection
+
+    @staticmethod
+    def _build_additional_reflections(
+        evaluation: TaskEvaluationInput,
+        *,
+        primary: ReflectionRecord,
+    ) -> list[ReflectionRecord]:
+        if primary.failure_pattern != "clean_success":
+            return []
+        payloads: list[ReflectionRecord] = []
+        state_features = dict(evaluation.state_features or {})
+        parallelism_action = str(evaluation.parallelism_hint or "").strip()
+        if parallelism_action in {"serial", "bounded_parallel"}:
+            payloads.append(
+                ReflectionRecord(
+                    chat_key=evaluation.chat_key,
+                    route_mode=evaluation.route_mode,
+                    state_features=state_features,
+                    failure_pattern="clean_success",
+                    recommended_action=parallelism_action,
+                    confidence=0.58,
+                )
+            )
+        worker_hint = str(evaluation.worker_hint or "").strip()
+        worker_action = (
+            "allow_worker"
+            if worker_hint == "allow"
+            else "deny_worker"
+            if worker_hint == "deny"
+            else ""
+        )
+        if worker_action:
+            payloads.append(
+                ReflectionRecord(
+                    chat_key=evaluation.chat_key,
+                    route_mode=evaluation.route_mode,
+                    state_features=state_features,
+                    failure_pattern="clean_success",
+                    recommended_action=worker_action,
+                    confidence=0.58,
+                )
+            )
+        return payloads
 
     @staticmethod
     def _build_reflection(

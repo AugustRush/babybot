@@ -101,3 +101,17 @@ def test_task_evaluator_records_clean_success_reflection(tmp_path) -> None:
     assert reflection is not None
     assert reflection.failure_pattern == "clean_success"
     assert reflection.recommended_action == "direct_execute"
+
+    hints = store.list_reflection_hints(
+        route_mode="tool_workflow",
+        state_features={
+            "task_shape": "single_step",
+            "has_media": False,
+            "independent_subtasks": 1,
+        },
+        limit=6,
+    )
+    actions = {item["recommended_action"] for item in hints}
+    assert "direct_execute" in actions
+    assert "serial" in actions
+    assert "deny_worker" in actions

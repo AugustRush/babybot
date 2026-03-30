@@ -570,6 +570,55 @@ def test_answer_with_dag_includes_reflection_hints_in_policy_hints(tmp_path: Pat
     assert any("analyze_first" in hint for hint in seen["policy_hints"])
 
 
+def test_answer_with_dag_uses_success_reflections_for_sparse_policy_defaults(
+    tmp_path: Path,
+) -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    state_features = {
+        "task_shape": "single_step",
+        "has_media": False,
+        "independent_subtasks": 1,
+    }
+    for action in ("bounded_parallel", "allow_worker"):
+        agent._policy_store.record_reflection(
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            state_features=state_features,
+            failure_pattern="clean_success",
+            recommended_action=action,
+            confidence=0.72,
+        )
+        agent._policy_store.record_reflection(
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            state_features=state_features,
+            failure_pattern="clean_success",
+            recommended_action=action,
+            confidence=0.69,
+        )
+    seen: dict[str, Any] = {}
+    tape = Tape(chat_id="feishu:c1")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            seen.update(context.state)
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("请查一下天气", tape=tape))
+
+    assert text == "ok"
+    assert media == []
+    assert any("历史反思建议调度动作：bounded_parallel" in hint for hint in seen["policy_hints"])
+    assert any("历史反思建议 worker 动作：allow_worker" in hint for hint in seen["policy_hints"])
+
+
 def test_answer_with_dag_records_runtime_telemetry(tmp_path: Path) -> None:
     rm = _FakeResourceManager()
     agent = _make_agent(_FakeGateway([]), rm)
