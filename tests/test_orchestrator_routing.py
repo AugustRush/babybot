@@ -18,6 +18,7 @@ from babybot.agent_kernel import (
 )
 from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
 from babybot.context import TapeStore
+from babybot.context import Tape
 from babybot.memory_store import HybridMemoryStore
 from babybot.execution_plan import ExecutionPlan
 from babybot.orchestrator import OrchestratorAgent
@@ -555,6 +556,30 @@ def test_answer_with_dag_includes_reflection_hints_in_policy_hints(tmp_path: Pat
     assert text == "ok"
     assert media == []
     assert any("analyze_first" in hint for hint in seen["policy_hints"])
+
+
+def test_answer_with_dag_records_runtime_telemetry(tmp_path: Path) -> None:
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal, context
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    tape = Tape(chat_id="feishu:c1")
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("请查一下天气", tape=tape))
+
+    assert text == "ok"
+    assert media == []
+    summary = agent._policy_store.summarize_runtime_telemetry()
+    assert summary["overall"]["runs"] == 1
+    assert "tool_workflow" in summary["by_route_mode"]
 
 
 def test_consecutive_answer_with_dag_calls_do_not_replay_prior_runtime_events() -> None:

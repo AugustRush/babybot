@@ -7,6 +7,7 @@ from collections import OrderedDict
 import inspect
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -547,6 +548,7 @@ class OrchestratorAgent:
             execution_constraints=execution_constraints,
         )
         routing_decision = None
+        routing_started = time.perf_counter()
         if self._routing_enabled():
             routing_decision = await route_task(
                 self.gateway,
@@ -555,6 +557,7 @@ class OrchestratorAgent:
                 model_name=getattr(self.config.system, "routing_model_name", ""),
                 timeout=float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0),
             )
+        routing_latency_ms = (time.perf_counter() - routing_started) * 1000.0
         task_contract = build_task_contract(
             user_input=user_input,
             chat_key=chat_key,
@@ -591,6 +594,8 @@ class OrchestratorAgent:
             )
         scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
         worker_policy = self.choose_worker_policy(features=scheduling_features)
+        scheduling_base_action = str(scheduling_policy.get("action_name", "") or "")
+        worker_base_action = str(worker_policy.get("action_name", "") or "")
         scheduling_policy = self._maybe_override_policy_from_reflection(
             scheduling_policy,
             preferred_action=self._select_reflection_override(
@@ -607,6 +612,33 @@ class OrchestratorAgent:
             ),
             hint_prefix="历史反思建议 worker 动作：",
         )
+        reflection_override_count = 0
+        if str(scheduling_policy.get("action_name", "") or "") != scheduling_base_action:
+            reflection_override_count += 1
+        if str(worker_policy.get("action_name", "") or "") != worker_base_action:
+            reflection_override_count += 1
+        runtime_telemetry_store = getattr(self, "_policy_store", None)
+        if (
+            chat_key
+            and runtime_telemetry_store is not None
+            and hasattr(runtime_telemetry_store, "record_runtime_telemetry")
+        ):
+            configured_router_model = str(
+                getattr(self.config.system, "routing_model_name", "") or ""
+            ).strip()
+            fallback_model = str(
+                getattr(getattr(self.config, "model", None), "model_name", "") or ""
+            ).strip()
+            runtime_telemetry_store.record_runtime_telemetry(
+                flow_id=flow_id,
+                chat_key=chat_key,
+                route_mode=route_mode,
+                router_model=configured_router_model or fallback_model,
+                router_latency_ms=routing_latency_ms,
+                router_fallback=routing_decision is None,
+                reflection_hint_count=len(reflection_hints_payload),
+                reflection_override_count=reflection_override_count,
+            )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
         policy_hints.extend(self._routing_policy_hints(routing_decision))
@@ -847,6 +879,41 @@ class OrchestratorAgent:
                     + f"failure_rate={float(payload.get('failure_rate', 0.0) or 0.0):.2f} "
                     + f"feedback_score={float(payload.get('feedback_score', 0.0) or 0.0):.2f}"
                 )
+        telemetry_summary_fn = getattr(self._policy_store, "summarize_runtime_telemetry", None)
+        if callable(telemetry_summary_fn):
+            try:
+                telemetry = telemetry_summary_fn(chat_key=chat_key or None)
+            except TypeError:
+                telemetry = telemetry_summary_fn()
+            overall = telemetry.get("overall") if isinstance(telemetry, dict) else None
+            by_route_mode = (
+                telemetry.get("by_route_mode", {}) if isinstance(telemetry, dict) else {}
+            )
+            if isinstance(overall, dict) and int(overall.get("runs", 0) or 0) > 0:
+                parts.append("[Routing Telemetry]")
+                parts.append(
+                    "- "
+                    + f"runs={int(overall.get('runs', 0) or 0)} "
+                    + f"avg_router_latency_ms={float(overall.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
+                    + f"fallback_rate={float(overall.get('fallback_rate', 0.0) or 0.0):.2f} "
+                    + f"reflection_match_rate={float(overall.get('reflection_match_rate', 0.0) or 0.0):.2f} "
+                    + f"reflection_override_rate={float(overall.get('reflection_override_rate', 0.0) or 0.0):.2f} "
+                    + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
+                )
+                if isinstance(by_route_mode, dict):
+                    for route_mode, payload in sorted(by_route_mode.items()):
+                        if not isinstance(payload, dict):
+                            continue
+                        parts.append(
+                            "- "
+                            + f"route_mode={route_mode} "
+                            + f"runs={int(payload.get('runs', 0) or 0)} "
+                            + f"avg_router_latency_ms={float(payload.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
+                            + f"fallback_rate={float(payload.get('fallback_rate', 0.0) or 0.0):.2f} "
+                            + f"reflection_match_rate={float(payload.get('reflection_match_rate', 0.0) or 0.0):.2f} "
+                            + f"reflection_override_rate={float(payload.get('reflection_override_rate', 0.0) or 0.0):.2f} "
+                            + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"
+                        )
         return "\n".join(parts)
 
     async def _ensure_initialized(self) -> None:

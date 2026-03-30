@@ -294,6 +294,7 @@ explain 中会包含这类信息：
 - `@policy inspect <flow_id>` 会直接返回该运行的 runtime flow 视图
 - 如果当前会话还没有最近任务，会直接返回明确错误，不会进入正常对话编排
 - `@policy inspect` 会返回当前 policy 聚合摘要，`@policy inspect scheduling` / `worker` / `decomposition` 可查看对应决策维度
+- `@policy inspect` 现在还会附带 `Routing Telemetry`，包括 router 平均延迟、fallback rate、reflection match/override rate 和按 `route_mode` 聚合的 reward
 
 查看策略数据：
 

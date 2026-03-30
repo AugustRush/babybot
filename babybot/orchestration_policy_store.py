@@ -192,6 +192,77 @@ class OrchestrationPolicyStore:
         ranked.sort(key=lambda item: item[0], reverse=True)
         return [payload for _, payload in ranked[: max(0, int(limit))]]
 
+    def record_runtime_telemetry(
+        self,
+        *,
+        flow_id: str,
+        chat_key: str,
+        route_mode: str,
+        router_model: str,
+        router_latency_ms: float,
+        router_fallback: bool,
+        reflection_hint_count: int = 0,
+        reflection_override_count: int = 0,
+        created_at: str | None = None,
+    ) -> None:
+        db = self._ensure_db()
+        db.execute(
+            """
+            INSERT OR REPLACE INTO policy_runtime_telemetry (
+                flow_id, chat_key, route_mode, router_model, router_latency_ms,
+                router_fallback, reflection_hint_count, reflection_override_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                flow_id,
+                chat_key,
+                route_mode,
+                router_model,
+                max(0.0, float(router_latency_ms)),
+                1 if router_fallback else 0,
+                max(0, int(reflection_hint_count)),
+                max(0, int(reflection_override_count)),
+                created_at or self._utc_now(),
+            ),
+        )
+        db.commit()
+
+    def summarize_runtime_telemetry(
+        self,
+        *,
+        chat_key: str | None = None,
+    ) -> dict[str, Any]:
+        rows = self._ensure_db().execute(
+            """
+            SELECT t.flow_id,
+                   t.chat_key,
+                   t.route_mode,
+                   t.router_model,
+                   t.router_latency_ms,
+                   t.router_fallback,
+                   t.reflection_hint_count,
+                   t.reflection_override_count,
+                   o.reward
+            FROM policy_runtime_telemetry AS t
+            LEFT JOIN policy_outcomes AS o
+              ON o.flow_id = t.flow_id
+            WHERE (? IS NULL OR t.chat_key = ?)
+            ORDER BY t.id DESC
+            """,
+            (chat_key, chat_key),
+        ).fetchall()
+        overall = self._summarize_runtime_telemetry_rows(rows)
+        by_route_mode: dict[str, dict[str, float | int]] = {}
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["route_mode"] or "unknown"), []).append(row)
+        for route_mode, route_rows in grouped.items():
+            by_route_mode[route_mode] = self._summarize_runtime_telemetry_rows(route_rows)
+        return {
+            "overall": overall,
+            "by_route_mode": by_route_mode,
+        }
+
     def latest_feedback(self, flow_id: str) -> dict[str, Any] | None:
         row = self._ensure_db().execute(
             """
@@ -455,9 +526,59 @@ class OrchestrationPolicyStore:
                 )
                 """
             )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS policy_runtime_telemetry (
+                    id INTEGER PRIMARY KEY,
+                    flow_id TEXT NOT NULL UNIQUE,
+                    chat_key TEXT NOT NULL,
+                    route_mode TEXT NOT NULL,
+                    router_model TEXT NOT NULL,
+                    router_latency_ms REAL NOT NULL,
+                    router_fallback INTEGER NOT NULL DEFAULT 0,
+                    reflection_hint_count INTEGER NOT NULL DEFAULT 0,
+                    reflection_override_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             db.commit()
             self._db = db
         return self._db
+
+    @staticmethod
+    def _summarize_runtime_telemetry_rows(
+        rows: list[sqlite3.Row],
+    ) -> dict[str, float | int]:
+        if not rows:
+            return {
+                "runs": 0,
+                "avg_router_latency_ms": 0.0,
+                "fallback_rate": 0.0,
+                "reflection_match_rate": 0.0,
+                "reflection_override_rate": 0.0,
+                "mean_reward": 0.0,
+            }
+        runs = len(rows)
+        latency_total = sum(float(row["router_latency_ms"] or 0.0) for row in rows)
+        fallback_total = sum(int(row["router_fallback"] or 0) for row in rows)
+        reflection_match_total = sum(
+            1 for row in rows if int(row["reflection_hint_count"] or 0) > 0
+        )
+        reflection_override_total = sum(
+            1 for row in rows if int(row["reflection_override_count"] or 0) > 0
+        )
+        reward_values = [float(row["reward"]) for row in rows if row["reward"] is not None]
+        return {
+            "runs": runs,
+            "avg_router_latency_ms": round(latency_total / runs, 2),
+            "fallback_rate": round(fallback_total / runs, 6),
+            "reflection_match_rate": round(reflection_match_total / runs, 6),
+            "reflection_override_rate": round(reflection_override_total / runs, 6),
+            "mean_reward": round(
+                sum(reward_values) / len(reward_values), 6
+            ) if reward_values else 0.0,
+        }
 
     @staticmethod
     def _utc_now() -> str:

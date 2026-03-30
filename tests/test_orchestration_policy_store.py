@@ -414,3 +414,50 @@ def test_policy_store_records_and_queries_reflection_hints(tmp_path) -> None:
 
     assert len(hints) == 1
     assert hints[0]["recommended_action"] == "analyze_first"
+
+
+def test_policy_store_summarizes_runtime_telemetry_and_reward(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_runtime_telemetry(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=180.0,
+        router_fallback=False,
+        reflection_hint_count=1,
+        reflection_override_count=1,
+    )
+    store.record_outcome(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=0.8,
+        outcome={},
+    )
+    store.record_runtime_telemetry(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        route_mode="debate",
+        router_model="mini-router",
+        router_latency_ms=320.0,
+        router_fallback=True,
+        reflection_hint_count=0,
+        reflection_override_count=0,
+    )
+    store.record_outcome(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        final_status="failed",
+        reward=-0.4,
+        outcome={},
+    )
+
+    summary = store.summarize_runtime_telemetry()
+
+    assert summary["overall"]["runs"] == 2
+    assert summary["overall"]["fallback_rate"] == 0.5
+    assert summary["overall"]["reflection_match_rate"] == 0.5
+    assert summary["overall"]["reflection_override_rate"] == 0.5
+    assert summary["by_route_mode"]["tool_workflow"]["mean_reward"] == 0.8
+    assert summary["by_route_mode"]["debate"]["mean_reward"] == -0.4
