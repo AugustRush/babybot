@@ -105,7 +105,7 @@ uv run gateway
 | `resource_workspace_tools.py` | workspace 文件读写、代码执行、shell 执行 |
 | `resource_skill_loader.py` | `SKILL.md`、脚本 AST/CLI 解析、技能工具注册 |
 | `resource_scope.py` | 资源 brief、scope 解析、lease 组装 |
-| `resource_tool_loader.py` | workspace tools 的注册/加载 |
+| `resource_tool_loader.py` | 内置工具、通道工具与 workspace 自定义工具的注册/加载 |
 | `resource_subagent_runtime.py` | 子 agent 运行时 orchestration |
 | `resource_skill_runtime.py` | skill pack 选择、worker prompt 与技能目录格式化 |
 | `builtin_tools/` | 内置 basic/code/observability 工具定义与注册清单 |
@@ -168,7 +168,7 @@ uv run babybot
 
 当前实现把编排优化拆成三层，目标是提升智能和效率，但保持本地 CPU 友好、低延迟、不过度设计：
 
-- `ContextRouter`：非 interactive session 的 DAG 路径里，只做一次结构化小模型判定；超时或失败立即回退旧逻辑
+- 轻量 routing 层（`orchestration_router.py`）：非 interactive session 的 DAG 路径里，只做一次结构化小模型判定；超时或失败立即回退旧逻辑
 - `ConservativePolicySelector`：继续负责局部动作选择，例如拆解、串并行和 worker gate
 - `TaskEvaluator + ReflectionStore`：任务结束后异步总结失败模式/稳态经验，下次只回注少量 hint
 
@@ -176,15 +176,14 @@ uv run babybot
 
 - `routing_enabled` 默认开启，但只影响 `_answer_with_dag()` 路径，不会打断 `@session` 交互式会话
 - `routing_model_name` 可单独配置；为空时回退到当前会话同一模型
-- `routing_timeout` 默认 `2.0` 秒；只有进入小模型 router 时才使用，并会根据最近模型路由 telemetry 做保守 fail-fast 调整，优先不阻塞主会话流程
-- router 的短超时属于软回退：命中上限时会直接退回默认合同，并按 warning 记录，而不是把整条会话记成模型调用错误
+- `routing_timeout` 默认 `3.0` 秒；只有进入小模型 router 时才使用，并会根据最近模型路由 telemetry 做保守 fail-fast 调整，优先不阻塞主会话流程
+- router 的短超时属于软回退：命中上限时会直接退回默认合同，并按低噪音日志记录，而不是把整条会话记成模型调用错误
 - `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
 - 对稳定命中的成功 bucket，会优先复用带时间衰减的历史成功反思直达同类路由；这些成功经验也会回流到调度/worker gate 的保守选择，并单独统计 execution_style / parallelism / worker_gate 命中率
 - 对规则和 reflection 都没命中的模糊请求，会先尝试一个极轻量的稳定意图桶缓存；只有缓存也没把握时，才进入一次小模型 router
-- 意图桶缓存会对旧样本做时间衰减；如果后台 shadow routing 长期不一致，会自动暂时停用该桶，回退到模型 router
+- 意图桶缓存会对旧样本做时间衰减；如果历史成功样本不足或过旧，会自动回退到模型 router
 - 当某一维反思长期低命中时，会自动降低该维 reflection 注入强度；当 parallelism / worker 维长期高命中时，会在“样本稀疏但可并行”的场景里温和放宽默认保守动作，并把 guardrail 实际触发率一并写入 runtime telemetry
-- 对非模型路由命中的请求，系统会在后台做一次不阻塞主会话的影子路由评估，只记录 agreement telemetry，不会影响当次会话结果
-- 当某个桶的 shadow agreement 变差后，系统不会每次都继续探测，而是按每 chat 的轻量预算做低频 probe，避免重复消耗模型调用
+- 学习与诊断现在基于真实执行结果、运行时 telemetry 和用户反馈，而不是绑定额外的影子路由探测
 - 极短问候/寒暄（如 `hi`、`你好`）会直接跳过执行约束抽取和 router 结构化调用，避免简单消息被前置 LLM 链路拖慢
 - 对明显的请求类型（如显式辩论、多角色讨论、显式查询/检索、显式执行型任务），会先走零模型规则路由；只有模糊请求才进入一次小模型 router
 - Router 只决定宏观路由（`tool_workflow` / `debate`）和执行倾向，不直接接管整个编排
@@ -226,7 +225,7 @@ uv run babybot
 - 历史 outcome 会做时间衰减，越旧的经验影响越小，不会长期主导当前策略
 - `good/bad` 反馈不会直接覆盖 reward，而是先做时间衰减，再按 `feedback_confidence` 进行有限幅度 shaping
 - 如果某个 action 在最近窗口内出现明显失败或负反馈，会触发 safeguard，优先退回更保守的动作
-- `inspect_policy` 除了原有路由/反思命中率外，也会输出 `execution_style_guardrail_reduce_rate`、`parallelism_guardrail_soften_rate`、`worker_guardrail_soften_rate`、`shadow_routing_eval_rate`、`shadow_routing_agreement_rate`
+- `inspect_policy` 除了原有路由/反思命中率外，也会输出 `execution_style_guardrail_reduce_rate`、`parallelism_guardrail_soften_rate`、`worker_guardrail_soften_rate`
 - 当前调度/worker 策略选择会附带 explain 摘要，便于在日志、debug 和 `@policy inspect` 时直接看出命中 bucket、分数与风险项
 - 最终选择器是保守版 contextual bandit：对每个 action 用经验分减去和样本量相关的置信惩罚，优先选择更稳而不是更激进的动作
 - 自动模式下，最小样本阈值和探索预算由系统内部护栏决定，不要求人工调参
@@ -237,7 +236,7 @@ uv run babybot
 - `TaskContract.allowed_tools` / `ExecutionPlan.steps[*].payload.allowed_tools` 会约束编排模型真正可见的 orchestration tools
 - 常规回答默认走 `tool_workflow`，辩论请求默认走 `debate`
 - 轻量 Router 只在合同冻结前做一次判定；如果失败、超时或返回无效结构，会直接退回默认合同推断
-- runtime telemetry 会区分 `rule` / `model` / `fallback` 三类 router 来源，便于观察规则命中率与模型开销
+- runtime telemetry 会区分 `rule` / `model` / `skipped:*` / `fallback` 四类 router 来源，并单独统计 skip reason，便于判断是被门控跳过还是实际 fallback
 - `reply_to_user` 必须单独收尾；如果仍有未完成的非 scheduler 子任务，编排层会拒绝提前结束
 - runtime feedback 到 `RuntimeJob.state` 的投影已集中到 `runtime_jobs.py`，避免状态映射散落在渠道层
 - `dispatch_team` 的阶段进度现在也会走规范化 runtime event，再由通道层按统一状态机渲染
@@ -307,7 +306,8 @@ explain 中会包含这类信息：
 - `@policy inspect <flow_id>` 会直接返回该运行的 runtime flow 视图
 - 如果当前会话还没有最近任务，会直接返回明确错误，不会进入正常对话编排
 - `@policy inspect` 会返回当前 policy 聚合摘要，`@policy inspect scheduling` / `worker` / `decomposition` 可查看对应决策维度
-- `@policy inspect` 现在还会附带 `Routing Telemetry`，包括 router 平均延迟、fallback rate、reflection match/override rate 和按 `route_mode` 聚合的 reward
+- `@policy inspect` 现在还会附带 `Routing Telemetry`，包括 router 平均延迟、`fallback_rate`、`skipped_rate`、`model_route_rate`、`skip_breakdown`、reflection match/override rate，以及按 `route_mode` 聚合的 reward
+- CLI 的 `status` 也会显示同一份 router telemetry 摘要，便于快速判断当前是“被门控跳过”还是“真正 fallback”
 
 查看策略数据：
 
@@ -343,7 +343,7 @@ uv run gateway
 - 定时任务：`~/.babybot/workspace/scheduled_tasks.json`
 - workspace 技能目录：`~/.babybot/workspace/skills`
 
-完整模板见 `config.json.example` 和 `scheduled_tasks.json.example`。
+完整模板见 `config.json.example` 和 `scheduled_tasks.json.example`；其中 router 默认超时已与当前实现保持一致（`3.0` 秒）。
 
 ### 模型配置
 
@@ -812,11 +812,16 @@ babybot/
 │   ├── cli.py                   # CLI / Gateway 运行器
 │   ├── config.py                # 统一配置管理
 │   ├── orchestrator.py          # 编排 Agent
+│   ├── orchestration_router.py  # 轻量路由判定与门控
+│   ├── orchestration_policy.py  # 保守策略选择器
+│   ├── orchestration_policy_store.py # 策略/路由 telemetry 持久化
+│   ├── orchestration_policy_types.py # 策略决策/结果类型
 │   ├── task_contract.py         # 任务合同模型与归一化入口
 │   ├── execution_plan.py        # 合同展开后的执行计划
 │   ├── runtime_jobs.py          # 长任务状态模型
 │   ├── runtime_job_store.py     # 长任务 SQLite 存储
 │   ├── feedback_events.py       # 运行时反馈规范化与渲染
+│   ├── runtime_feedback_commands.py # @policy / @job / @session 命令解析
 │   ├── memory_models.py         # 记忆数据模型
 │   ├── memory_store.py          # Hybrid Memory 存储 / 衰减 / 覆盖
 │   ├── context_views.py         # Hot / Warm / Cold 视图构建
@@ -837,12 +842,17 @@ babybot/
 │   ├── context.py               # Tape 长期记忆 + TapeStore
 │   ├── mcp_runtime.py           # MCP stdio/HTTP 客户端
 │   ├── cron.py                  # 定时任务调度
+│   ├── task_evaluator.py        # 任务评估与反思总结
+│   ├── interactive_sessions/    # 交互式 session 管理与 backend
 │   ├── agent_kernel/            # 轻量执行内核
 │   │   ├── executor.py          # SingleAgentExecutor
 │   │   ├── dynamic_orchestrator.py # DynamicOrchestrator（子任务编排 + team dispatch）
 │   │   ├── team.py              # TeamRunner（多 Agent 辩论 / 协作）
 │   │   ├── protocols.py         # ExecutorPort protocol
 │   │   ├── types.py             # TaskContract / ExecutionContext / TaskResult
+│   │   ├── execution_constraints.py # 运行约束与团队执行策略
+│   │   ├── loop_guard.py        # 循环/重复工具调用防护
+│   │   ├── errors.py            # 运行时错误分类与恢复提示
 │   │   ├── executors/           # 可插拔执行后端
 │   │   │   ├── __init__.py      # ExecutorRegistry
 │   │   │   └── claude_code.py   # ClaudeCodeExecutor
@@ -857,9 +867,10 @@ babybot/
 │       ├── registry.py          # 通道类自动注册
 │       ├── tools.py             # ChannelToolContext / ChannelCapabilities
 │       ├── feishu.py            # 飞书通道实现
-│       └── weixin.py            # 微信通道实现
+│       ├── feishu_tools.py      # 飞书发送/卡片工具
+│       ├── weixin.py            # 微信通道实现
+│       └── weixin_tools.py      # 微信发送工具
 ├── skills/                      # 技能目录
-├── config.json                  # 配置文件
 ├── config.json.example          # 配置模板
 ├── scheduled_tasks.json.example # 定时任务模板
 ├── docs/                        # 设计/实现计划文档

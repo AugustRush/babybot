@@ -351,8 +351,6 @@ class OrchestrationPolicyStore:
         min_samples: int = 3,
         min_effective_samples: float = 1.5,
         min_win_rate: float = 0.75,
-        min_shadow_samples: int = 2,
-        min_shadow_agreement_rate: float = 0.5,
     ) -> dict[str, Any] | None:
         bucket = str(intent_bucket or "").strip()
         if not bucket:
@@ -361,8 +359,6 @@ class OrchestrationPolicyStore:
             """
             SELECT t.route_mode,
                    t.execution_style,
-                   t.shadow_routing_eval_count,
-                   t.shadow_routing_agree_count,
                    t.created_at,
                    o.final_status
             FROM policy_runtime_telemetry AS t
@@ -380,8 +376,6 @@ class OrchestrationPolicyStore:
         now = datetime.now(timezone.utc)
         grouped: dict[tuple[str, str], dict[str, float | str]] = {}
         total_weight = 0.0
-        shadow_eval_weight = 0.0
-        shadow_agree_weight = 0.0
         for row in rows:
             created_at = self._parse_time(row["created_at"])
             weight = self._decay_weight(
@@ -394,10 +388,6 @@ class OrchestrationPolicyStore:
             execution_style = str(row["execution_style"] or "").strip()
             if route_mode not in {"tool_workflow", "answer", "debate"}:
                 continue
-            if int(row["shadow_routing_eval_count"] or 0) > 0:
-                shadow_eval_weight += weight
-                if int(row["shadow_routing_agree_count"] or 0) > 0:
-                    shadow_agree_weight += weight
             if str(row["final_status"] or "").strip().lower() != "succeeded":
                 continue
             key = (route_mode, execution_style)
@@ -411,11 +401,6 @@ class OrchestrationPolicyStore:
             )
             payload["wins"] = float(payload["wins"]) + weight
         if not grouped:
-            return None
-        if (
-            shadow_eval_weight >= float(min_shadow_samples)
-            and shadow_agree_weight / max(shadow_eval_weight, 1e-9) < float(min_shadow_agreement_rate)
-        ):
             return None
         ranked = sorted(
             grouped.values(),
@@ -440,79 +425,7 @@ class OrchestrationPolicyStore:
             "effective_samples": round(total_weight, 6),
             "wins": round(weighted_wins, 6),
             "win_rate": round(win_rate, 6),
-            "shadow_agreement_rate": round(
-                shadow_agree_weight / max(shadow_eval_weight, 1e-9), 6
-            ) if shadow_eval_weight > 0 else 0.0,
             "source": "intent_bucket_success",
-        }
-
-    def recommend_shadow_routing_budget(
-        self,
-        *,
-        chat_key: str,
-        intent_bucket: str,
-        limit: int = 12,
-        min_shadow_samples: int = 2,
-        min_shadow_agreement_rate: float = 0.5,
-        probe_every: int = 3,
-        pending_run_recorded: bool = False,
-    ) -> dict[str, Any]:
-        bucket = str(intent_bucket or "").strip()
-        chat = str(chat_key or "").strip()
-        if not bucket or not chat:
-            return {"enabled": True, "mode": "default", "samples": 0, "shadow_samples": 0}
-        rows = self._ensure_db().execute(
-            """
-            SELECT shadow_routing_eval_count,
-                   shadow_routing_agree_count
-            FROM policy_runtime_telemetry
-            WHERE chat_key = ?
-              AND intent_bucket = ?
-              AND router_source != 'model'
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (chat, bucket, max(1, int(limit))),
-        ).fetchall()
-        samples = len(rows)
-        shadow_samples = sum(
-            1 for row in rows if int(row["shadow_routing_eval_count"] or 0) > 0
-        )
-        if shadow_samples < max(1, int(min_shadow_samples)):
-            return {
-                "enabled": True,
-                "mode": "warmup",
-                "samples": samples,
-                "shadow_samples": shadow_samples,
-            }
-        shadow_agree = sum(
-            1 for row in rows if int(row["shadow_routing_agree_count"] or 0) > 0
-        )
-        agreement_rate = shadow_agree / max(1, shadow_samples)
-        if agreement_rate >= float(min_shadow_agreement_rate):
-            return {
-                "enabled": True,
-                "mode": "normal",
-                "samples": samples,
-                "shadow_samples": shadow_samples,
-                "agreement_rate": round(agreement_rate, 6),
-            }
-        interval = max(1, int(probe_every))
-        probe_index = samples if pending_run_recorded else (samples + 1)
-        if probe_index % interval == 0:
-            return {
-                "enabled": True,
-                "mode": "probe",
-                "samples": samples,
-                "shadow_samples": shadow_samples,
-                "agreement_rate": round(agreement_rate, 6),
-            }
-        return {
-            "enabled": False,
-            "mode": "suppressed",
-            "samples": samples,
-            "shadow_samples": shadow_samples,
-            "agreement_rate": round(agreement_rate, 6),
         }
 
     def record_runtime_telemetry(
@@ -535,8 +448,6 @@ class OrchestrationPolicyStore:
         execution_style_guardrail_reduce_count: int = 0,
         parallelism_guardrail_soften_count: int = 0,
         worker_guardrail_soften_count: int = 0,
-        shadow_routing_eval_count: int = 0,
-        shadow_routing_agree_count: int = 0,
         created_at: str | None = None,
     ) -> None:
         db = self._ensure_db()
@@ -550,9 +461,8 @@ class OrchestrationPolicyStore:
                 parallelism_reflection_count, worker_reflection_count,
                 execution_style_guardrail_reduce_count,
                 parallelism_guardrail_soften_count,
-                worker_guardrail_soften_count,
-                shadow_routing_eval_count, shadow_routing_agree_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                worker_guardrail_soften_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow_id,
@@ -572,28 +482,8 @@ class OrchestrationPolicyStore:
                 max(0, int(execution_style_guardrail_reduce_count)),
                 max(0, int(parallelism_guardrail_soften_count)),
                 max(0, int(worker_guardrail_soften_count)),
-                max(0, int(shadow_routing_eval_count)),
-                max(0, int(shadow_routing_agree_count)),
                 created_at or self._utc_now(),
             ),
-        )
-        db.commit()
-
-    def record_shadow_routing_eval(
-        self,
-        *,
-        flow_id: str,
-        agreed: bool,
-    ) -> None:
-        db = self._ensure_db()
-        db.execute(
-            """
-            UPDATE policy_runtime_telemetry
-            SET shadow_routing_eval_count = 1,
-                shadow_routing_agree_count = ?
-            WHERE flow_id = ?
-            """,
-            (1 if agreed else 0, flow_id),
         )
         db.commit()
 
@@ -681,9 +571,8 @@ class OrchestrationPolicyStore:
                    t.execution_style_guardrail_reduce_count,
                    t.parallelism_guardrail_soften_count,
                    t.worker_guardrail_soften_count,
-                   t.shadow_routing_eval_count,
-                   t.shadow_routing_agree_count,
-                   o.reward
+                   o.reward,
+                   o.outcome_json
             FROM policy_runtime_telemetry AS t
             LEFT JOIN policy_outcomes AS o
               ON o.flow_id = t.flow_id
@@ -768,6 +657,13 @@ class OrchestrationPolicyStore:
                     "retry_rate": 0.0,
                     "dead_letter_rate": 0.0,
                     "stalled_rate": 0.0,
+                    "avg_execution_elapsed_ms": 0.0,
+                    "avg_task_result_count": 0.0,
+                    "avg_executor_step_count": 0.0,
+                    "avg_tool_call_count": 0.0,
+                    "tool_failure_rate": 0.0,
+                    "loop_guard_block_rate": 0.0,
+                    "max_step_exhausted_rate": 0.0,
                     "feedback_good_count": 0,
                     "feedback_bad_count": 0,
                     "effective_feedback_samples": 0.0,
@@ -825,6 +721,27 @@ class OrchestrationPolicyStore:
             bucket["stalled_rate"] = float(bucket["stalled_rate"]) + float(
                 outcome.get("stalled_count", 0) or 0
             ) * weight
+            bucket["avg_execution_elapsed_ms"] = float(
+                bucket["avg_execution_elapsed_ms"]
+            ) + (float(outcome.get("execution_elapsed_ms", 0.0) or 0.0) * weight)
+            bucket["avg_task_result_count"] = float(
+                bucket["avg_task_result_count"]
+            ) + (float(outcome.get("task_result_count", 0) or 0.0) * weight)
+            bucket["avg_executor_step_count"] = float(
+                bucket["avg_executor_step_count"]
+            ) + (float(outcome.get("executor_step_count", 0) or 0.0) * weight)
+            bucket["avg_tool_call_count"] = float(
+                bucket["avg_tool_call_count"]
+            ) + (float(outcome.get("tool_call_count", 0) or 0.0) * weight)
+            bucket["tool_failure_rate"] = float(bucket["tool_failure_rate"]) + float(
+                outcome.get("tool_failure_count", 0) or 0
+            ) * weight
+            bucket["loop_guard_block_rate"] = float(
+                bucket["loop_guard_block_rate"]
+            ) + float(outcome.get("loop_guard_block_count", 0) or 0) * weight
+            bucket["max_step_exhausted_rate"] = float(
+                bucket["max_step_exhausted_rate"]
+            ) + float(outcome.get("max_step_exhausted_count", 0) or 0) * weight
             bucket["last_updated_at"] = max(
                 str(bucket.get("last_updated_at", "") or ""),
                 reference_time.isoformat(timespec="seconds"),
@@ -839,6 +756,27 @@ class OrchestrationPolicyStore:
             payload["retry_rate"] = float(payload["retry_rate"]) / effective_samples
             payload["dead_letter_rate"] = float(payload["dead_letter_rate"]) / effective_samples
             payload["stalled_rate"] = float(payload["stalled_rate"]) / effective_samples
+            payload["avg_execution_elapsed_ms"] = round(
+                float(payload["avg_execution_elapsed_ms"]) / effective_samples, 2
+            )
+            payload["avg_task_result_count"] = round(
+                float(payload["avg_task_result_count"]) / effective_samples, 2
+            )
+            payload["avg_executor_step_count"] = round(
+                float(payload["avg_executor_step_count"]) / effective_samples, 2
+            )
+            payload["avg_tool_call_count"] = round(
+                float(payload["avg_tool_call_count"]) / effective_samples, 2
+            )
+            payload["tool_failure_rate"] = (
+                float(payload["tool_failure_rate"]) / effective_samples
+            )
+            payload["loop_guard_block_rate"] = (
+                float(payload["loop_guard_block_rate"]) / effective_samples
+            )
+            payload["max_step_exhausted_rate"] = (
+                float(payload["max_step_exhausted_rate"]) / effective_samples
+            )
         if flow_actions:
             placeholders = ", ".join("?" for _ in flow_actions)
             feedback_rows = db.execute(
@@ -988,8 +926,6 @@ class OrchestrationPolicyStore:
                     execution_style_guardrail_reduce_count INTEGER NOT NULL DEFAULT 0,
                     parallelism_guardrail_soften_count INTEGER NOT NULL DEFAULT 0,
                     worker_guardrail_soften_count INTEGER NOT NULL DEFAULT 0,
-                    shadow_routing_eval_count INTEGER NOT NULL DEFAULT 0,
-                    shadow_routing_agree_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 )
                 """
@@ -1061,20 +997,6 @@ class OrchestrationPolicyStore:
                     ADD COLUMN worker_guardrail_soften_count INTEGER NOT NULL DEFAULT 0
                     """
                 )
-            if "shadow_routing_eval_count" not in columns:
-                db.execute(
-                    """
-                    ALTER TABLE policy_runtime_telemetry
-                    ADD COLUMN shadow_routing_eval_count INTEGER NOT NULL DEFAULT 0
-                    """
-                )
-            if "shadow_routing_agree_count" not in columns:
-                db.execute(
-                    """
-                    ALTER TABLE policy_runtime_telemetry
-                    ADD COLUMN shadow_routing_agree_count INTEGER NOT NULL DEFAULT 0
-                    """
-                )
             db.commit()
             self._db = db
         return self._db
@@ -1082,12 +1004,25 @@ class OrchestrationPolicyStore:
     @staticmethod
     def _summarize_runtime_telemetry_rows(
         rows: list[sqlite3.Row],
-    ) -> dict[str, float | int]:
+    ) -> dict[str, float | int | dict[str, int]]:
         if not rows:
             return {
                 "runs": 0,
                 "avg_router_latency_ms": 0.0,
+                "fallback_total": 0,
+                "skipped_total": 0,
                 "fallback_rate": 0.0,
+                "skipped_rate": 0.0,
+                "model_route_rate": 0.0,
+                "avg_execution_elapsed_ms": 0.0,
+                "avg_task_result_count": 0.0,
+                "avg_executor_step_count": 0.0,
+                "avg_tool_call_count": 0.0,
+                "tool_failure_rate": 0.0,
+                "loop_guard_block_rate": 0.0,
+                "max_step_exhausted_rate": 0.0,
+                "dead_letter_rate": 0.0,
+                "stalled_rate": 0.0,
                 "rule_hit_rate": 0.0,
                 "reflection_route_rate": 0.0,
                 "reflection_match_rate": 0.0,
@@ -1098,13 +1033,50 @@ class OrchestrationPolicyStore:
                 "execution_style_guardrail_reduce_rate": 0.0,
                 "parallelism_guardrail_soften_rate": 0.0,
                 "worker_guardrail_soften_rate": 0.0,
-                "shadow_routing_eval_rate": 0.0,
-                "shadow_routing_agreement_rate": 0.0,
                 "mean_reward": 0.0,
+                "skip_breakdown": {},
             }
         runs = len(rows)
         latency_total = sum(float(row["router_latency_ms"] or 0.0) for row in rows)
-        fallback_total = sum(int(row["router_fallback"] or 0) for row in rows)
+        skipped_total = 0
+        fallback_total = 0
+        model_route_total = 0
+        skip_breakdown: dict[str, int] = {}
+        execution_elapsed_total = 0.0
+        task_result_total = 0
+        executor_step_total = 0
+        tool_call_total = 0
+        tool_failure_total = 0
+        loop_guard_block_total = 0
+        max_step_exhausted_total = 0
+        dead_letter_total = 0
+        stalled_total = 0
+        for row in rows:
+            router_source = str(row["router_source"] or "").strip()
+            if router_source.startswith("skipped:"):
+                skipped_total += 1
+                skip_reason = router_source.split(":", 1)[1].strip() or "unknown"
+                skip_breakdown[skip_reason] = skip_breakdown.get(skip_reason, 0) + 1
+            elif int(row["router_fallback"] or 0):
+                fallback_total += 1
+            if router_source == "model":
+                model_route_total += 1
+            outcome = OrchestrationPolicyStore._decode_json_object(row["outcome_json"])
+            execution_elapsed_total += max(
+                0.0, float(outcome.get("execution_elapsed_ms", 0.0) or 0.0)
+            )
+            task_result_total += max(0, int(outcome.get("task_result_count", 0) or 0))
+            executor_step_total += max(0, int(outcome.get("executor_step_count", 0) or 0))
+            tool_call_total += max(0, int(outcome.get("tool_call_count", 0) or 0))
+            tool_failure_total += max(0, int(outcome.get("tool_failure_count", 0) or 0))
+            loop_guard_block_total += max(
+                0, int(outcome.get("loop_guard_block_count", 0) or 0)
+            )
+            max_step_exhausted_total += max(
+                0, int(outcome.get("max_step_exhausted_count", 0) or 0)
+            )
+            dead_letter_total += max(0, int(outcome.get("dead_letter_count", 0) or 0))
+            stalled_total += max(0, int(outcome.get("stalled_count", 0) or 0))
         rule_hit_total = sum(
             1 for row in rows if str(row["router_source"] or "").strip() == "rule"
         )
@@ -1135,17 +1107,24 @@ class OrchestrationPolicyStore:
         worker_guardrail_soften_total = sum(
             1 for row in rows if int(row["worker_guardrail_soften_count"] or 0) > 0
         )
-        shadow_routing_eval_total = sum(
-            1 for row in rows if int(row["shadow_routing_eval_count"] or 0) > 0
-        )
-        shadow_routing_agree_total = sum(
-            1 for row in rows if int(row["shadow_routing_agree_count"] or 0) > 0
-        )
         reward_values = [float(row["reward"]) for row in rows if row["reward"] is not None]
         return {
             "runs": runs,
             "avg_router_latency_ms": round(latency_total / runs, 2),
+            "fallback_total": fallback_total,
+            "skipped_total": skipped_total,
             "fallback_rate": round(fallback_total / runs, 6),
+            "skipped_rate": round(skipped_total / runs, 6),
+            "model_route_rate": round(model_route_total / runs, 6),
+            "avg_execution_elapsed_ms": round(execution_elapsed_total / runs, 2),
+            "avg_task_result_count": round(task_result_total / runs, 2),
+            "avg_executor_step_count": round(executor_step_total / runs, 2),
+            "avg_tool_call_count": round(tool_call_total / runs, 2),
+            "tool_failure_rate": round(tool_failure_total / runs, 6),
+            "loop_guard_block_rate": round(loop_guard_block_total / runs, 6),
+            "max_step_exhausted_rate": round(max_step_exhausted_total / runs, 6),
+            "dead_letter_rate": round(dead_letter_total / runs, 6),
+            "stalled_rate": round(stalled_total / runs, 6),
             "rule_hit_rate": round(rule_hit_total / runs, 6),
             "reflection_route_rate": round(reflection_route_total / runs, 6),
             "reflection_match_rate": round(reflection_match_total / runs, 6),
@@ -1166,15 +1145,10 @@ class OrchestrationPolicyStore:
             "worker_guardrail_soften_rate": round(
                 worker_guardrail_soften_total / runs, 6
             ),
-            "shadow_routing_eval_rate": round(
-                shadow_routing_eval_total / runs, 6
-            ),
-            "shadow_routing_agreement_rate": round(
-                shadow_routing_agree_total / max(1, shadow_routing_eval_total), 6
-            ),
             "mean_reward": round(
                 sum(reward_values) / len(reward_values), 6
             ) if reward_values else 0.0,
+            "skip_breakdown": skip_breakdown,
         }
 
     @staticmethod

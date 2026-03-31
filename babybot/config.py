@@ -68,7 +68,7 @@ class SystemConfig:
     interactive_session_max_age_seconds: int = 7200
     routing_enabled: bool = True
     routing_model_name: str = ""
-    routing_timeout: float = 2.0
+    routing_timeout: float = 3.0
     reflection_enabled: bool = True
     reflection_max_hints: int = 3
     policy_learning_enabled: bool = True
@@ -163,7 +163,6 @@ class Config:
         ).expanduser()
         self.builtin_skills_dir = Path(__file__).resolve().parent.parent / "skills"
         self.workspace_skills_dir = self.workspace_dir / "skills"
-        self.workspace_tools_dir = self.workspace_dir / "tools"
         self.scheduled_tasks_file = self.workspace_dir / "scheduled_tasks.json"
         self.raw_config: dict[str, Any] = {}
         self.is_bootstrapped = False
@@ -214,7 +213,7 @@ class Config:
             ),
             routing_enabled=system_conf.get("routing_enabled", True),
             routing_model_name=system_conf.get("routing_model_name", ""),
-            routing_timeout=system_conf.get("routing_timeout", 2.0),
+            routing_timeout=system_conf.get("routing_timeout", 3.0),
             reflection_enabled=system_conf.get("reflection_enabled", True),
             reflection_max_hints=system_conf.get("reflection_max_hints", 3),
             policy_learning_enabled=system_conf.get("policy_learning_enabled", True),
@@ -272,7 +271,6 @@ class Config:
         self.home_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_skills_dir.mkdir(parents=True, exist_ok=True)
-        self.workspace_tools_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.config_file.exists():
             self._bootstrap_config_file()
@@ -360,6 +358,7 @@ class Config:
                 "subtask_timeout": 60,
                 "skill_route_timeout": 3.0,
                 "tracing_endpoint": "",
+                "max_parallel": 4,
                 "idle_timeout": 60,
                 "max_concurrency": 8,
                 "scheduled_max_concurrency": 2,
@@ -376,7 +375,7 @@ class Config:
                 "interactive_session_max_age_seconds": 7200,
                 "routing_enabled": True,
                 "routing_model_name": "",
-                "routing_timeout": 2.0,
+                "routing_timeout": 3.0,
                 "reflection_enabled": True,
                 "reflection_max_hints": 3,
                 "policy_learning_enabled": True,
@@ -460,7 +459,6 @@ class Config:
                 "scheduled_tasks_file": str(self.scheduled_tasks_file),
                 "builtin_skills_dir": str(self.builtin_skills_dir),
                 "workspace_skills_dir": str(self.workspace_skills_dir),
-                "workspace_tools_dir": str(self.workspace_tools_dir),
             },
             "system": {
                 "console_output": self.system.console_output,

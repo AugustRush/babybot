@@ -38,6 +38,14 @@ _EXPLICIT_DEBATE_MARKERS = (
     "不同观点",
 )
 
+_MODEL_ROUTER_PRIORITY_MARKERS = (
+    "比较",
+    "对比",
+    "取舍",
+    "区别",
+    "优缺点",
+)
+
 _RETRIEVE_FIRST_MARKERS = (
     "查一下",
     "查询",
@@ -140,6 +148,45 @@ def build_routing_intent_bucket(goal: str, *, has_media: bool = False) -> str:
         length_flag = "l_long"
     media_flag = "m1" if has_media else "m0"
     return "|".join((kind, question_flag, subtask_flag, length_flag, media_flag))
+
+
+def should_call_model_router(
+    snapshot: "RoutingContextSnapshot",
+    *,
+    intent_bucket: str = "",
+) -> tuple[bool, str]:
+    goal = str(snapshot.goal or "").strip()
+    if not goal:
+        return False, "empty_goal"
+    if match_rule_based_routing(snapshot) is not None:
+        return False, "rule_matched"
+    runtime_state = str(snapshot.runtime_state or "").strip().lower()
+    if runtime_state in {"running", "waiting_tool", "waiting_user", "repairing"}:
+        return False, "active_runtime"
+    parts = (intent_bucket or "").split("|")
+    if len(parts) != 5:
+        parts = build_routing_intent_bucket(goal).split("|")
+    kind, question_flag, _subtask_flag, length_flag, media_flag = parts[:5]
+    if kind != "other":
+        return False, "explicit_intent"
+    has_context = bool(
+        str(snapshot.anchor_summary or "").strip()
+        or snapshot.hot_context
+        or snapshot.warm_context
+        or snapshot.cold_context
+        or snapshot.recent_flow_ids
+    )
+    has_priority_marker = any(marker in goal for marker in _MODEL_ROUTER_PRIORITY_MARKERS)
+    if length_flag == "l_short" and question_flag == "q0" and not has_priority_marker:
+        return False, "short_nonquestion"
+    if (
+        length_flag == "l_short"
+        and media_flag == "m0"
+        and not has_context
+        and not has_priority_marker
+    ):
+        return False, "short_low_context"
+    return True, "eligible"
 
 
 @dataclass(frozen=True)
@@ -336,7 +383,7 @@ async def route_task(
                 timeout=max(0.5, float(timeout or 0.0) + 0.2),
             )
     except (asyncio.TimeoutError, TimeoutError):
-        logger.warning(
+        logger.info(
             "Routing decision timed out after %.2fs; falling back to default contract",
             max(0.5, float(timeout or 0.0)),
         )

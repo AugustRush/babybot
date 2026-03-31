@@ -115,3 +115,32 @@ def test_task_evaluator_records_clean_success_reflection(tmp_path) -> None:
     assert "direct_execute" in actions
     assert "serial" in actions
     assert "deny_worker" in actions
+
+
+def test_task_evaluator_records_max_step_exhausted_reflection(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    evaluator = TaskEvaluator(store)
+
+    reflection = evaluator.evaluate(
+        TaskEvaluationInput(
+            chat_key="feishu:c1",
+            route_mode="tool_workflow",
+            state_features={
+                "task_shape": "multi_step",
+                "has_media": False,
+                "independent_subtasks": 1,
+            },
+            execution_style="direct_execute",
+            final_status="succeeded",
+            outcome={
+                "task_result_count": 1,
+                "max_step_exhausted_count": 1,
+                "tool_call_count": 12,
+                "loop_guard_block_count": 2,
+            },
+        )
+    )
+
+    assert reflection is not None
+    assert reflection.failure_pattern == "max_steps_exhausted"
+    assert reflection.recommended_action == "analyze_first"

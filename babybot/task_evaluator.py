@@ -101,6 +101,9 @@ class TaskEvaluator:
         dead_letter_count = int(outcome.get("dead_letter_count", 0) or 0)
         stalled_count = int(outcome.get("stalled_count", 0) or 0)
         task_result_count = int(outcome.get("task_result_count", 0) or 0)
+        tool_failure_count = int(outcome.get("tool_failure_count", 0) or 0)
+        loop_guard_block_count = int(outcome.get("loop_guard_block_count", 0) or 0)
+        max_step_exhausted_count = int(outcome.get("max_step_exhausted_count", 0) or 0)
         final_status = str(evaluation.final_status or "").strip().lower()
 
         if final_status and final_status != "succeeded":
@@ -129,6 +132,33 @@ class TaskEvaluator:
                 failure_pattern="stalled",
                 recommended_action="serial",
                 confidence=0.75,
+            )
+        if max_step_exhausted_count > 0:
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="max_steps_exhausted",
+                recommended_action="analyze_first",
+                confidence=0.8,
+            )
+        if loop_guard_block_count > 0:
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="loop_guard_blocked",
+                recommended_action="analyze_first",
+                confidence=0.72,
+            )
+        if tool_failure_count >= 2:
+            return ReflectionRecord(
+                chat_key=evaluation.chat_key,
+                route_mode=evaluation.route_mode,
+                state_features=dict(evaluation.state_features or {}),
+                failure_pattern="tool_errors",
+                recommended_action="analyze_first",
+                confidence=0.7,
             )
         if retry_count >= 2:
             return ReflectionRecord(

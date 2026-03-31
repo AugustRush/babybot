@@ -4,7 +4,13 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-from babybot.agent_kernel import ExecutionContext, ModelRequest, ModelResponse, ModelToolCall
+from babybot.agent_kernel import (
+    ExecutionContext,
+    ModelRequest,
+    ModelResponse,
+    ModelToolCall,
+    TaskResult,
+)
 from babybot.agent_kernel.dynamic_orchestrator import DynamicOrchestrator
 from babybot.orchestrator import OrchestratorAgent
 
@@ -180,3 +186,69 @@ def test_dynamic_orchestrator_records_dispatch_and_wait_events() -> None:
     action_names = [event["action_name"] for event in policy_events]
     assert "serial_dispatch" in action_names
     assert "wait_barrier" in action_names
+
+
+def test_orchestrator_records_execution_quality_from_task_results() -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._policy_store = _RecordingPolicyStore()
+    agent.config = SimpleNamespace(
+        system=SimpleNamespace(
+            policy_learning_enabled=True,
+            context_history_tokens=2000,
+            idle_timeout=30,
+            orchestrator_max_steps=30,
+        )
+    )
+    agent.gateway = object()
+    agent.resource_manager = object()
+    agent._child_task_bus = None
+    agent._task_heartbeat_registry = None
+    agent.tape_store = None
+    agent.memory_store = None
+
+    class _Tape:
+        chat_id = "feishu:c1"
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            context.emit("executor.step", task_id="task-a", step=1)
+            return SimpleNamespace(
+                conclusion="完成",
+                task_results={
+                    "task-a": TaskResult(
+                        task_id="task-a",
+                        status="failed",
+                        error="child task heartbeat stalled",
+                        attempts=3,
+                        metadata={
+                            "dead_lettered": True,
+                            "tool_call_count": 5,
+                            "tool_failure_count": 2,
+                            "loop_guard_block_count": 1,
+                            "max_step_exhausted_count": 1,
+                        },
+                    )
+                },
+            )
+
+    from unittest.mock import patch
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("查询天气", tape=_Tape()))
+
+    assert text == "完成"
+    assert media == []
+    outcome = agent._policy_store.recorded_outcomes[0]["outcome"]
+    assert outcome["retry_count"] == 2
+    assert outcome["dead_letter_count"] == 1
+    assert outcome["stalled_count"] == 1
+    assert outcome["task_result_count"] == 1
+    assert outcome["executor_step_count"] == 1
+    assert outcome["tool_call_count"] == 5
+    assert outcome["tool_failure_count"] == 2
+    assert outcome["loop_guard_block_count"] == 1
+    assert outcome["max_step_exhausted_count"] == 1

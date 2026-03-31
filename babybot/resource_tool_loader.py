@@ -4,7 +4,6 @@ import importlib
 import importlib.util
 import inspect
 import logging
-import sys
 from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
@@ -47,30 +46,6 @@ class ResourceToolLoader:
             ),
             group=group_name,
         )
-
-    def discover_workspace_tools(self) -> None:
-        tools_root = self._owner.config.workspace_tools_dir
-        if not tools_root.exists():
-            return
-        self.ensure_workspace_on_pythonpath()
-        for py_file in sorted(tools_root.rglob("*.py")):
-            if py_file.name.startswith("_"):
-                continue
-            rel = py_file.relative_to(tools_root)
-            group_name = rel.parts[0] if len(rel.parts) > 1 else "basic"
-            try:
-                module = self.load_tool_module(str(Path("tools") / rel))
-                for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                    if func.__module__ != module.__name__ or func_name.startswith("_"):
-                        continue
-                    self.register_tool(func, group_name=group_name, func_name=func_name)
-            except Exception as exc:
-                logger.warning("Failed to load tools from %s: %s", py_file, exc)
-
-    def ensure_workspace_on_pythonpath(self) -> None:
-        workspace = str(self._owner.config.workspace_dir.resolve())
-        if workspace not in sys.path:
-            sys.path.insert(0, workspace)
 
     def load_tool_module(self, module_name: str) -> Any:
         try:

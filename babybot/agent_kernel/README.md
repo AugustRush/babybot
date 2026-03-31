@@ -63,6 +63,4 @@ Current runtime shape:
 
 ## Compatibility Notes
 
-- `scheduler.py` is deprecated and kept only for backward compatibility.
-- `engine.py` is a compatibility stub; new code should use `DynamicOrchestrator`.
 - The current child-task runtime is still in-process, with explicit event bus and retry/dead-letter boundaries for future transport changes.

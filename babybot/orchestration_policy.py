@@ -187,12 +187,21 @@ class ConservativePolicySelector:
     ) -> PolicySelection:
         bucket, stats = self._eligible_stats(decision_kind=decision_kind, features=features)
         if not stats:
+            feature_bias = self._feature_bias(
+                decision_kind=decision_kind,
+                action_name=default.name,
+                features=features,
+            )
             return PolicySelection(
                 action=default,
                 decision_kind=decision_kind,
                 state_bucket="global_default",
                 score=0.0,
-                explain="insufficient_samples; using safe default",
+                explain=(
+                    f"selected={default.name}; bucket=global_default; score=0.000; "
+                    f"reason=insufficient_samples; feature_bias={feature_bias:.3f}; "
+                    "confidence_penalty=0.000"
+                ),
             )
         return self._best_action(
             decision_kind=decision_kind,
@@ -200,6 +209,7 @@ class ConservativePolicySelector:
             stats=stats,
             default=default,
             actions=actions,
+            features=features,
         )
 
     def _eligible_stats(
@@ -227,7 +237,11 @@ class ConservativePolicySelector:
         if local_candidates:
             return max(
                 local_candidates,
-                key=lambda item: self._template_quality(item[1]),
+                key=lambda item: self._template_quality(
+                    decision_kind=decision_kind,
+                    features=features,
+                    stats=item[1],
+                ),
             )
         raw = self._store.summarize_action_stats(decision_kind=decision_kind)
         raw = self._normalize_action_stats(decision_kind=decision_kind, raw=raw)
@@ -243,10 +257,21 @@ class ConservativePolicySelector:
 
     def _template_quality(
         self,
+        *,
+        decision_kind: str,
+        features: dict[str, Any],
         stats: dict[str, dict[str, float | int]],
     ) -> tuple[float, float]:
         ranked_scores = sorted(
-            (self._score_payload(payload) for payload in stats.values()),
+            (
+                self._score_payload(
+                    decision_kind=decision_kind,
+                    action_name=action_name,
+                    payload=payload,
+                    features=features,
+                )
+                for action_name, payload in stats.items()
+            ),
             reverse=True,
         )
         top_score = ranked_scores[0] if ranked_scores else -1.0
@@ -293,23 +318,157 @@ class ConservativePolicySelector:
         return normalized
 
     @staticmethod
-    def _score_payload(payload: dict[str, float | int]) -> float:
+    def _normalized_penalty(value: float, *, scale: float) -> float:
+        if scale <= 0:
+            return 0.0
+        return min(1.0, max(0.0, value / scale))
+
+    def _feature_bias(
+        self,
+        *,
+        decision_kind: str,
+        action_name: str,
+        features: dict[str, Any],
+    ) -> float:
+        task_shape = str(features.get("task_shape", "") or "").strip()
+        subtasks = max(1, int(features.get("independent_subtasks", 1) or 1))
+        has_media = bool(features.get("has_media"))
+        if decision_kind == "scheduling":
+            if action_name == "serial":
+                return (
+                    (0.18 if subtasks <= 1 else 0.0)
+                    + (0.04 if subtasks == 2 else 0.0)
+                    + (0.06 if task_shape != "multi_step" else 0.0)
+                )
+            if action_name == "bounded_parallel":
+                return (
+                    (0.20 if subtasks >= 3 else 0.0)
+                    + (0.10 if subtasks == 2 else 0.0)
+                    - (0.18 if subtasks <= 1 else 0.0)
+                )
+        if decision_kind == "worker":
+            if action_name == "deny_worker":
+                return (
+                    (0.24 if subtasks <= 1 else 0.0)
+                    + (0.08 if task_shape == "single_step" else 0.0)
+                )
+            if action_name == "allow_worker":
+                return (
+                    (0.18 if subtasks >= 3 and task_shape == "multi_step" else 0.0)
+                    + (0.08 if subtasks == 2 else 0.0)
+                    - (0.24 if subtasks <= 1 else 0.0)
+                    - (0.08 if task_shape == "single_step" else 0.0)
+                )
+        if decision_kind == "decomposition":
+            if action_name == "direct_execute":
+                return (
+                    (0.16 if task_shape == "single_step" and not has_media else 0.0)
+                    - (0.12 if task_shape == "multi_step" else 0.0)
+                )
+            if action_name == "analyze_then_execute":
+                return (
+                    (0.14 if task_shape == "multi_step" else 0.0)
+                    + (0.06 if subtasks >= 2 else 0.0)
+                )
+            if action_name == "retrieve_then_execute":
+                return 0.14 if has_media else 0.0
+        return 0.0
+
+    def _score_breakdown(
+        self,
+        *,
+        decision_kind: str,
+        action_name: str,
+        payload: dict[str, float | int],
+        features: dict[str, Any],
+    ) -> dict[str, float]:
         mean_reward = float(payload.get("mean_reward", 0.0) or 0.0)
         failure_rate = float(payload.get("failure_rate", 0.0) or 0.0)
         retry_rate = float(payload.get("retry_rate", 0.0) or 0.0)
         dead_letter_rate = float(payload.get("dead_letter_rate", 0.0) or 0.0)
         stalled_rate = float(payload.get("stalled_rate", 0.0) or 0.0)
+        tool_failure_rate = float(payload.get("tool_failure_rate", 0.0) or 0.0)
+        loop_guard_block_rate = float(payload.get("loop_guard_block_rate", 0.0) or 0.0)
+        max_step_exhausted_rate = float(
+            payload.get("max_step_exhausted_rate", 0.0) or 0.0
+        )
+        avg_execution_elapsed_ms = float(
+            payload.get("avg_execution_elapsed_ms", 0.0) or 0.0
+        )
+        avg_tool_call_count = float(payload.get("avg_tool_call_count", 0.0) or 0.0)
         feedback_score = float(payload.get("feedback_score", 0.0) or 0.0)
         feedback_confidence = float(payload.get("feedback_confidence", 1.0) or 0.0)
         drift_score = float(payload.get("drift_score", 0.0) or 0.0)
+        feature_bias = self._feature_bias(
+            decision_kind=decision_kind,
+            action_name=action_name,
+            features=features,
+        )
+        risk_multiplier = 1.0
+        if action_name == "bounded_parallel":
+            risk_multiplier = 1.2
+        elif action_name == "allow_worker":
+            risk_multiplier = 1.1
+        elapsed_penalty = self._normalized_penalty(
+            avg_execution_elapsed_ms,
+            scale=4500.0 if decision_kind == "decomposition" else 3500.0,
+        )
+        tool_call_penalty = self._normalized_penalty(avg_tool_call_count, scale=12.0)
+        feedback_adjust = feedback_score * feedback_confidence * 0.05
+        failure_penalty = failure_rate * 0.5
+        retry_penalty = retry_rate * 0.2
+        dead_letter_penalty = dead_letter_rate * 0.35
+        stalled_penalty = stalled_rate * 0.25
+        tool_failure_penalty = tool_failure_rate * 0.18 * risk_multiplier
+        loop_guard_penalty = loop_guard_block_rate * 0.22 * risk_multiplier
+        max_step_penalty = max_step_exhausted_rate * 0.28 * risk_multiplier
+        elapsed_penalty_weighted = elapsed_penalty * 0.06
+        tool_call_penalty_weighted = tool_call_penalty * 0.05
+        drift_penalty = drift_score * 0.35
+        return {
+            "mean_reward": mean_reward,
+            "feature_bias": feature_bias,
+            "feedback_adjust": feedback_adjust,
+            "failure_penalty": failure_penalty,
+            "retry_penalty": retry_penalty,
+            "dead_letter_penalty": dead_letter_penalty,
+            "stalled_penalty": stalled_penalty,
+            "tool_failure_penalty": tool_failure_penalty,
+            "loop_guard_penalty": loop_guard_penalty,
+            "max_step_penalty": max_step_penalty,
+            "elapsed_penalty": elapsed_penalty_weighted,
+            "tool_call_penalty": tool_call_penalty_weighted,
+            "drift_penalty": drift_penalty,
+        }
+
+    def _score_payload(
+        self,
+        *,
+        decision_kind: str,
+        action_name: str,
+        payload: dict[str, float | int],
+        features: dict[str, Any],
+    ) -> float:
+        breakdown = self._score_breakdown(
+            decision_kind=decision_kind,
+            action_name=action_name,
+            payload=payload,
+            features=features,
+        )
         return (
-            mean_reward
-            + (feedback_score * feedback_confidence * 0.05)
-            - (failure_rate * 0.5)
-            - (retry_rate * 0.2)
-            - (dead_letter_rate * 0.35)
-            - (stalled_rate * 0.25)
-            - (drift_score * 0.35)
+            breakdown["mean_reward"]
+            + breakdown["feature_bias"]
+            + breakdown["feedback_adjust"]
+            - breakdown["failure_penalty"]
+            - breakdown["retry_penalty"]
+            - breakdown["dead_letter_penalty"]
+            - breakdown["stalled_penalty"]
+            - breakdown["tool_failure_penalty"]
+            - breakdown["loop_guard_penalty"]
+            - breakdown["max_step_penalty"]
+            - breakdown["elapsed_penalty"]
+            - breakdown["tool_call_penalty"]
+            - breakdown["drift_penalty"]
         )
 
     def _confidence_penalty(
@@ -349,6 +508,7 @@ class ConservativePolicySelector:
         stats: dict[str, dict[str, float | int]],
         default: PolicyAction,
         actions: dict[str, PolicyAction],
+        features: dict[str, Any],
     ) -> PolicySelection:
         total_samples = sum(int(item.get("samples", 0) or 0) for item in stats.values())
         total_effective_samples = sum(
@@ -362,7 +522,12 @@ class ConservativePolicySelector:
             effective_samples = float(
                 payload.get("effective_samples", payload.get("samples", 0.0)) or 0.0
             )
-            conservative_score = self._score_payload(payload) - self._confidence_penalty(
+            conservative_score = self._score_payload(
+                decision_kind=decision_kind,
+                action_name=item[0],
+                payload=payload,
+                features=features,
+            ) - self._confidence_penalty(
                 decision_kind=decision_kind,
                 samples=samples,
                 effective_samples=effective_samples,
@@ -391,10 +556,26 @@ class ConservativePolicySelector:
                     state_bucket=state_bucket,
                     score=score,
                     explain=self._build_explain(
+                        decision_kind=decision_kind,
                         action_name=action_name,
                         payload=payload,
                         state_bucket=state_bucket,
                         score=score,
+                        features=features,
+                        confidence_penalty=self._confidence_penalty(
+                            decision_kind=decision_kind,
+                            samples=int(payload.get("samples", 0) or 0),
+                            effective_samples=float(
+                                payload.get(
+                                    "effective_samples",
+                                    payload.get("samples", 0.0),
+                                )
+                                or 0.0
+                            ),
+                            total_samples=total_samples,
+                            total_effective_samples=total_effective_samples,
+                            stats=stats,
+                        ),
                     ),
                 )
         return PolicySelection(
@@ -405,14 +586,23 @@ class ConservativePolicySelector:
             explain="no_action_match; using default",
         )
 
-    @staticmethod
     def _build_explain(
+        self,
         *,
+        decision_kind: str,
         action_name: str,
         payload: dict[str, float | int],
         state_bucket: str,
         score: float,
+        features: dict[str, Any],
+        confidence_penalty: float,
     ) -> str:
+        breakdown = self._score_breakdown(
+            decision_kind=decision_kind,
+            action_name=action_name,
+            payload=payload,
+            features=features,
+        )
         return (
             f"selected={action_name}; "
             f"bucket={state_bucket}; "
@@ -422,7 +612,19 @@ class ConservativePolicySelector:
             f"effective_samples={float(payload.get('effective_samples', payload.get('samples', 0.0)) or 0.0):.3f}; "
             f"failure_rate={float(payload.get('failure_rate', 0.0) or 0.0):.3f}; "
             f"drift_score={float(payload.get('drift_score', 0.0) or 0.0):.3f}; "
-            f"recent_failure_rate={float(payload.get('recent_failure_rate', 0.0) or 0.0):.3f}"
+            f"recent_failure_rate={float(payload.get('recent_failure_rate', 0.0) or 0.0):.3f}; "
+            f"feature_bias={breakdown['feature_bias']:.3f}; "
+            f"feedback_adjust={breakdown['feedback_adjust']:.3f}; "
+            f"failure_penalty={breakdown['failure_penalty']:.3f}; "
+            f"retry_penalty={breakdown['retry_penalty']:.3f}; "
+            f"dead_letter_penalty={breakdown['dead_letter_penalty']:.3f}; "
+            f"stalled_penalty={breakdown['stalled_penalty']:.3f}; "
+            f"tool_failure_penalty={breakdown['tool_failure_penalty']:.3f}; "
+            f"loop_guard_penalty={breakdown['loop_guard_penalty']:.3f}; "
+            f"max_step_penalty={breakdown['max_step_penalty']:.3f}; "
+            f"elapsed_penalty={breakdown['elapsed_penalty']:.3f}; "
+            f"tool_call_penalty={breakdown['tool_call_penalty']:.3f}; "
+            f"confidence_penalty={confidence_penalty:.3f}"
         )
 
     @staticmethod

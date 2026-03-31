@@ -44,6 +44,11 @@ class _FakePolicyStore:
                     "effective_samples": 3.2,
                     "mean_reward": 0.82,
                     "failure_rate": 0.0,
+                    "avg_execution_elapsed_ms": 920.0,
+                    "avg_tool_call_count": 3.5,
+                    "tool_failure_rate": 0.25,
+                    "loop_guard_block_rate": 0.0,
+                    "max_step_exhausted_rate": 0.0,
                 }
             }
         return {}
@@ -53,27 +58,55 @@ class _FakePolicyStore:
             "overall": {
                 "runs": 3,
                 "avg_router_latency_ms": 210.0,
+                "avg_execution_elapsed_ms": 1240.0,
+                "avg_task_result_count": 1.67,
+                "avg_executor_step_count": 6.33,
+                "avg_tool_call_count": 5.0,
                 "fallback_rate": 1 / 3,
+                "fallback_total": 1,
+                "skipped_rate": 1 / 3,
+                "skipped_total": 1,
+                "model_route_rate": 1 / 3,
                 "reflection_route_rate": 1 / 3,
                 "reflection_match_rate": 2 / 3,
                 "reflection_override_rate": 1 / 3,
                 "execution_style_reflection_rate": 1 / 3,
                 "parallelism_reflection_rate": 2 / 3,
                 "worker_reflection_rate": 1 / 3,
+                "tool_failure_rate": 1 / 3,
+                "loop_guard_block_rate": 1 / 3,
+                "max_step_exhausted_rate": 1 / 3,
+                "dead_letter_rate": 1 / 3,
+                "stalled_rate": 1 / 3,
                 "mean_reward": 0.4,
+                "skip_breakdown": {"short_nonquestion": 1},
             },
             "by_route_mode": {
                 "tool_workflow": {
                     "runs": 2,
                     "avg_router_latency_ms": 180.0,
+                    "avg_execution_elapsed_ms": 980.0,
+                    "avg_task_result_count": 2.0,
+                    "avg_executor_step_count": 5.0,
+                    "avg_tool_call_count": 4.0,
                     "fallback_rate": 0.0,
+                    "fallback_total": 0,
+                    "skipped_rate": 0.5,
+                    "skipped_total": 1,
+                    "model_route_rate": 0.5,
                     "reflection_route_rate": 0.5,
                     "reflection_match_rate": 1.0,
                     "reflection_override_rate": 0.5,
                     "execution_style_reflection_rate": 0.5,
                     "parallelism_reflection_rate": 0.5,
                     "worker_reflection_rate": 0.0,
+                    "tool_failure_rate": 0.0,
+                    "loop_guard_block_rate": 0.5,
+                    "max_step_exhausted_rate": 0.0,
+                    "dead_letter_rate": 0.0,
+                    "stalled_rate": 0.0,
                     "mean_reward": 0.8,
+                    "skip_breakdown": {"short_nonquestion": 1},
                 }
             },
         }
@@ -139,8 +172,22 @@ async def test_policy_inspect_command_reports_policy_summary() -> None:
     assert response.text.startswith("[Policy]")
     assert "decision_kind=scheduling" in response.text
     assert "action=serial_dispatch" in response.text
+    assert "avg_execution_elapsed_ms=920.00" in response.text
+    assert "avg_tool_call_count=3.50" in response.text
+    assert "tool_failure_rate=0.25" in response.text
+    assert "loop_guard_block_rate=0.00" in response.text
+    assert "max_step_exhausted_rate=0.00" in response.text
     assert "avg_router_latency_ms=210.00" in response.text
     assert "reflection_route_rate=0.33" in response.text
+    assert "fallback_rate=0.33" in response.text
+    assert "skipped_rate=0.33" in response.text
+    assert "model_route_rate=0.33" in response.text
+    assert "avg_execution_elapsed_ms=1240.00" in response.text
+    assert "avg_tool_call_count=5.00" in response.text
+    assert "tool_failure_rate=0.33" in response.text
+    assert "loop_guard_block_rate=0.33" in response.text
+    assert "max_step_exhausted_rate=0.33" in response.text
+    assert "skip_breakdown=short_nonquestion:1" in response.text
     assert "execution_style_reflection_rate=0.33" in response.text
     assert "parallelism_reflection_rate=0.67" in response.text
     assert "worker_reflection_rate=0.33" in response.text
@@ -212,6 +259,8 @@ def test_policy_choice_payload_includes_explain() -> None:
 
     assert payload["action_name"] == "serial"
     assert payload["explain"]
+    assert "feature_bias=" in payload["explain"]
+    assert "confidence_penalty=" in payload["explain"]
 
 
 def test_policy_inspect_command_reports_runtime_summary_sync() -> None:
@@ -225,6 +274,10 @@ def test_policy_inspect_command_reports_runtime_summary_sync() -> None:
     )
 
     assert "avg_router_latency_ms=210.00" in response.text
+    assert "fallback_rate=0.33" in response.text
+    assert "skipped_rate=0.33" in response.text
+    assert "model_route_rate=0.33" in response.text
+    assert "skip_breakdown=short_nonquestion:1" in response.text
     assert "reflection_route_rate=0.33" in response.text
     assert "execution_style_reflection_rate=0.33" in response.text
     assert "parallelism_reflection_rate=0.67" in response.text

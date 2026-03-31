@@ -107,9 +107,21 @@ def run():
 
             if user_input.lower() == "status":
                 status = orchestrator.get_status()
+                policy_telemetry = dict(status.get("policy_telemetry") or {})
                 interactive = dict(status.get("interactive_sessions") or {})
                 active_count = int(interactive.get("active_count") or 0)
                 chat_keys = ", ".join(interactive.get("chat_keys") or [])
+                skip_breakdown = dict(policy_telemetry.get("skip_breakdown") or {})
+                skip_breakdown_text = ", ".join(
+                    f"{str(reason).strip() or 'unknown'}:{int(count or 0)}"
+                    for reason, count in sorted(
+                        (
+                            (reason, count)
+                            for reason, count in skip_breakdown.items()
+                        ),
+                        key=lambda item: (-int(item[1] or 0), str(item[0])),
+                    )
+                )
                 session_lines: list[str] = []
                 for item in interactive.get("sessions") or []:
                     if not isinstance(item, dict):
@@ -124,8 +136,26 @@ def run():
                     )
                 print(
                     f"\nAvailable Tools: {status.get('available_tools', 0)}\n"
-                    f"Interactive Sessions: {active_count}\n"
-                    f"Interactive Chats: {chat_keys or '-'}\n"
+                    + (
+                        f"Policy Telemetry Runs: {int(policy_telemetry.get('runs', 0) or 0)}\n"
+                        f"Avg Execution Elapsed Ms: {float(policy_telemetry.get('avg_execution_elapsed_ms', 0.0) or 0.0):.2f}\n"
+                        f"Avg Tool Call Count: {float(policy_telemetry.get('avg_tool_call_count', 0.0) or 0.0):.2f}\n"
+                        f"Tool Failure Rate: {float(policy_telemetry.get('tool_failure_rate', 0.0) or 0.0):.2f}\n"
+                        f"Loop Guard Block Rate: {float(policy_telemetry.get('loop_guard_block_rate', 0.0) or 0.0):.2f}\n"
+                        f"Max Step Exhausted Rate: {float(policy_telemetry.get('max_step_exhausted_rate', 0.0) or 0.0):.2f}\n"
+                        f"Fallback Rate: {float(policy_telemetry.get('fallback_rate', 0.0) or 0.0):.2f}\n"
+                        f"Skipped Rate: {float(policy_telemetry.get('skipped_rate', 0.0) or 0.0):.2f}\n"
+                        f"Model Route Rate: {float(policy_telemetry.get('model_route_rate', 0.0) or 0.0):.2f}\n"
+                        + (
+                            f"Skip Breakdown: {skip_breakdown_text}\n"
+                            if skip_breakdown_text
+                            else ""
+                        )
+                        if policy_telemetry
+                        else ""
+                    )
+                    + f"Interactive Sessions: {active_count}\n"
+                    + f"Interactive Chats: {chat_keys or '-'}\n"
                     + (
                         "Interactive Details:\n" + "\n".join(session_lines) + "\n"
                         if session_lines

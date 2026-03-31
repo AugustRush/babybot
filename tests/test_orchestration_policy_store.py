@@ -278,94 +278,6 @@ def test_policy_store_suppresses_stale_intent_bucket_successes(tmp_path) -> None
     assert recommendation is None
 
 
-def test_policy_store_suppresses_intent_bucket_after_shadow_disagreement(tmp_path) -> None:
-    store = OrchestrationPolicyStore(tmp_path / "policy.db")
-    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
-    for idx in range(3):
-        flow_id = f"flow-{idx}"
-        store.record_runtime_telemetry(
-            flow_id=flow_id,
-            chat_key="feishu:c1",
-            route_mode="tool_workflow",
-            router_model="mini-router",
-            router_latency_ms=100.0 + idx,
-            router_fallback=False,
-            router_source="model",
-            execution_style="direct_execute",
-            intent_bucket=intent_bucket,
-            shadow_routing_eval_count=1,
-            shadow_routing_agree_count=0,
-        )
-        store.record_outcome(
-            flow_id=flow_id,
-            chat_key="feishu:c1",
-            final_status="succeeded",
-            reward=0.9,
-            outcome={"task_result_count": 1},
-        )
-
-    recommendation = store.recommend_route_from_intent_bucket(
-        chat_key="feishu:c1",
-        intent_bucket=intent_bucket,
-    )
-
-    assert recommendation is None
-
-
-def test_policy_store_recommends_shadow_budget_probe_after_low_agreement(tmp_path) -> None:
-    store = OrchestrationPolicyStore(tmp_path / "policy.db")
-    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
-    for idx in range(2):
-        store.record_runtime_telemetry(
-            flow_id=f"flow-{idx}",
-            chat_key="feishu:c1",
-            route_mode="tool_workflow",
-            router_model="mini-router",
-            router_latency_ms=100.0 + idx,
-            router_fallback=False,
-            router_source="intent_cache",
-            execution_style="direct_execute",
-            intent_bucket=intent_bucket,
-            shadow_routing_eval_count=1,
-            shadow_routing_agree_count=0,
-        )
-
-    budget = store.recommend_shadow_routing_budget(
-        chat_key="feishu:c1",
-        intent_bucket=intent_bucket,
-    )
-
-    assert budget["enabled"] is True
-    assert budget["mode"] == "probe"
-
-
-def test_policy_store_recommends_shadow_budget_suppress_between_probes(tmp_path) -> None:
-    store = OrchestrationPolicyStore(tmp_path / "policy.db")
-    intent_bucket = build_routing_intent_bucket("这个该怎么办", has_media=False)
-    for idx in range(3):
-        store.record_runtime_telemetry(
-            flow_id=f"flow-{idx}",
-            chat_key="feishu:c1",
-            route_mode="tool_workflow",
-            router_model="mini-router",
-            router_latency_ms=100.0 + idx,
-            router_fallback=False,
-            router_source="intent_cache",
-            execution_style="direct_execute",
-            intent_bucket=intent_bucket,
-            shadow_routing_eval_count=1,
-            shadow_routing_agree_count=0,
-        )
-
-    budget = store.recommend_shadow_routing_budget(
-        chat_key="feishu:c1",
-        intent_bucket=intent_bucket,
-    )
-
-    assert budget["enabled"] is False
-    assert budget["mode"] == "suppressed"
-
-
 def test_policy_store_reflection_route_recommendation_decays_stale_successes(tmp_path) -> None:
     store = OrchestrationPolicyStore(tmp_path / "policy.db")
     state_features = {
@@ -501,6 +413,64 @@ def test_policy_store_includes_feedback_score_in_action_summary(tmp_path) -> Non
     assert stats["serial_dispatch"]["feedback_good_count"] == 2
     assert stats["serial_dispatch"]["feedback_bad_count"] == 0
     assert stats["serial_dispatch"]["feedback_score"] > 0.0
+
+
+def test_policy_store_includes_execution_quality_in_action_summary(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_decision(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="serial_dispatch",
+        state_features={"task_shape": "multi_step", "independent_subtasks": 2},
+    )
+    store.record_decision(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        decision_kind="scheduling",
+        action_name="serial_dispatch",
+        state_features={"task_shape": "multi_step", "independent_subtasks": 2},
+    )
+    store.record_outcome(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=0.8,
+        outcome={
+            "execution_elapsed_ms": 1000,
+            "task_result_count": 2,
+            "executor_step_count": 5,
+            "tool_call_count": 4,
+            "tool_failure_count": 1,
+            "loop_guard_block_count": 0,
+            "max_step_exhausted_count": 0,
+        },
+    )
+    store.record_outcome(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        final_status="failed",
+        reward=-0.5,
+        outcome={
+            "execution_elapsed_ms": 1600,
+            "task_result_count": 1,
+            "executor_step_count": 8,
+            "tool_call_count": 7,
+            "tool_failure_count": 3,
+            "loop_guard_block_count": 2,
+            "max_step_exhausted_count": 1,
+        },
+    )
+
+    stats = store.summarize_action_stats(decision_kind="scheduling")
+
+    assert stats["serial_dispatch"]["avg_execution_elapsed_ms"] == 1300.0
+    assert stats["serial_dispatch"]["avg_task_result_count"] == 1.5
+    assert stats["serial_dispatch"]["avg_executor_step_count"] == 6.5
+    assert stats["serial_dispatch"]["avg_tool_call_count"] == 5.5
+    assert stats["serial_dispatch"]["tool_failure_rate"] == 2.0
+    assert stats["serial_dispatch"]["loop_guard_block_rate"] == 1.0
+    assert stats["serial_dispatch"]["max_step_exhausted_rate"] == 0.5
 
 
 def test_policy_store_filters_action_stats_by_bucket(tmp_path) -> None:
@@ -844,3 +814,136 @@ def test_policy_store_summarizes_runtime_telemetry_and_reward(tmp_path) -> None:
     assert summary["overall"]["reflection_override_rate"] == 0.5
     assert summary["by_route_mode"]["tool_workflow"]["mean_reward"] == 0.8
     assert summary["by_route_mode"]["debate"]["mean_reward"] == -0.4
+
+
+def test_policy_store_distinguishes_router_skip_from_true_fallback(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_runtime_telemetry(
+        flow_id="flow-skip",
+        chat_key="feishu:c1",
+        route_mode="answer",
+        router_model="mini-router",
+        router_latency_ms=0.0,
+        router_fallback=True,
+        router_source="skipped:short_nonquestion",
+    )
+    store.record_runtime_telemetry(
+        flow_id="flow-fallback",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=300.0,
+        router_fallback=True,
+        router_source="fallback",
+    )
+    store.record_runtime_telemetry(
+        flow_id="flow-model",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=150.0,
+        router_fallback=False,
+        router_source="model",
+    )
+
+    summary = store.summarize_runtime_telemetry()
+
+    assert summary["overall"]["runs"] == 3
+    assert summary["overall"]["skipped_total"] == 1
+    assert summary["overall"]["fallback_total"] == 1
+    assert summary["overall"]["skipped_rate"] == pytest.approx(1 / 3)
+    assert summary["overall"]["fallback_rate"] == pytest.approx(1 / 3)
+    assert summary["overall"]["model_route_rate"] == pytest.approx(1 / 3)
+    assert summary["overall"]["skip_breakdown"] == {"short_nonquestion": 1}
+
+
+def test_policy_store_summary_omits_shadow_routing_metrics(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_runtime_telemetry(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=150.0,
+        router_fallback=False,
+        router_source="model",
+    )
+
+    summary = store.summarize_runtime_telemetry()
+
+    assert "shadow_routing_eval_rate" not in summary["overall"]
+    assert "shadow_routing_agreement_rate" not in summary["overall"]
+
+
+def test_policy_store_summarizes_execution_quality_metrics(tmp_path) -> None:
+    store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    store.record_runtime_telemetry(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=120.0,
+        router_fallback=False,
+        router_source="model",
+    )
+    store.record_outcome(
+        flow_id="flow-1",
+        chat_key="feishu:c1",
+        final_status="succeeded",
+        reward=0.8,
+        outcome={
+            "task_result_count": 2,
+            "retry_count": 1,
+            "dead_letter_count": 0,
+            "stalled_count": 0,
+            "execution_elapsed_ms": 900.0,
+            "executor_step_count": 5,
+            "tool_call_count": 4,
+            "tool_failure_count": 1,
+            "loop_guard_block_count": 0,
+            "max_step_exhausted_count": 0,
+        },
+    )
+    store.record_runtime_telemetry(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        route_mode="tool_workflow",
+        router_model="mini-router",
+        router_latency_ms=180.0,
+        router_fallback=True,
+        router_source="fallback",
+    )
+    store.record_outcome(
+        flow_id="flow-2",
+        chat_key="feishu:c1",
+        final_status="failed",
+        reward=-0.5,
+        outcome={
+            "task_result_count": 1,
+            "retry_count": 2,
+            "dead_letter_count": 1,
+            "stalled_count": 1,
+            "execution_elapsed_ms": 1500.0,
+            "executor_step_count": 8,
+            "tool_call_count": 6,
+            "tool_failure_count": 3,
+            "loop_guard_block_count": 2,
+            "max_step_exhausted_count": 1,
+        },
+    )
+
+    summary = store.summarize_runtime_telemetry(chat_key="feishu:c1")
+    overall = summary["overall"]
+    route = summary["by_route_mode"]["tool_workflow"]
+
+    assert overall["avg_execution_elapsed_ms"] == 1200.0
+    assert overall["avg_task_result_count"] == 1.5
+    assert overall["avg_executor_step_count"] == 6.5
+    assert overall["avg_tool_call_count"] == 5.0
+    assert overall["tool_failure_rate"] == 2.0
+    assert overall["loop_guard_block_rate"] == 1.0
+    assert overall["max_step_exhausted_rate"] == 0.5
+    assert overall["dead_letter_rate"] == 0.5
+    assert overall["stalled_rate"] == 0.5
+    assert route["avg_execution_elapsed_ms"] == 1200.0
+    assert route["avg_tool_call_count"] == 5.0

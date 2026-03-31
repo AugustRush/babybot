@@ -111,6 +111,9 @@ class SingleAgentExecutor:
         loop_guard = LoopGuard(self.policy.loop_guard)
         blocked_tool_names: set[str] = set()
         no_progress_turns = 0
+        tool_call_count = 0
+        tool_failure_count = 0
+        loop_guard_block_count = 0
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
@@ -166,6 +169,7 @@ class SingleAgentExecutor:
                 )
 
             if response.tool_calls:
+                tool_call_count += len(response.tool_calls)
                 logger.info(
                     "Executor tool_calls task=%s step=%d calls=%s",
                     task.task_id, step,
@@ -200,6 +204,7 @@ class SingleAgentExecutor:
                 for tool_call in response.tool_calls:
                     verdict = loop_guard.check_call(tool_call.name, tool_call.arguments)
                     if verdict.blocked:
+                        loop_guard_block_count += 1
                         logger.warning(
                             "Executor loop guard blocked task=%s tool=%s reason=%s",
                             task.task_id, tool_call.name, verdict.reason,
@@ -238,6 +243,7 @@ class SingleAgentExecutor:
                             f"Tool unavailable: {tool_call.name}"
                             "\n[Hint: This tool is not available. Use a different tool or approach.]"
                         )))
+                        tool_failure_count += 1
                         continue
 
                     if (
@@ -253,6 +259,7 @@ class SingleAgentExecutor:
                             f"{tool_call.arguments.get('__raw_arguments__', '')}"
                             "\n[Hint: Fix the JSON syntax in your tool arguments.]"
                         )))
+                        tool_failure_count += 1
                         continue
 
                     tool_call.arguments = self._cast_tool_arguments(
@@ -272,6 +279,7 @@ class SingleAgentExecutor:
                             f"Tool argument validation failed for {tool_call.name}: {validation_error}"
                             "\n[Hint: Check parameter types and values against the tool schema.]"
                         )))
+                        tool_failure_count += 1
                         continue
 
                     valid_calls.append((tool_call, registered))
@@ -316,6 +324,10 @@ class SingleAgentExecutor:
                                 extra={
                                     "no_progress_turns": no_progress_turns,
                                     "blocked_tools": sorted(blocked_tool_names),
+                                    "tool_call_count": tool_call_count,
+                                    "tool_failure_count": tool_failure_count,
+                                    "loop_guard_block_count": loop_guard_block_count,
+                                    "max_step_exhausted_count": 0,
                                 },
                             ),
                         )
@@ -339,7 +351,7 @@ class SingleAgentExecutor:
                     async def _invoke_one(
                         tc: ModelToolCall,
                         reg: Any,
-                    ) -> tuple[ModelToolCall, str, list[str]]:
+                    ) -> tuple[ModelToolCall, str, list[str], bool]:
                         logger.info(
                             "Executor invoke task=%s tool=%s args_keys=%s",
                             task.task_id, tc.name,
@@ -363,6 +375,7 @@ class SingleAgentExecutor:
                                     "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
                                 ),
                                 [],
+                                True,
                             )
 
                         elapsed = time.perf_counter() - started
@@ -384,10 +397,12 @@ class SingleAgentExecutor:
                                 elapsed,
                                 (result.error or "")[:500],
                             )
-                        return tc, output, list(result.artifacts or [])
+                        return tc, output, list(result.artifacts or []), not result.ok
 
                     done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
-                    for tc, output, artifacts in done:
+                    for tc, output, artifacts, failed in done:
+                        if failed:
+                            tool_failure_count += 1
                         _collect_media(artifacts)
                         if tape is not None:
                             entry = tape.append(
@@ -445,7 +460,13 @@ class SingleAgentExecutor:
                         ),
                         metadata=self._build_usage_metadata(
                             usage_totals,
-                            extra={"max_model_tokens": max_model_tokens},
+                            extra={
+                                "max_model_tokens": max_model_tokens,
+                                "tool_call_count": tool_call_count,
+                                "tool_failure_count": tool_failure_count,
+                                "loop_guard_block_count": loop_guard_block_count,
+                                "max_step_exhausted_count": 0,
+                            },
                         ),
                     )
 
@@ -459,7 +480,15 @@ class SingleAgentExecutor:
                     task_id=task.task_id,
                     status="succeeded",
                     output=text,
-                    metadata=self._build_usage_metadata(usage_totals),
+                    metadata=self._build_usage_metadata(
+                        usage_totals,
+                        extra={
+                            "tool_call_count": tool_call_count,
+                            "tool_failure_count": tool_failure_count,
+                            "loop_guard_block_count": loop_guard_block_count,
+                            "max_step_exhausted_count": 0,
+                        },
+                    ),
                 )
 
         logger.warning(
@@ -472,7 +501,13 @@ class SingleAgentExecutor:
             error=f"No terminal answer within {self.policy.max_steps} steps.",
             metadata=self._build_usage_metadata(
                 usage_totals,
-                extra={"history": [self._dump_message(message) for message in messages]},
+                extra={
+                    "history": [self._dump_message(message) for message in messages],
+                    "tool_call_count": tool_call_count,
+                    "tool_failure_count": tool_failure_count,
+                    "loop_guard_block_count": loop_guard_block_count,
+                    "max_step_exhausted_count": 1,
+                },
             ),
         )
 

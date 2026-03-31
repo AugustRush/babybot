@@ -102,9 +102,24 @@ class FakeSessionManager:
         }
 
 
+class FakePolicyStore:
+    def summarize_runtime_telemetry(self, chat_key: str | None = None) -> dict[str, object]:
+        del chat_key
+        return {
+            "overall": {
+                "runs": 3,
+                "fallback_rate": 1 / 3,
+                "skipped_rate": 1 / 3,
+                "model_route_rate": 1 / 3,
+                "skip_breakdown": {"short_nonquestion": 1},
+            }
+        }
+
+
 def make_agent_with_session_manager(*, active_session: bool = False) -> OrchestratorAgent:
     agent = object.__new__(OrchestratorAgent)
     agent._interactive_sessions = FakeSessionManager(active_session=active_session)
+    agent._policy_store = FakePolicyStore()
     agent._initialized = True
     agent._init_lock = asyncio.Lock()
     agent._handoff_locks = {}
@@ -187,6 +202,9 @@ def test_get_status_includes_interactive_session_summary():
     status = agent.get_status()
 
     assert "interactive_sessions" in status
+    assert "policy_telemetry" in status
+    assert status["policy_telemetry"]["skipped_rate"] == pytest.approx(1 / 3)
+    assert status["policy_telemetry"]["skip_breakdown"] == {"short_nonquestion": 1}
     assert status["interactive_sessions"]["active_count"] == 1
     assert status["interactive_sessions"]["sessions"][0]["backend_status"]["mode"] == "resident"
 

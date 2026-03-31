@@ -402,3 +402,133 @@ def test_policy_penalizes_action_when_recent_reward_drift_is_high() -> None:
     action = selector.choose_scheduling(features={"independent_subtasks": 2})
 
     assert action.name == "serial"
+
+
+def test_policy_penalizes_parallel_action_with_loop_and_max_step_failures() -> None:
+    store = _FakePolicyStore(
+        {
+            "scheduling": {
+                "serial": {
+                    "mean_reward": 0.68,
+                    "samples": 16,
+                    "effective_samples": 16.0,
+                    "tool_failure_rate": 0.0,
+                    "loop_guard_block_rate": 0.0,
+                    "max_step_exhausted_rate": 0.0,
+                },
+                "bounded_parallel": {
+                    "mean_reward": 0.83,
+                    "samples": 16,
+                    "effective_samples": 16.0,
+                    "tool_failure_rate": 0.8,
+                    "loop_guard_block_rate": 0.7,
+                    "max_step_exhausted_rate": 0.5,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    action = selector.choose_scheduling(
+        features={"task_shape": "multi_step", "independent_subtasks": 3}
+    )
+
+    assert action.name == "serial"
+
+
+def test_policy_prefers_worker_for_multi_step_clean_success_history() -> None:
+    store = _FakePolicyStore(
+        {
+            "worker": {
+                "deny_worker": {
+                    "mean_reward": 0.61,
+                    "samples": 14,
+                    "effective_samples": 14.0,
+                    "failure_rate": 0.08,
+                    "tool_failure_rate": 0.4,
+                },
+                "allow_worker": {
+                    "mean_reward": 0.66,
+                    "samples": 14,
+                    "effective_samples": 14.0,
+                    "failure_rate": 0.0,
+                    "tool_failure_rate": 0.0,
+                    "max_step_exhausted_rate": 0.0,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    action = selector.choose_worker_gate(
+        features={"task_shape": "multi_step", "independent_subtasks": 3}
+    )
+
+    assert action.name == "allow_worker"
+
+
+def test_policy_penalizes_worker_for_simple_task_even_if_reward_is_higher() -> None:
+    store = _FakePolicyStore(
+        {
+            "worker": {
+                "deny_worker": {
+                    "mean_reward": 0.65,
+                    "samples": 18,
+                    "effective_samples": 18.0,
+                },
+                "allow_worker": {
+                    "mean_reward": 0.72,
+                    "samples": 18,
+                    "effective_samples": 18.0,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    action = selector.choose_worker_gate(
+        features={"task_shape": "single_step", "independent_subtasks": 1}
+    )
+
+    assert action.name == "deny_worker"
+
+
+def test_policy_selection_explain_includes_score_breakdown() -> None:
+    store = _FakePolicyStore(
+        {
+            "scheduling": {
+                "serial": {
+                    "mean_reward": 0.68,
+                    "samples": 16,
+                    "effective_samples": 16.0,
+                    "tool_failure_rate": 0.0,
+                    "loop_guard_block_rate": 0.0,
+                    "max_step_exhausted_rate": 0.0,
+                    "avg_execution_elapsed_ms": 900.0,
+                    "avg_tool_call_count": 3.0,
+                },
+                "bounded_parallel": {
+                    "mean_reward": 0.83,
+                    "samples": 16,
+                    "effective_samples": 16.0,
+                    "tool_failure_rate": 0.8,
+                    "loop_guard_block_rate": 0.7,
+                    "max_step_exhausted_rate": 0.5,
+                    "avg_execution_elapsed_ms": 2200.0,
+                    "avg_tool_call_count": 9.0,
+                },
+            }
+        }
+    )
+    selector = ConservativePolicySelector(store, min_samples=1, explore_ratio=-1.0)
+
+    selection = selector.select_scheduling(
+        features={"task_shape": "multi_step", "independent_subtasks": 3}
+    )
+
+    assert selection.action.name == "serial"
+    assert "feature_bias=" in selection.explain
+    assert "confidence_penalty=" in selection.explain
+    assert "tool_failure_penalty=" in selection.explain
+    assert "loop_guard_penalty=" in selection.explain
+    assert "max_step_penalty=" in selection.explain

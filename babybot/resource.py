@@ -598,7 +598,6 @@ class ResourceManager:
             if not k.startswith("_")
         }
         self._setup_tool_groups(tool_groups)
-        self._discover_workspace_tools()
         self._register_configured_skills(
             {
                 k: v
@@ -986,12 +985,6 @@ class ResourceManager:
 
     def set_observability_provider(self, provider: Any) -> None:
         self._observability_provider = provider
-
-    def _discover_workspace_tools(self) -> None:
-        self._tool_loader_view().discover_workspace_tools()
-
-    def _ensure_workspace_on_pythonpath(self) -> None:
-        self._tool_loader_view().ensure_workspace_on_pythonpath()
 
     def _load_tool_module(self, module_name: str) -> Any:
         return self._tool_loader_view().load_tool_module(module_name)

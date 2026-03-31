@@ -248,7 +248,6 @@ def test_discovered_generated_skill_uses_example_requests_for_keywords(tmp_path:
     cfg.workspace_dir = workspace_dir
     cfg.workspace_skills_dir = workspace_skills_dir
     cfg.builtin_skills_dir = builtin_skills_dir
-    cfg.workspace_tools_dir = workspace_dir / "tools"
     cfg.scheduled_tasks_file = workspace_dir / "scheduled_tasks.json"
 
     manager = ResourceManager(cfg)
@@ -291,7 +290,6 @@ def test_discovered_skill_frontmatter_can_extend_include_groups(tmp_path: Path) 
     cfg.workspace_dir = workspace_dir
     cfg.workspace_skills_dir = workspace_skills_dir
     cfg.builtin_skills_dir = builtin_skills_dir
-    cfg.workspace_tools_dir = workspace_dir / "tools"
     cfg.scheduled_tasks_file = workspace_dir / "scheduled_tasks.json"
 
     manager = ResourceManager(cfg)
@@ -334,7 +332,6 @@ def test_workspace_skill_overrides_builtin_skill_with_same_name(tmp_path: Path) 
     cfg.workspace_dir = workspace_dir
     cfg.workspace_skills_dir = workspace_skills_dir
     cfg.builtin_skills_dir = builtin_skills_dir
-    cfg.workspace_tools_dir = workspace_dir / "tools"
     cfg.scheduled_tasks_file = workspace_dir / "scheduled_tasks.json"
 
     manager = ResourceManager(cfg)
@@ -945,11 +942,9 @@ def test_load_tool_module_raises_when_script_calls_sys_exit(tmp_path: Path) -> N
         raise AssertionError("expected ModuleNotFoundError")
 
 
-def test_discover_workspace_tools_registers_public_functions(tmp_path: Path) -> None:
-    manager = object.__new__(ResourceManager)
-    manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
-    tools_root = tmp_path / "tools"
+def test_resource_manager_does_not_auto_discover_workspace_tools(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    tools_root = workspace_dir / "tools"
     analysis_dir = tools_root / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
     (analysis_dir / "demo.py").write_text(
@@ -959,17 +954,20 @@ def test_discover_workspace_tools_registers_public_functions(tmp_path: Path) -> 
         "    return 'hidden'\n",
         encoding="utf-8",
     )
-    manager.config = SimpleNamespace(
-        workspace_dir=tmp_path,
-        workspace_tools_dir=tools_root,
-        resolve_workspace_path=lambda value: str(tmp_path / value),
-    )
 
-    manager._discover_workspace_tools()
+    cfg = Config()
+    cfg.workspace_dir = workspace_dir
+    cfg.workspace_skills_dir = workspace_dir / "skills"
+    cfg.builtin_skills_dir = tmp_path / "builtin" / "skills"
+    cfg.workspace_tools_dir = tools_root
+    cfg.scheduled_tasks_file = workspace_dir / "scheduled_tasks.json"
+    cfg.workspace_dir.mkdir(parents=True, exist_ok=True)
+    cfg.workspace_skills_dir.mkdir(parents=True, exist_ok=True)
+    cfg.builtin_skills_dir.mkdir(parents=True, exist_ok=True)
 
-    registered = manager.registry.get("make_summary")
-    assert registered is not None
-    assert registered.group == "analysis"
+    manager = ResourceManager(cfg)
+
+    assert manager.registry.get("make_summary") is None
     assert manager.registry.get("_hidden") is None
 
 

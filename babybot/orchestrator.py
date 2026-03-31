@@ -35,15 +35,17 @@ from .interactive_sessions.types import (
     InteractiveRequest,
 )
 from .model_gateway import OpenAICompatibleGateway
-from .orchestration_policy import ConservativePolicySelector
+from .orchestration_policy import ConservativePolicySelector, build_policy_state_bucket
 from .orchestration_policy_store import OrchestrationPolicyStore
 from .orchestration_router import (
     RoutingDecision,
     build_routing_intent_bucket,
     build_routing_snapshot,
+    match_rule_based_routing,
     route_mode_to_contract_mode,
     route_mode_to_step_kind,
     route_task,
+    should_call_model_router,
 )
 from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
@@ -117,6 +119,7 @@ class OrchestratorAgent:
         self._initialized = False
         self._recent_flow_ids_by_chat: OrderedDict[str, str] = OrderedDict()
         self._recent_flows_by_chat: OrderedDict[str, list[str]] = OrderedDict()
+        self._recent_policy_decisions_by_flow: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def _build_interactive_session_manager(self) -> InteractiveSessionManager:
@@ -159,6 +162,34 @@ class OrchestratorAgent:
             self._handoff_locks.popitem(last=False)
         return lock
 
+    def _remember_flow_policy_decisions(
+        self,
+        flow_id: str,
+        events: list[dict[str, Any]],
+    ) -> None:
+        if not flow_id:
+            return
+        recent = getattr(self, "_recent_policy_decisions_by_flow", None)
+        if not isinstance(recent, OrderedDict):
+            recent = OrderedDict(recent or {})
+            self._recent_policy_decisions_by_flow = recent
+        decisions: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("event") != "policy_decision":
+                continue
+            decisions.append(
+                {
+                    "decision_kind": str(event.get("decision_kind", "") or "").strip(),
+                    "action_name": str(event.get("action_name", "") or "").strip(),
+                    "state_bucket": str(event.get("state_bucket", "") or "").strip(),
+                    "explain": str(event.get("explain", "") or "").strip(),
+                }
+            )
+        recent.pop(flow_id, None)
+        recent[flow_id] = decisions
+        while len(recent) > self._FLOW_CACHE_LIMIT:
+            recent.popitem(last=False)
+
     def _spawn_background_task(
         self,
         coro: Awaitable[Any],
@@ -191,10 +222,6 @@ class OrchestratorAgent:
     def _routing_enabled(self) -> bool:
         system = getattr(getattr(self, "config", None), "system", None)
         return bool(getattr(system, "routing_enabled", True))
-
-    def _routing_shadow_eval_enabled(self) -> bool:
-        system = getattr(getattr(self, "config", None), "system", None)
-        return bool(getattr(system, "routing_shadow_eval_enabled", True))
 
     def _reflection_enabled(self) -> bool:
         system = getattr(getattr(self, "config", None), "system", None)
@@ -343,6 +370,7 @@ class OrchestratorAgent:
                     state_features=dict(event.get("state_features") or {}),
                 )
             )
+        self._remember_flow_policy_decisions(flow_id, events)
 
     @staticmethod
     def _routing_policy_hints(decision: RoutingDecision | None) -> list[str]:
@@ -524,39 +552,6 @@ class OrchestratorAgent:
             decision_source="intent_cache",
         )
 
-    async def _shadow_evaluate_routing_async(
-        self,
-        *,
-        flow_id: str,
-        routing_snapshot: Any,
-        actual_decision: RoutingDecision,
-        model_name: str,
-        timeout: float,
-    ) -> None:
-        store = getattr(self, "_policy_store", None)
-        if (
-            store is None
-            or not hasattr(store, "record_shadow_routing_eval")
-            or actual_decision.decision_source == "model"
-        ):
-            return
-        shadow_decision = await route_task(
-            self.gateway,
-            routing_snapshot,
-            model_name=model_name,
-            timeout=max(0.5, min(1.0, float(timeout or 0.0))),
-            allow_rule_based=False,
-        )
-        if shadow_decision is None:
-            return
-        store.record_shadow_routing_eval(
-            flow_id=flow_id,
-            agreed=(
-                shadow_decision.route_mode == actual_decision.route_mode
-                and shadow_decision.execution_style == actual_decision.execution_style
-            ),
-        )
-
     async def _evaluate_task_run_async(
         self,
         *,
@@ -592,37 +587,109 @@ class OrchestratorAgent:
         )
 
     @staticmethod
-    def _policy_reward(events: list[dict[str, Any]], final_status: str) -> float:
+    def _task_result_outcome_details(result: Any | None) -> dict[str, int]:
+        task_results = dict(getattr(result, "task_results", {}) or {})
+        retry_count = 0
+        dead_letter_count = 0
+        stalled_count = 0
+        tool_call_count = 0
+        tool_failure_count = 0
+        loop_guard_block_count = 0
+        max_step_exhausted_count = 0
+        for task_result in task_results.values():
+            attempts = max(1, int(getattr(task_result, "attempts", 1) or 1))
+            retry_count += max(0, attempts - 1)
+            metadata = dict(getattr(task_result, "metadata", {}) or {})
+            if metadata.get("dead_lettered") is True:
+                dead_letter_count += 1
+            error_text = str(getattr(task_result, "error", "") or "").strip().lower()
+            if (
+                metadata.get("stalled") is True
+                or metadata.get("error_type") == "stalled"
+                or "heartbeat stalled" in error_text
+            ):
+                stalled_count += 1
+            tool_call_count += max(0, int(metadata.get("tool_call_count", 0) or 0))
+            tool_failure_count += max(0, int(metadata.get("tool_failure_count", 0) or 0))
+            loop_guard_block_count += max(
+                0, int(metadata.get("loop_guard_block_count", 0) or 0)
+            )
+            max_step_exhausted_count += max(
+                0, int(metadata.get("max_step_exhausted_count", 0) or 0)
+            )
+        return {
+            "task_result_count": len(task_results),
+            "retry_count": retry_count,
+            "dead_letter_count": dead_letter_count,
+            "stalled_count": stalled_count,
+            "tool_call_count": tool_call_count,
+            "tool_failure_count": tool_failure_count,
+            "loop_guard_block_count": loop_guard_block_count,
+            "max_step_exhausted_count": max_step_exhausted_count,
+        }
+
+    @classmethod
+    def _policy_reward(
+        cls,
+        events: list[dict[str, Any]],
+        final_status: str,
+        *,
+        result: Any | None = None,
+    ) -> float:
         reward = 1.0 if final_status == "succeeded" else -1.0
-        retry_count = sum(1 for event in events if event.get("event") == "retrying")
-        dead_letter_count = sum(
+        event_retry_count = sum(1 for event in events if event.get("event") == "retrying")
+        event_dead_letter_count = sum(
             1 for event in events if event.get("event") == "dead_lettered"
         )
-        stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        event_stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        result_details = cls._task_result_outcome_details(result)
+        retry_count = max(event_retry_count, int(result_details["retry_count"]))
+        dead_letter_count = max(
+            event_dead_letter_count, int(result_details["dead_letter_count"])
+        )
+        stalled_count = max(event_stalled_count, int(result_details["stalled_count"]))
         reward -= 0.15 * retry_count
         reward -= 0.25 * dead_letter_count
         reward -= 0.2 * stalled_count
+        reward -= 0.08 * int(result_details["tool_failure_count"] > 0)
+        reward -= 0.1 * int(result_details["loop_guard_block_count"] > 0)
+        reward -= 0.18 * int(result_details["max_step_exhausted_count"] > 0)
         return max(-1.0, min(1.0, reward))
 
-    @staticmethod
+    @classmethod
     def _policy_outcome_details(
+        cls,
         events: list[dict[str, Any]],
         *,
         result: Any | None = None,
         error: str | None = None,
+        execution_elapsed_ms: float | None = None,
     ) -> dict[str, Any]:
-        retry_count = sum(1 for event in events if event.get("event") == "retrying")
-        dead_letter_count = sum(
+        event_retry_count = sum(1 for event in events if event.get("event") == "retrying")
+        event_dead_letter_count = sum(
             1 for event in events if event.get("event") == "dead_lettered"
         )
-        stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        event_stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        result_details = cls._task_result_outcome_details(result)
         payload = {
-            "retry_count": retry_count,
-            "dead_letter_count": dead_letter_count,
-            "stalled_count": stalled_count,
+            "retry_count": max(event_retry_count, int(result_details["retry_count"])),
+            "dead_letter_count": max(
+                event_dead_letter_count, int(result_details["dead_letter_count"])
+            ),
+            "stalled_count": max(
+                event_stalled_count, int(result_details["stalled_count"])
+            ),
+            "task_result_count": int(result_details["task_result_count"]),
+            "executor_step_count": sum(
+                1 for event in events if event.get("event") == "executor.step"
+            ),
+            "tool_call_count": int(result_details["tool_call_count"]),
+            "tool_failure_count": int(result_details["tool_failure_count"]),
+            "loop_guard_block_count": int(result_details["loop_guard_block_count"]),
+            "max_step_exhausted_count": int(result_details["max_step_exhausted_count"]),
         }
-        if result is not None:
-            payload["task_result_count"] = len(getattr(result, "task_results", {}) or {})
+        if execution_elapsed_ms is not None:
+            payload["execution_elapsed_ms"] = round(max(0.0, float(execution_elapsed_ms)), 2)
         if error:
             payload["error"] = error
         return payload
@@ -772,8 +839,18 @@ class OrchestratorAgent:
                 ),
                 goal=user_input,
             )
+        if self._routing_enabled() and routing_decision is None:
+            routing_decision = match_rule_based_routing(routing_snapshot)
+        should_use_model_router = False
+        router_skip_reason = "disabled"
+        if self._routing_enabled() and routing_decision is None:
+            should_use_model_router, router_skip_reason = should_call_model_router(
+                routing_snapshot,
+                intent_bucket=intent_bucket,
+            )
         if (
-            runtime_telemetry_store is not None
+            should_use_model_router
+            and runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "recommend_router_timeout")
         ):
             recommendation = runtime_telemetry_store.recommend_router_timeout(
@@ -785,7 +862,7 @@ class OrchestratorAgent:
                 recommendation.get("timeout_seconds", routing_timeout) or routing_timeout
             )
         routing_started = time.perf_counter()
-        if self._routing_enabled() and routing_decision is None:
+        if should_use_model_router:
             routing_decision = await route_task(
                 self.gateway,
                 routing_snapshot,
@@ -925,7 +1002,13 @@ class OrchestratorAgent:
                 router_latency_ms=routing_latency_ms,
                 router_fallback=routing_decision is None,
                 router_source=(
-                    routing_decision.decision_source if routing_decision is not None else "fallback"
+                    routing_decision.decision_source
+                    if routing_decision is not None
+                    else (
+                        f"skipped:{router_skip_reason}"
+                        if self._routing_enabled() and not should_use_model_router
+                        else "fallback"
+                    )
                 ),
                 execution_style=(
                     str(routing_decision.execution_style or "")
@@ -942,34 +1025,6 @@ class OrchestratorAgent:
                 parallelism_guardrail_soften_count=parallelism_guardrail_soften_count,
                 worker_guardrail_soften_count=worker_guardrail_soften_count,
             )
-        if (
-            routing_decision is not None
-            and routing_decision.decision_source != "model"
-            and self._routing_enabled()
-            and self._routing_shadow_eval_enabled()
-        ):
-            shadow_budget = {"enabled": True, "mode": "default"}
-            if (
-                chat_key
-                and runtime_telemetry_store is not None
-                and hasattr(runtime_telemetry_store, "recommend_shadow_routing_budget")
-            ):
-                shadow_budget = runtime_telemetry_store.recommend_shadow_routing_budget(
-                    chat_key=chat_key,
-                    intent_bucket=intent_bucket,
-                    pending_run_recorded=True,
-                )
-            if bool(shadow_budget.get("enabled", True)):
-                self._spawn_background_task(
-                    self._shadow_evaluate_routing_async(
-                        flow_id=flow_id,
-                        routing_snapshot=routing_snapshot,
-                        actual_decision=routing_decision,
-                        model_name=configured_router_model,
-                        timeout=min(routing_timeout, 1.0),
-                    ),
-                    label="routing-shadow-eval",
-                )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
         policy_hints.extend(self._routing_policy_hints(routing_decision))
@@ -1017,6 +1072,8 @@ class OrchestratorAgent:
                 decision_kind="decomposition",
                 action_name=decomposition_action,
                 state_features=decomposition_features,
+                explain=decomposition_hint,
+                state_bucket=build_policy_state_bucket(decomposition_features),
             )
         if chat_key and self._policy_learning_enabled():
             worker_action_name = str(worker_policy.get("action_name", "") or "").strip()
@@ -1026,9 +1083,25 @@ class OrchestratorAgent:
                     decision_kind="worker",
                     action_name=worker_action_name,
                     state_features=scheduling_features,
+                    explain=str(worker_policy.get("explain", "") or ""),
+                    state_bucket=str(worker_policy.get("state_bucket", "") or ""),
+                )
+        if chat_key and self._policy_learning_enabled():
+            scheduling_action_name = str(
+                scheduling_policy.get("action_name", "") or ""
+            ).strip()
+            if scheduling_action_name:
+                context.emit(
+                    "policy_decision",
+                    decision_kind="scheduling",
+                    action_name=scheduling_action_name,
+                    state_features=scheduling_features,
+                    explain=str(scheduling_policy.get("explain", "") or ""),
+                    state_bucket=str(scheduling_policy.get("state_bucket", "") or ""),
                 )
 
         logger.info("DynamicOrchestrator created, starting run flow_id=%s", flow_id)
+        execution_started = time.perf_counter()
         try:
             if heartbeat is not None:
                 result = await heartbeat.watch(
@@ -1045,6 +1118,7 @@ class OrchestratorAgent:
             failed_outcome = self._policy_outcome_details(
                 context.events,
                 error=str(exc),
+                execution_elapsed_ms=(time.perf_counter() - execution_started) * 1000.0,
             )
             self._record_policy_outcome(
                 PolicyOutcomeRecord(
@@ -1075,13 +1149,14 @@ class OrchestratorAgent:
         succeeded_outcome = self._policy_outcome_details(
             context.events,
             result=result,
+            execution_elapsed_ms=(time.perf_counter() - execution_started) * 1000.0,
         )
         self._record_policy_outcome(
             PolicyOutcomeRecord(
                 flow_id=flow_id,
                 chat_key=chat_key,
                 final_status="succeeded",
-                reward=self._policy_reward(context.events, "succeeded"),
+                reward=self._policy_reward(context.events, "succeeded", result=result),
                 outcome=succeeded_outcome,
             )
         )
@@ -1112,9 +1187,28 @@ class OrchestratorAgent:
             return "暂无可观测的 flow。"
         snapshot = self._task_heartbeat_registry.snapshot(resolved_flow_id)
         events = self._child_task_bus.events_for(resolved_flow_id)
+        decision_cache = getattr(self, "_recent_policy_decisions_by_flow", {}) or {}
+        policy_decisions = list(decision_cache.get(resolved_flow_id, []) or [])
         parts = ["[Runtime Flow]", f"flow_id={resolved_flow_id}"]
         if resolved_chat_key:
             parts.append(f"chat_key={resolved_chat_key}")
+        if policy_decisions:
+            lines = []
+            for item in policy_decisions[-8:]:
+                kind = str(item.get("decision_kind", "") or "").strip()
+                action = str(item.get("action_name", "") or "").strip()
+                state_bucket = str(item.get("state_bucket", "") or "").strip()
+                explain = str(item.get("explain", "") or "").strip()
+                suffix = []
+                if state_bucket:
+                    suffix.append(f"bucket={state_bucket}")
+                if explain:
+                    suffix.append(explain)
+                lines.append(
+                    f"- decision_kind={kind or '-'} action={action or '-'}"
+                    + (f" ({'; '.join(suffix)})" if suffix else "")
+                )
+            parts.append("[Policy Decisions]\n" + "\n".join(lines))
         if snapshot:
             lines = []
             for task_id, state in sorted(snapshot.items()):
@@ -1208,6 +1302,11 @@ class OrchestratorAgent:
                     + f"recent_mean_reward={float(payload.get('recent_mean_reward', 0.0) or 0.0):.2f} "
                     + f"drift_score={float(payload.get('drift_score', 0.0) or 0.0):.2f} "
                     + f"failure_rate={float(payload.get('failure_rate', 0.0) or 0.0):.2f} "
+                    + f"avg_execution_elapsed_ms={float(payload.get('avg_execution_elapsed_ms', 0.0) or 0.0):.2f} "
+                    + f"avg_tool_call_count={float(payload.get('avg_tool_call_count', 0.0) or 0.0):.2f} "
+                    + f"tool_failure_rate={float(payload.get('tool_failure_rate', 0.0) or 0.0):.2f} "
+                    + f"loop_guard_block_rate={float(payload.get('loop_guard_block_rate', 0.0) or 0.0):.2f} "
+                    + f"max_step_exhausted_rate={float(payload.get('max_step_exhausted_rate', 0.0) or 0.0):.2f} "
                     + f"feedback_score={float(payload.get('feedback_score', 0.0) or 0.0):.2f}"
                 )
         telemetry_summary_fn = getattr(self._policy_store, "summarize_runtime_telemetry", None)
@@ -1216,54 +1315,98 @@ class OrchestratorAgent:
                 telemetry = telemetry_summary_fn(chat_key=chat_key or None)
             except TypeError:
                 telemetry = telemetry_summary_fn()
+            def _format_skip_breakdown(payload: dict[str, object]) -> str:
+                breakdown = payload.get("skip_breakdown")
+                if not isinstance(breakdown, dict) or not breakdown:
+                    return ""
+                items: list[str] = []
+                for reason, count in sorted(
+                    (
+                        (str(reason).strip() or "unknown", int(value or 0))
+                        for reason, value in breakdown.items()
+                    ),
+                    key=lambda item: (-item[1], item[0]),
+                ):
+                    items.append(f"{reason}:{count}")
+                return ",".join(items)
             overall = telemetry.get("overall") if isinstance(telemetry, dict) else None
             by_route_mode = (
                 telemetry.get("by_route_mode", {}) if isinstance(telemetry, dict) else {}
             )
             if isinstance(overall, dict) and int(overall.get("runs", 0) or 0) > 0:
+                overall_skip_breakdown = _format_skip_breakdown(overall)
                 parts.append("[Routing Telemetry]")
                 parts.append(
                     "- "
                     + f"runs={int(overall.get('runs', 0) or 0)} "
                     + f"avg_router_latency_ms={float(overall.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
+                    + f"avg_execution_elapsed_ms={float(overall.get('avg_execution_elapsed_ms', 0.0) or 0.0):.2f} "
+                    + f"avg_task_result_count={float(overall.get('avg_task_result_count', 0.0) or 0.0):.2f} "
+                    + f"avg_executor_step_count={float(overall.get('avg_executor_step_count', 0.0) or 0.0):.2f} "
+                    + f"avg_tool_call_count={float(overall.get('avg_tool_call_count', 0.0) or 0.0):.2f} "
                     + f"fallback_rate={float(overall.get('fallback_rate', 0.0) or 0.0):.2f} "
+                    + f"skipped_rate={float(overall.get('skipped_rate', 0.0) or 0.0):.2f} "
+                    + f"model_route_rate={float(overall.get('model_route_rate', 0.0) or 0.0):.2f} "
                     + f"rule_hit_rate={float(overall.get('rule_hit_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_route_rate={float(overall.get('reflection_route_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_match_rate={float(overall.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                     + f"reflection_override_rate={float(overall.get('reflection_override_rate', 0.0) or 0.0):.2f} "
+                    + f"tool_failure_rate={float(overall.get('tool_failure_rate', 0.0) or 0.0):.2f} "
+                    + f"loop_guard_block_rate={float(overall.get('loop_guard_block_rate', 0.0) or 0.0):.2f} "
+                    + f"max_step_exhausted_rate={float(overall.get('max_step_exhausted_rate', 0.0) or 0.0):.2f} "
+                    + f"dead_letter_rate={float(overall.get('dead_letter_rate', 0.0) or 0.0):.2f} "
+                    + f"stalled_rate={float(overall.get('stalled_rate', 0.0) or 0.0):.2f} "
                     + f"execution_style_reflection_rate={float(overall.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
                     + f"parallelism_reflection_rate={float(overall.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
                     + f"worker_reflection_rate={float(overall.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
                     + f"execution_style_guardrail_reduce_rate={float(overall.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
                     + f"parallelism_guardrail_soften_rate={float(overall.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
                     + f"worker_guardrail_soften_rate={float(overall.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
-                    + f"shadow_routing_eval_rate={float(overall.get('shadow_routing_eval_rate', 0.0) or 0.0):.2f} "
-                    + f"shadow_routing_agreement_rate={float(overall.get('shadow_routing_agreement_rate', 0.0) or 0.0):.2f} "
                     + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
+                    + (
+                        f" skip_breakdown={overall_skip_breakdown}"
+                        if overall_skip_breakdown
+                        else ""
+                    )
                 )
                 if isinstance(by_route_mode, dict):
                     for route_mode, payload in sorted(by_route_mode.items()):
                         if not isinstance(payload, dict):
                             continue
+                        route_skip_breakdown = _format_skip_breakdown(payload)
                         parts.append(
                             "- "
                             + f"route_mode={route_mode} "
                             + f"runs={int(payload.get('runs', 0) or 0)} "
                             + f"avg_router_latency_ms={float(payload.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
+                            + f"avg_execution_elapsed_ms={float(payload.get('avg_execution_elapsed_ms', 0.0) or 0.0):.2f} "
+                            + f"avg_task_result_count={float(payload.get('avg_task_result_count', 0.0) or 0.0):.2f} "
+                            + f"avg_executor_step_count={float(payload.get('avg_executor_step_count', 0.0) or 0.0):.2f} "
+                            + f"avg_tool_call_count={float(payload.get('avg_tool_call_count', 0.0) or 0.0):.2f} "
                             + f"fallback_rate={float(payload.get('fallback_rate', 0.0) or 0.0):.2f} "
+                            + f"skipped_rate={float(payload.get('skipped_rate', 0.0) or 0.0):.2f} "
+                            + f"model_route_rate={float(payload.get('model_route_rate', 0.0) or 0.0):.2f} "
                             + f"rule_hit_rate={float(payload.get('rule_hit_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_route_rate={float(payload.get('reflection_route_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_match_rate={float(payload.get('reflection_match_rate', 0.0) or 0.0):.2f} "
                             + f"reflection_override_rate={float(payload.get('reflection_override_rate', 0.0) or 0.0):.2f} "
+                            + f"tool_failure_rate={float(payload.get('tool_failure_rate', 0.0) or 0.0):.2f} "
+                            + f"loop_guard_block_rate={float(payload.get('loop_guard_block_rate', 0.0) or 0.0):.2f} "
+                            + f"max_step_exhausted_rate={float(payload.get('max_step_exhausted_rate', 0.0) or 0.0):.2f} "
+                            + f"dead_letter_rate={float(payload.get('dead_letter_rate', 0.0) or 0.0):.2f} "
+                            + f"stalled_rate={float(payload.get('stalled_rate', 0.0) or 0.0):.2f} "
                             + f"execution_style_reflection_rate={float(payload.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
                             + f"parallelism_reflection_rate={float(payload.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
                             + f"worker_reflection_rate={float(payload.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
                             + f"execution_style_guardrail_reduce_rate={float(payload.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
                             + f"parallelism_guardrail_soften_rate={float(payload.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
                             + f"worker_guardrail_soften_rate={float(payload.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
-                            + f"shadow_routing_eval_rate={float(payload.get('shadow_routing_eval_rate', 0.0) or 0.0):.2f} "
-                            + f"shadow_routing_agreement_rate={float(payload.get('shadow_routing_agreement_rate', 0.0) or 0.0):.2f} "
                             + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"
+                            + (
+                                f" skip_breakdown={route_skip_breakdown}"
+                                if route_skip_breakdown
+                                else ""
+                            )
                         )
         return "\n".join(parts)
 
@@ -2021,6 +2164,7 @@ class OrchestratorAgent:
     def get_status(self) -> dict[str, Any]:
         resource_manager = getattr(self, "resource_manager", None)
         interactive_manager = getattr(self, "_interactive_sessions", None)
+        policy_store = getattr(self, "_policy_store", None)
         status = {
             "resource_manager": "initialized",
             "available_tools": len(resource_manager.get_available_tools())
@@ -2032,4 +2176,13 @@ class OrchestratorAgent:
         }
         if interactive_manager is not None:
             status["interactive_sessions"] = interactive_manager.summary()
+        telemetry_summary_fn = getattr(policy_store, "summarize_runtime_telemetry", None)
+        if callable(telemetry_summary_fn):
+            try:
+                telemetry = telemetry_summary_fn()
+            except TypeError:
+                telemetry = telemetry_summary_fn(chat_key=None)
+            overall = telemetry.get("overall") if isinstance(telemetry, dict) else None
+            if isinstance(overall, dict) and int(overall.get("runs", 0) or 0) > 0:
+                status["policy_telemetry"] = overall
         return status

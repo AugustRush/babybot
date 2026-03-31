@@ -17,6 +17,18 @@ class _Orchestrator:
         self.calls: list[tuple[str, str]] = []
         self.status_payload = {
             "available_tools": 3,
+            "policy_telemetry": {
+                "runs": 3,
+                "avg_execution_elapsed_ms": 1240.0,
+                "avg_tool_call_count": 5.0,
+                "tool_failure_rate": 1 / 3,
+                "loop_guard_block_rate": 1 / 3,
+                "max_step_exhausted_rate": 1 / 3,
+                "fallback_rate": 1 / 3,
+                "skipped_rate": 1 / 3,
+                "model_route_rate": 1 / 3,
+                "skip_breakdown": {"short_nonquestion": 1},
+            },
             "interactive_sessions": {
                 "active_count": 1,
                 "chat_keys": ["cli:local"],
@@ -85,6 +97,16 @@ def test_cli_status_prints_interactive_session_summary(
 
     output = capsys.readouterr().out
     assert "Available Tools: 3" in output
+    assert "Policy Telemetry Runs: 3" in output
+    assert "Avg Execution Elapsed Ms: 1240.00" in output
+    assert "Avg Tool Call Count: 5.00" in output
+    assert "Tool Failure Rate: 0.33" in output
+    assert "Loop Guard Block Rate: 0.33" in output
+    assert "Max Step Exhausted Rate: 0.33" in output
+    assert "Fallback Rate: 0.33" in output
+    assert "Skipped Rate: 0.33" in output
+    assert "Model Route Rate: 0.33" in output
+    assert "Skip Breakdown: short_nonquestion:1" in output
     assert "Interactive Sessions: 1" in output
     assert "cli:local" in output
     assert "resident" in output
