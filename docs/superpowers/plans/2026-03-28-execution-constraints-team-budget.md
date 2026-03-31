@@ -1,5 +1,7 @@
 # Execution Constraints and Team Budget Implementation Plan
 
+**Status:** Completed. Execution-constraints normalization, team debate budgets, and related tests are now part of the main runtime.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make user-stated execution constraints survive planning and enforce runtime budgets for multi-agent debates.

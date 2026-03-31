@@ -1,5 +1,7 @@
 # Lightweight Routing Learning Implementation Plan
 
+**Status:** Completed. Lightweight routing, async evaluator, reflection hints, and later follow-up refinements all landed on top of this plan.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a lightweight context router, async evaluator, and reflection hints loop on top of BabyBot's existing orchestration stack without hurting latency or requiring heavy local compute.

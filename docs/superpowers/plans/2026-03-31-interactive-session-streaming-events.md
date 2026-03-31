@@ -1,5 +1,7 @@
 # Interactive Session Streaming Events Implementation Plan
 
+**Status:** Completed. Interactive session output now uses a shared incremental event stream across CLI and channel renderers.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 为 BabyBot 的 resident interactive session 增加统一的增量输出事件流，并让 CLI、飞书、微信复用同一套事件语义与退化策略。

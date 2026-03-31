@@ -1,5 +1,7 @@
 # Interactive CLI Session Mode Implementation Plan
 
+**Status:** Superseded. Initial `@session` capability landed, then the architecture was replaced by resident-session mode in `/Users/shike/Desktop/babybot/docs/superpowers/plans/2026-03-30-interactive-cli-resident-session-mode.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add lazily-started, chat-scoped interactive CLI sessions controlled by `@session` commands, with Claude as the first backend and a reusable path for future backends such as Codex.

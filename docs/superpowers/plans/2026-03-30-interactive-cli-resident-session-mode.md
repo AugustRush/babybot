@@ -1,5 +1,7 @@
 # Interactive CLI Resident Session Mode Implementation Plan
 
+**Status:** Completed. Resident Claude session mode is the current interactive-session baseline.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 将 BabyBot 的交互式 `@session` 路径从“每条消息重新 `claude --resume`”升级为“每个会话一个常驻本地 Claude 进程”。

@@ -1,5 +1,7 @@
 # Babybot Harness Upgrade Implementation Plan
 
+**Status:** Completed. The harness-led runtime, contracts, resumable jobs, and unified feedback/state-machine docs landed; later plans refined specific subareas.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Upgrade `babybot` from prompt-led orchestration to a harness-led runtime with explicit task contracts, resumable jobs, unified event flow, and machine-readable feedback.

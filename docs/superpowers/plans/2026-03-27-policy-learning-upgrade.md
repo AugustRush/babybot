@@ -1,5 +1,7 @@
 # Policy Learning Upgrade Implementation Plan
 
+**Status:** Completed. The richer contextual policy stats and selector upgrade landed, then routing/reflection work continued in `/Users/shike/Desktop/babybot/docs/superpowers/plans/2026-03-30-lightweight-routing-learning.md`.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Upgrade BabyBot's orchestration policy layer from simple global reward sorting to a conservative contextual policy that uses richer risk stats, human feedback shaping, bucketed action history, and lower-confidence action selection.

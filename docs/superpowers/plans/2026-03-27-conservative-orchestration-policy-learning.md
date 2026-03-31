@@ -1,5 +1,7 @@
 # Conservative Orchestration Policy Learning Implementation Plan
 
+**Status:** Completed. The conservative policy-learning foundation landed and was later extended by `/Users/shike/Desktop/babybot/docs/superpowers/plans/2026-03-27-policy-learning-upgrade.md` and `/Users/shike/Desktop/babybot/docs/superpowers/plans/2026-03-30-lightweight-routing-learning.md`.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make BabyBot improve task decomposition and scheduling over time by learning conservative orchestration policies from execution outcomes and explicit user feedback.
