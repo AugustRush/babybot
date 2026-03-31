@@ -1353,6 +1353,29 @@ def test_build_worker_prompt_guides_skill_edits_to_skill_md_and_verification() -
     assert "修改完成后必须 reload_skill" in prompt
 
 
+def test_build_worker_prompt_includes_workspace_skill_paths_for_edits() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "helper-skill": LoadedSkill(
+            name="helper-skill",
+            description="A helper skill",
+            directory="/tmp/workspace/skills/helper-skill",
+            prompt="summary",
+            active=True,
+            source="auto",
+        ),
+    }
+    prompt = manager._build_worker_sys_prompt(
+        agent_name="Worker",
+        task_description="修改 helper-skill 技能内容并重新加载",
+        tools_text="_workspace_view_text_file, _workspace_write_text_file, reload_skill",
+        selected_skill_packs=[],
+    )
+
+    assert "/tmp/workspace/skills/helper-skill/SKILL.md" in prompt
+    assert "helper-skill" in prompt
+
+
 def test_select_skill_packs_uses_summary_prompt_by_default() -> None:
     manager = object.__new__(ResourceManager)
     manager.skills = {
@@ -2374,6 +2397,60 @@ def test_reload_skill_invalid_path_returns_error() -> None:
     manager.config = Config()
     result = manager.reload_skill("/nonexistent/path")
     assert "Not a valid skill directory" in result
+
+
+def test_reload_skill_accepts_workspace_relative_directory(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "workspace" / "skills" / "my-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: A test skill\n---\n\n# My Skill\n",
+        encoding="utf-8",
+    )
+
+    manager = object.__new__(ResourceManager)
+    manager.config = Config(config_file=str(tmp_path / "config.json"))
+    manager.config.workspace_dir = tmp_path / "workspace"
+    manager.registry = __import__(
+        "babybot.agent_kernel.tools", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager.mcp_clients = {}
+    manager.mcp_server_groups = {}
+    manager.channel_tools = {}
+    manager._python_probe_cache = {}
+
+    result = manager.reload_skill("skills/my-skill")
+
+    assert "reloaded successfully" in result
+    assert "my-skill" in manager.skills
+
+
+def test_reload_skill_accepts_skill_markdown_path(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "markdown-skill"
+    skill_dir.mkdir()
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: markdown-skill\ndescription: Markdown target\n---\n\n# Skill\n",
+        encoding="utf-8",
+    )
+
+    manager = object.__new__(ResourceManager)
+    manager.config = Config()
+    manager.registry = __import__(
+        "babybot.agent_kernel.tools", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager.mcp_clients = {}
+    manager.mcp_server_groups = {}
+    manager.channel_tools = {}
+    manager._python_probe_cache = {}
+
+    result = manager.reload_skill(str(skill_md))
+
+    assert "reloaded successfully" in result
+    assert "markdown-skill" in manager.skills
 
 
 def test_reload_skill_removes_old_tools_on_update(tmp_path: Path) -> None:

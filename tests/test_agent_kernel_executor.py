@@ -480,6 +480,68 @@ def test_single_agent_executor_persists_tool_call_and_result_to_tape() -> None:
     assert tool_result.payload["ok"] is True
 
 
+def test_single_agent_executor_injects_pending_runtime_hints_once() -> None:
+    class HintTool(Tool):
+        @property
+        def name(self) -> str:
+            return "reload_skill"
+
+        @property
+        def description(self) -> str:
+            return "Reload a skill."
+
+        @property
+        def schema(self) -> dict:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+            del args
+            context.state.setdefault("pending_runtime_hints", []).append(
+                "技能 helper-skill 已热重载。SKILL.md=/tmp/workspace/skills/helper-skill/SKILL.md"
+            )
+            return ToolResult(ok=True, content="reloaded")
+
+    class HintModel(ModelProvider):
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(call_id="c1", name="reload_skill", arguments={}),
+                    )
+                )
+            return ModelResponse(text="done")
+
+    registry = ToolRegistry()
+    registry.register(HintTool(), group="basic")
+    model = HintModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s1")
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="reload and continue"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    second_request = model.requests[1]
+    runtime_hints = [
+        msg.content
+        for msg in second_request.messages
+        if msg.role == "system" and "技能 helper-skill 已热重载" in msg.content
+    ]
+    assert len(runtime_hints) == 1
+    assert context.state.get("pending_runtime_hints") == []
+
+
 def test_single_agent_executor_batches_tape_store_writes_per_step() -> None:
     class RecordingTapeStore:
         def __init__(self) -> None:

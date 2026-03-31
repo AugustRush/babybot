@@ -741,6 +741,54 @@ class ResourceManager:
     def _upsert_skill(self, skill: LoadedSkill) -> None:
         self.skills[skill.name.strip().lower()] = skill
 
+    def _resolve_skill_directory_input(self, skill_path: str) -> Path:
+        raw = (skill_path or "").strip()
+        if not raw:
+            return Path(raw).expanduser().resolve()
+
+        normalized = raw.lower()
+        for skill in getattr(self, "skills", {}).values():
+            if normalized in {
+                skill.name.strip().lower(),
+                self._skill_resource_id(skill).strip().lower(),
+            }:
+                return Path(skill.directory).expanduser().resolve()
+
+        candidates: list[Path] = []
+        raw_path = Path(raw).expanduser()
+        if raw_path.is_absolute():
+            candidates.append(raw_path)
+        else:
+            candidates.append(Path(self.config.resolve_workspace_path(raw)))
+            candidates.append((self.config.workspace_skills_dir / raw_path).expanduser())
+            candidates.append((self.config.builtin_skills_dir / raw_path).expanduser())
+            candidates.append(raw_path)
+
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved.is_file() and resolved.name == "SKILL.md":
+                return resolved.parent
+            if resolved.is_dir() and (resolved / "SKILL.md").exists():
+                return resolved
+
+        fallback = candidates[0] if candidates else raw_path
+        resolved = fallback.resolve()
+        if resolved.name == "SKILL.md":
+            return resolved.parent
+        return resolved
+
+    def _record_runtime_hint(self, message: str) -> None:
+        text = (message or "").strip()
+        if not text:
+            return
+        ctx = self._get_current_tool_context_var().get()
+        state = getattr(ctx, "state", None)
+        if not isinstance(state, dict):
+            return
+        hints = state.setdefault("pending_runtime_hints", [])
+        if isinstance(hints, list):
+            hints.append(text)
+
     def reload_skill(self, skill_path: str) -> str:
         """Re-discover and register a single skill from *skill_path*.
 
@@ -748,7 +796,7 @@ class ResourceManager:
         without restarting the process.  If the skill was previously loaded
         its tools are removed first.
         """
-        skill_dir = Path(skill_path).expanduser().resolve()
+        skill_dir = self._resolve_skill_directory_input(skill_path)
         if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
             return f"Not a valid skill directory: {skill_dir}"
 
@@ -806,6 +854,14 @@ class ResourceManager:
                 tools=tool_names,
                 runtime=runtime,
             )
+        )
+        skill_md = str((skill_dir / "SKILL.md").resolve())
+        self._record_runtime_hint(
+            "技能已热重载："
+            f"{name}\n"
+            f"skill_dir={skill_dir}\n"
+            f"SKILL.md={skill_md}\n"
+            "当前运行中的 agent 不会自动重建技能快照或扩展 lease。"
         )
         logger.info("Hot-reloaded skill %s with %d tools", name, len(tool_names))
         parts = [f"Skill '{name}' reloaded successfully."]

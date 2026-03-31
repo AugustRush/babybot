@@ -60,6 +60,33 @@ class SingleAgentExecutor:
             return output[:keep_budget] + note
         return output[:head] + note + output[-tail:]
 
+    @staticmethod
+    def _consume_runtime_hint_messages(state: dict[str, Any]) -> tuple[ModelMessage, ...]:
+        if not isinstance(state, dict):
+            return ()
+        raw_hints = state.pop("pending_runtime_hints", None)
+        if not raw_hints:
+            state["pending_runtime_hints"] = []
+            return ()
+        messages: list[ModelMessage] = []
+        for item in raw_hints:
+            text = str(item).strip()
+            if not text:
+                continue
+            messages.append(
+                ModelMessage(
+                    role="system",
+                    content=(
+                        "Runtime update:\n"
+                        f"{text}\n"
+                        "Do not assume your earlier skill snapshot is still current. "
+                        "If you need to keep editing that skill, use the exact path above."
+                    ),
+                )
+            )
+        state["pending_runtime_hints"] = []
+        return tuple(messages)
+
     async def execute(self, task: TaskContract, context: ExecutionContext) -> TaskResult:
         skills = self._resolve_skills(task, context)
         base_lease = task.lease
@@ -149,6 +176,7 @@ class SingleAgentExecutor:
             )
 
             messages = loop_guard.compress_messages(messages)
+            runtime_hint_messages = self._consume_runtime_hint_messages(context.state)
             if blocked_tool_names:
                 step_tools = [
                     t for t in available_tools
@@ -158,7 +186,7 @@ class SingleAgentExecutor:
                 step_tools = available_tools
             response = await self.model.generate(
                 ModelRequest(
-                    messages=tuple(messages),
+                    messages=tuple([*messages, *runtime_hint_messages]),
                     tools=step_tools,
                     metadata={"task_id": task.task_id, "step": step},
                 ),

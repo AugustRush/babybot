@@ -216,7 +216,10 @@ class ResourceSkillRuntime:
                 lines.append(f"- ... 还有 {len(accessible) - max_items} 个技能")
                 break
             desc = skill.description.strip() or "无描述"
-            lines.append(f"- {skill.name}: {desc}")
+            skill_md = str((Path(skill.directory) / "SKILL.md").resolve())
+            lines.append(
+                f"- {skill.name}: {desc} [source={skill.source}, skill_md={skill_md}]"
+            )
         return "\n".join(lines)
 
     def format_skill_catalog(self, max_items: int = 20) -> str:
@@ -232,5 +235,8 @@ class ResourceSkillRuntime:
                 lines.append(f"- ... 还有 {len(skills) - max_items} 个技能")
                 break
             desc = skill.description.strip() or "无描述"
-            lines.append(f"- {skill.name}: {desc}")
+            skill_md = str((Path(skill.directory) / "SKILL.md").resolve())
+            lines.append(
+                f"- {skill.name}: {desc} [source={skill.source}, skill_md={skill_md}]"
+            )
         return "\n".join(lines)
