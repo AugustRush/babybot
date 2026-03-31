@@ -5,6 +5,7 @@ from pathlib import Path
 
 from babybot.agent_kernel import (
     ExecutionContext,
+    ExecutorPolicy,
     ModelProvider,
     ModelRequest,
     ModelResponse,
@@ -194,6 +195,49 @@ def test_single_agent_executor_blocks_repeated_identical_tool_calls() -> None:
 
     assert result.status == "failed"
     assert tool.calls == 3
+
+
+def test_single_agent_executor_fails_fast_after_consecutive_no_progress_turns() -> None:
+    class StuckModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            self.calls += 1
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=f"call-{self.calls}",
+                        name="add",
+                        arguments={"a": 1, "b": 2},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    tool = CountingAddTool()
+    registry.register(tool, group="math")
+    model = StuckModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="loop"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "failed"
+    assert "No progress" in result.error
+    assert tool.calls == 3
+    assert model.calls < 10
 
 
 def test_single_agent_executor_collects_usage_metadata() -> None:

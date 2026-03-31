@@ -25,6 +25,7 @@ class ExecutorPolicy:
 
     max_steps: int = 8
     max_continuations: int = 2
+    max_no_progress_turns: int = 3
     max_tool_result_chars: int = 12000
     loop_guard: LoopGuardConfig = field(default_factory=LoopGuardConfig)
 
@@ -109,6 +110,7 @@ class SingleAgentExecutor:
         max_model_tokens = int(context.state.get("max_model_tokens", 0) or 0)
         loop_guard = LoopGuard(self.policy.loop_guard)
         blocked_tool_names: set[str] = set()
+        no_progress_turns = 0
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
@@ -285,6 +287,40 @@ class SingleAgentExecutor:
                         content=err_output,
                         tool_call_id=tc.call_id,
                     )
+
+                if not valid_calls:
+                    no_progress_turns += 1
+                    if no_progress_turns >= max(1, int(self.policy.max_no_progress_turns)):
+                        last_issues = " | ".join(
+                            err_output.splitlines()[0][:200]
+                            for _, err_output in error_results[:3]
+                            if err_output
+                        )
+                        error = (
+                            f"No progress after {no_progress_turns} consecutive tool-only turns."
+                        )
+                        if last_issues:
+                            error += f" Last issues: {last_issues}"
+                        logger.warning(
+                            "Executor no-progress fail task=%s turns=%d issues=%s",
+                            task.task_id,
+                            no_progress_turns,
+                            last_issues,
+                        )
+                        return TaskResult(
+                            task_id=task.task_id,
+                            status="failed",
+                            error=error,
+                            metadata=self._build_usage_metadata(
+                                usage_totals,
+                                extra={
+                                    "no_progress_turns": no_progress_turns,
+                                    "blocked_tools": sorted(blocked_tool_names),
+                                },
+                            ),
+                        )
+                else:
+                    no_progress_turns = 0
 
                 # Phase 2: parallel execution of validated tool calls
                 if valid_calls:
