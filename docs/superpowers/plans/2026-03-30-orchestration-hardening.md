@@ -1,6 +1,6 @@
 # Orchestration Hardening Implementation Plan
 
-> **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Harden BabyBot's orchestration layer so contracts/plans are authoritative, final replies cannot race unfinished work, runtime feedback is projected consistently, and debate/feedback flows behave predictably.
 
@@ -18,10 +18,10 @@
 - Test: `tests/test_task_contract.py`
 - Test: `tests/test_execution_plan.py`
 
-- [ ] Add failing tests for richer contract/plan fields and non-debate workflow kind.
-- [ ] Implement contract defaults for orchestration tool allowlist and plan metadata.
-- [ ] Make `ExecutionPlan` emit `tool_workflow` for normal orchestrated work and carry allowed tools/agents.
-- [ ] Run focused contract/plan tests.
+- [x] Add failing tests for richer contract/plan fields and non-debate workflow kind.
+- [x] Implement contract defaults for orchestration tool allowlist and plan metadata.
+- [x] Make `ExecutionPlan` emit `tool_workflow` for normal orchestrated work and carry allowed tools/agents.
+- [x] Run focused contract/plan tests.
 
 ### Task 2: Guard premature final replies
 
@@ -29,9 +29,9 @@
 - Modify: `babybot/agent_kernel/dynamic_orchestrator.py`
 - Test: `tests/test_dynamic_orchestrator.py`
 
-- [ ] Add failing tests showing `reply_to_user` is rejected when child tasks are still running or mixed with other tool calls.
-- [ ] Enforce final-reply exclusivity and pending-task checks in the orchestration loop.
-- [ ] Run focused dynamic-orchestrator tests.
+- [x] Add failing tests showing `reply_to_user` is rejected when child tasks are still running or mixed with other tool calls.
+- [x] Enforce final-reply exclusivity and pending-task checks in the orchestration loop.
+- [x] Run focused dynamic-orchestrator tests.
 
 ### Task 3: Centralize runtime event projection
 
@@ -40,9 +40,9 @@
 - Modify: `babybot/orchestrator.py`
 - Test: `tests/test_runtime_jobs.py`
 
-- [ ] Add failing tests for runtime-event to job-state projection.
-- [ ] Move projection logic into runtime job helpers and update orchestrator to use it.
-- [ ] Run focused runtime-jobs tests.
+- [x] Add failing tests for runtime-event to job-state projection.
+- [x] Move projection logic into runtime job helpers and update orchestrator to use it.
+- [x] Run focused runtime-jobs tests.
 
 ### Task 4: Improve loop control and feedback flow
 
@@ -53,10 +53,10 @@
 - Test: `tests/test_loop_guard.py`
 - Test: `tests/test_dynamic_orchestrator.py`
 
-- [ ] Add failing tests for non-destructive identical-call blocking and team runtime feedback events.
-- [ ] Make identical-call guard advisory before hard-disabling tools.
-- [ ] Emit normalized runtime feedback for debate/team progress.
-- [ ] Run focused loop-guard/orchestrator tests.
+- [x] Add failing tests for non-destructive identical-call blocking and team runtime feedback events.
+- [x] Make identical-call guard advisory before hard-disabling tools.
+- [x] Emit normalized runtime feedback for debate/team progress.
+- [x] Run focused loop-guard/orchestrator tests.
 
 ### Task 5: Update docs
 
@@ -65,7 +65,7 @@
 - Modify: `docs/agent-runtime/interaction-contract.md`
 - Modify: `docs/agent-runtime/feedback-state-machine.md`
 
-- [ ] Update README and runtime docs to match the hardened orchestration behavior.
+- [x] Update README and runtime docs to match the hardened orchestration behavior.
 
 ### Task 6: Verify end-to-end
 
@@ -77,5 +77,5 @@
 - Verify: `tests/test_runtime_jobs.py`
 - Verify: broader `pytest` / `ruff` as needed
 
-- [ ] Run focused verification.
-- [ ] Run broader regression suite.
+- [x] Run focused verification.
+- [x] Run broader regression suite.

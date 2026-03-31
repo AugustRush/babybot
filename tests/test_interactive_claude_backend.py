@@ -239,3 +239,60 @@ def test_claude_backend_send_emits_interactive_output_events(tmp_path: Path) -> 
         "好",
     ]
     assert events[-1].text == "你好"
+
+
+def test_claude_backend_send_emits_session_and_tool_status_events(
+    tmp_path: Path,
+) -> None:
+    from babybot.interactive_sessions.backends.claude import ClaudeInteractiveBackend
+
+    backend = ClaudeInteractiveBackend(
+        claude_bin="claude",
+        workspace_root=tmp_path,
+    )
+
+    async def _run() -> list[InteractiveOutputEvent]:
+        fake_process = _FakeProcess()
+        fake_process.stdout.push_json(
+            {
+                "type": "system",
+                "session_id": "sess-real",
+            }
+        )
+        fake_process.stdout.push_json(
+            {
+                "type": "tool_use",
+                "tool_name": "bash",
+                "status": "running",
+            }
+        )
+        fake_process.stdout.push_json(
+            {"type": "result", "subtype": "success", "result": "ok"}
+        )
+        events: list[InteractiveOutputEvent] = []
+
+        async def _callback(event: InteractiveOutputEvent) -> None:
+            events.append(event)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_process):
+            session = await backend.start(chat_key="feishu:c1")
+            await backend.send(
+                session,
+                "/status",
+                output_event_callback=_callback,
+            )
+        return events
+
+    events = asyncio.run(_run())
+
+    assert any(
+        event.event == "session_status"
+        and event.metadata.get("session_id") == "sess-real"
+        for event in events
+    )
+    assert any(
+        event.event == "tool_status"
+        and event.metadata.get("tool_name") == "bash"
+        and event.metadata.get("status") == "running"
+        for event in events
+    )

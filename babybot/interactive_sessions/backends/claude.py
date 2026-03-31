@@ -225,7 +225,27 @@ class ClaudeInteractiveBackend:
             maybe_session_id = str(payload.get("session_id", "") or "").strip()
             if maybe_session_id:
                 handle.session_id = maybe_session_id
+                await self._emit_event(
+                    output_event_callback,
+                    InteractiveOutputEvent(
+                        event="session_status",
+                        metadata={
+                            "session_id": handle.session_id,
+                            "mode": handle.mode,
+                            "pid": handle.process_pid,
+                        },
+                    ),
+                )
             event_type = str(payload.get("type", "") or "").strip().lower()
+            tool_status = self._extract_tool_status(payload)
+            if tool_status["tool_name"] or event_type in {"tool_use", "tool_result"}:
+                await self._emit_event(
+                    output_event_callback,
+                    InteractiveOutputEvent(
+                        event="tool_status",
+                        metadata=tool_status,
+                    ),
+                )
             if event_type == "result":
                 subtype = str(payload.get("subtype", "") or "").strip().lower()
                 if subtype in {"error", "failed"}:
@@ -335,6 +355,34 @@ class ClaudeInteractiveBackend:
                 if parts:
                     return "".join(parts)
         return ""
+
+    @staticmethod
+    def _extract_tool_status(payload: dict[str, Any]) -> dict[str, str]:
+        tool_name = str(
+            payload.get("tool_name", "") or payload.get("name", "") or ""
+        ).strip()
+        status = str(
+            payload.get("status", "") or payload.get("subtype", "") or ""
+        ).strip()
+        message = payload.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get("type", "") or "").strip().lower()
+                    if item_type not in {"tool_use", "tool_result"}:
+                        continue
+                    tool_name = tool_name or str(
+                        item.get("name", "") or item.get("tool_name", "") or ""
+                    ).strip()
+                    status = status or item_type
+                    break
+        return {
+            "tool_name": tool_name,
+            "status": status,
+        }
 
     async def _drain_stderr(self, handle: ClaudeSessionHandle) -> None:
         stderr = handle.process.stderr
