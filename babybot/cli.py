@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 from .config import Config
 from .orchestrator import OrchestratorAgent
@@ -135,16 +136,61 @@ def run():
 
             try:
                 print("\n正在处理...")
+                interactive_stream_seen = False
+                interactive_stream_final_text = ""
+                interactive_stream_printed = False
+
+                async def _interactive_output_callback(event: object) -> None:
+                    nonlocal interactive_stream_seen
+                    nonlocal interactive_stream_final_text
+                    nonlocal interactive_stream_printed
+                    event_name = str(getattr(event, "event", "") or "")
+                    text = str(getattr(event, "text", "") or "")
+                    delta = str(getattr(event, "delta", "") or "")
+                    if event_name == "message_start":
+                        interactive_stream_seen = True
+                        return
+                    if event_name == "message_delta" and delta:
+                        interactive_stream_seen = True
+                        interactive_stream_printed = True
+                        interactive_stream_final_text = text or interactive_stream_final_text
+                        print(delta, end="", flush=True)
+                        return
+                    if event_name == "message_complete":
+                        interactive_stream_seen = True
+                        interactive_stream_final_text = text or interactive_stream_final_text
+                        if interactive_stream_printed:
+                            print()
+
+                process_kwargs = {
+                    "chat_key": _CLI_CHAT_KEY,
+                }
+                try:
+                    supports_interactive_output = (
+                        "interactive_output_callback"
+                        in inspect.signature(orchestrator.process_task).parameters
+                    )
+                except (TypeError, ValueError):
+                    supports_interactive_output = False
+                if supports_interactive_output:
+                    process_kwargs["interactive_output_callback"] = _interactive_output_callback
                 response = loop.run_until_complete(
                     asyncio.wait_for(
                         orchestrator.process_task(
                             user_input,
-                            chat_key=_CLI_CHAT_KEY,
+                            **process_kwargs,
                         ),
                         timeout=float(config.system.timeout),
                     )
                 )
-                print(f"\n结果:\n{response.text}\n")
+                should_echo_final = not (
+                    interactive_stream_seen
+                    and interactive_stream_printed
+                    and response.text.strip()
+                    and response.text.strip() == interactive_stream_final_text.strip()
+                )
+                if should_echo_final:
+                    print(f"\n结果:\n{response.text}\n")
                 if response.media_paths:
                     print(f"生成的文件: {', '.join(response.media_paths)}\n")
             except asyncio.TimeoutError:

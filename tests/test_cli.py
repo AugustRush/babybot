@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import babybot.cli as cli_module
+from babybot.interactive_sessions.types import InteractiveOutputEvent
 
 
 class _Response:
@@ -88,3 +89,35 @@ def test_cli_status_prints_interactive_session_summary(
     assert "cli:local" in output
     assert "resident" in output
     assert "4321" in output
+
+
+def test_cli_streams_interactive_output_without_duplicate_final_text(
+    monkeypatch,
+    capsys,
+) -> None:
+    class _StreamingOrchestrator(_Orchestrator):
+        async def process_task(self, user_input: str, chat_key: str = "", **kwargs: object) -> _Response:
+            self.calls.append((user_input, chat_key))
+            callback = kwargs.get("interactive_output_callback")
+            if callback is not None:
+                await callback(InteractiveOutputEvent(event="message_start", text="", delta=""))
+                await callback(InteractiveOutputEvent(event="message_delta", text="你", delta="你"))
+                await callback(InteractiveOutputEvent(event="message_delta", text="你好", delta="好"))
+                await callback(InteractiveOutputEvent(event="message_complete", text="你好", delta=""))
+            return _Response(text="你好")
+
+    orchestrator = _StreamingOrchestrator()
+    inputs = iter(["hello", "quit"])
+
+    monkeypatch.setattr(
+        cli_module,
+        "_init_orchestrator",
+        lambda gateway_mode=False: (_fake_config(), orchestrator),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+
+    cli_module.run()
+
+    output = capsys.readouterr().out
+    assert "你好" in output
+    assert output.count("你好") == 1

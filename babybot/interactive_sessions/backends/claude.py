@@ -9,9 +9,15 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+import inspect
 from typing import Any
 
-from ..types import InteractiveReply, InteractiveRequest
+from ..types import (
+    InteractiveOutputCallback,
+    InteractiveOutputEvent,
+    InteractiveReply,
+    InteractiveRequest,
+)
 
 
 @dataclass
@@ -70,7 +76,11 @@ class ClaudeInteractiveBackend:
         return handle
 
     async def send(
-        self, handle: ClaudeSessionHandle, message: InteractiveRequest | str
+        self,
+        handle: ClaudeSessionHandle,
+        message: InteractiveRequest | str,
+        *,
+        output_event_callback: InteractiveOutputCallback | None = None,
     ) -> InteractiveReply:
         if handle.is_stopped:
             raise RuntimeError("Claude 交互会话已关闭，请重新启动。")
@@ -97,7 +107,10 @@ class ClaudeInteractiveBackend:
             await stdin.drain()
             try:
                 text = await asyncio.wait_for(
-                    self._read_turn_output(handle),
+                    self._read_turn_output(
+                        handle,
+                        output_event_callback=output_event_callback,
+                    ),
                     timeout=self._default_timeout_s,
                 )
             except asyncio.TimeoutError as exc:
@@ -173,11 +186,28 @@ class ClaudeInteractiveBackend:
             session_id,
         ]
 
-    async def _read_turn_output(self, handle: ClaudeSessionHandle) -> str:
+    async def _emit_event(
+        self,
+        callback: InteractiveOutputCallback | None,
+        event: InteractiveOutputEvent,
+    ) -> None:
+        if callback is None:
+            return
+        maybe = callback(event)
+        if inspect.isawaitable(maybe):
+            await maybe
+
+    async def _read_turn_output(
+        self,
+        handle: ClaudeSessionHandle,
+        *,
+        output_event_callback: InteractiveOutputCallback | None = None,
+    ) -> str:
         stdout = handle.process.stdout
         if stdout is None:
             raise RuntimeError("Claude 交互会话缺少 stdout，无法读取输出。")
         latest_text = ""
+        started = False
         while True:
             raw_line = await stdout.readline()
             if not raw_line:
@@ -201,14 +231,88 @@ class ClaudeInteractiveBackend:
                 if subtype in {"error", "failed"}:
                     detail = self._extract_result_text(payload) or payload.get("error") or "Claude 交互执行失败"
                     handle.last_error = str(detail)
+                    await self._emit_event(
+                        output_event_callback,
+                        InteractiveOutputEvent(
+                            event="error",
+                            text="",
+                            delta="",
+                            metadata={"error": str(detail)},
+                        ),
+                    )
                     raise RuntimeError(str(detail))
-                return (self._extract_result_text(payload) or latest_text).strip()
+                final_text = (self._extract_result_text(payload) or latest_text).strip()
+                if final_text:
+                    if not started:
+                        started = True
+                        await self._emit_event(
+                            output_event_callback,
+                            InteractiveOutputEvent(
+                                event="message_start",
+                                metadata={"session_id": handle.session_id},
+                            ),
+                        )
+                    if final_text != latest_text:
+                        delta = (
+                            final_text[len(latest_text):]
+                            if latest_text and final_text.startswith(latest_text)
+                            else final_text
+                        )
+                        await self._emit_event(
+                            output_event_callback,
+                            InteractiveOutputEvent(
+                                event="message_delta",
+                                text=final_text,
+                                delta=delta,
+                                metadata={"session_id": handle.session_id},
+                            ),
+                        )
+                    await self._emit_event(
+                        output_event_callback,
+                        InteractiveOutputEvent(
+                            event="message_complete",
+                            text=final_text,
+                            metadata={"session_id": handle.session_id},
+                        ),
+                    )
+                return final_text
             if event_type == "error":
                 detail = str(payload.get("error", "") or payload.get("message", "") or "Claude 交互执行失败").strip()
                 handle.last_error = detail
+                await self._emit_event(
+                    output_event_callback,
+                    InteractiveOutputEvent(
+                        event="error",
+                        metadata={"error": detail},
+                    ),
+                )
                 raise RuntimeError(detail)
             extracted = self._extract_result_text(payload)
             if extracted:
+                if not started:
+                    started = True
+                    await self._emit_event(
+                        output_event_callback,
+                        InteractiveOutputEvent(
+                            event="message_start",
+                            metadata={"session_id": handle.session_id},
+                        ),
+                    )
+                delta = (
+                    extracted[len(latest_text):]
+                    if latest_text and extracted.startswith(latest_text)
+                    else extracted
+                )
+                if delta:
+                    await self._emit_event(
+                        output_event_callback,
+                        InteractiveOutputEvent(
+                            event="message_delta",
+                            text=extracted,
+                            delta=delta,
+                            metadata={"session_id": handle.session_id},
+                        ),
+                    )
                 latest_text = extracted
 
     @staticmethod

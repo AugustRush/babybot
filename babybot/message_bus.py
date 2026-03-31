@@ -98,8 +98,10 @@ class MessageBus:
         self._running = False
         self._accepting = False
         # Cache inspect.signature results to avoid per-message overhead.
+        self._process_task_parameters: set[str] | None = None
         self._supports_stream_callback: bool | None = None
         self._supports_runtime_event_callback: bool | None = None
+        self._supports_interactive_output_callback: bool | None = None
         self._supports_intermediate_message: bool | None = None
 
     def _get_chat_sem(self, key: str) -> asyncio.Semaphore:
@@ -172,6 +174,16 @@ class MessageBus:
         return render_runtime_feedback_event(
             normalize_runtime_feedback_event(event_payload)
         )
+
+    def _ensure_process_task_signature_cached(self) -> None:
+        if self._process_task_parameters is not None:
+            return
+        try:
+            self._process_task_parameters = set(
+                inspect.signature(self._orchestrator.process_task).parameters
+            )
+        except (TypeError, ValueError):
+            self._process_task_parameters = set()
 
     async def start(self) -> None:
         """Start the consumer loop."""
@@ -325,6 +337,8 @@ class MessageBus:
         )
         stream_message_id: str | None = None
         stream_last_patched = ""
+        interactive_last_sent_text = ""
+        interactive_sent_partial = False
         stream_lock = asyncio.Lock()
         stream_detached = False
         stream_cfg = getattr(channel, "config", None)
@@ -437,8 +451,16 @@ class MessageBus:
                 return
             last_runtime_progress_key = progress_key
             last_runtime_progress_text_by_scope[progress_scope] = progress_text
-            if normalized_event.state in {"running", "completed", "failed"}:
+            if (
+                normalized_event.stage != "interactive_session"
+                and normalized_event.state in {"running", "completed", "failed"}
+            ):
                 stream_detached = True
+            if (
+                normalized_event.stage == "interactive_session"
+                and msg.channel != "feishu"
+            ):
+                return
             try:
                 await channel.send_response(
                     msg.chat_id,
@@ -456,37 +478,81 @@ class MessageBus:
                     exc_info=True,
                 )
 
+        async def _interactive_output_callback(event: Any) -> None:
+            nonlocal interactive_last_sent_text, interactive_sent_partial
+            if dataclasses.is_dataclass(event):
+                payload = dataclasses.asdict(event)
+            elif isinstance(event, dict):
+                payload = dict(event)
+            else:
+                payload = {
+                    "event": getattr(event, "event", ""),
+                    "text": getattr(event, "text", ""),
+                    "delta": getattr(event, "delta", ""),
+                }
+            event_name = str(payload.get("event", "") or "").strip().lower()
+            text = str(payload.get("text", "") or "").strip()
+            if not text or channel is None:
+                return
+            if msg.channel == "feishu" and stream_enabled:
+                await _stream_callback(text)
+                return
+            should_send = False
+            if event_name == "message_delta" and not interactive_sent_partial:
+                should_send = True
+                interactive_sent_partial = True
+            elif event_name == "message_complete":
+                should_send = True
+            if not should_send or text == interactive_last_sent_text:
+                return
+            try:
+                await channel.send_response(
+                    msg.chat_id,
+                    TaskResponse(text=text),
+                    sender_id=msg.sender_id,
+                    metadata=msg.metadata,
+                )
+                interactive_last_sent_text = text
+            except Exception:
+                logger.warning(
+                    "Failed to send interactive output channel=%s chat_id=%s event=%s",
+                    msg.channel,
+                    msg.chat_id,
+                    event_name,
+                    exc_info=True,
+                )
+
         if stream_enabled:
             if self._supports_stream_callback is None:
-                try:
-                    self._supports_stream_callback = (
-                        "stream_callback"
-                        in inspect.signature(self._orchestrator.process_task).parameters
-                    )
-                except (TypeError, ValueError):
-                    self._supports_stream_callback = False
+                self._ensure_process_task_signature_cached()
+                self._supports_stream_callback = (
+                    "stream_callback" in (self._process_task_parameters or set())
+                )
             if self._supports_stream_callback:
                 _stream_callback.reset = _reset_stream  # type: ignore[attr-defined]
                 process_kwargs["stream_callback"] = _stream_callback
         if self._supports_runtime_event_callback is None:
-            try:
-                self._supports_runtime_event_callback = (
-                    "runtime_event_callback"
-                    in inspect.signature(self._orchestrator.process_task).parameters
-                )
-            except (TypeError, ValueError):
-                self._supports_runtime_event_callback = False
+            self._ensure_process_task_signature_cached()
+            self._supports_runtime_event_callback = (
+                "runtime_event_callback" in (self._process_task_parameters or set())
+            )
         if self._supports_runtime_event_callback:
             process_kwargs["runtime_event_callback"] = _runtime_event_callback
+        if self._supports_interactive_output_callback is None:
+            self._ensure_process_task_signature_cached()
+            self._supports_interactive_output_callback = (
+                "interactive_output_callback"
+                in (self._process_task_parameters or set())
+            )
+        if self._supports_interactive_output_callback:
+            process_kwargs["interactive_output_callback"] = _interactive_output_callback
         if channel is not None:
             if self._supports_intermediate_message is None:
-                try:
-                    self._supports_intermediate_message = (
-                        "send_intermediate_message"
-                        in inspect.signature(self._orchestrator.process_task).parameters
-                    )
-                except (TypeError, ValueError):
-                    self._supports_intermediate_message = False
+                self._ensure_process_task_signature_cached()
+                self._supports_intermediate_message = (
+                    "send_intermediate_message"
+                    in (self._process_task_parameters or set())
+                )
             if self._supports_intermediate_message:
                 process_kwargs["send_intermediate_message"] = _send_intermediate_message
         try:
@@ -542,12 +608,20 @@ class MessageBus:
                         metadata=msg.metadata,
                     )
                 elif not streamed or stream_detached:
-                    await channel.send_response(
-                        msg.chat_id,
-                        response,
-                        sender_id=msg.sender_id,
-                        metadata=msg.metadata,
-                    )
+                    final_text = response.text.strip()
+                    outbound_response = response
+                    if final_text and final_text == interactive_last_sent_text:
+                        outbound_response = TaskResponse(
+                            text="",
+                            media_paths=list(response.media_paths or []),
+                        )
+                    if outbound_response.text or outbound_response.media_paths:
+                        await channel.send_response(
+                            msg.chat_id,
+                            outbound_response,
+                            sender_id=msg.sender_id,
+                            metadata=msg.metadata,
+                        )
             except Exception:
                 logger.exception("Error sending response on channel '%s'", msg.channel)
 

@@ -2,6 +2,8 @@
 
 通道层只渲染规范化后的 `RuntimeFeedbackEvent`，不直接解释业务文案。
 
+`RuntimeFeedbackEvent` 只负责阶段状态，不承载 interactive session 正文 token / delta。交互正文必须走独立的 interactive 输出事件流，由 CLI / Feishu / Weixin 按各自能力渲染。
+
 权威状态：
 
 - `queued`
@@ -38,3 +40,4 @@
 2. `failed` 即使没有 `error` 文本，也必须按失败渲染
 3. 最终回复与中间进度是两类不同输出，不能共用字符串比较逻辑
 4. 团队讨论/辩论的阶段反馈也必须先规范化为 `RuntimeFeedbackEvent`，不能绕过状态机直接拼渠道文案
+5. `interactive_session` stage 可以与独立正文流并存：例如飞书阶段反馈继续发 `post`，正文流继续 patch interactive 卡片；两者不能互相覆盖

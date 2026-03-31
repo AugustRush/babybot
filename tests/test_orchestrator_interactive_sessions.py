@@ -6,6 +6,7 @@ import pytest
 
 from babybot.orchestrator import OrchestratorAgent
 from babybot.interactive_sessions.types import (
+    InteractiveOutputEvent,
     InteractiveRequest,
     InteractiveReply,
     InteractiveSession,
@@ -37,8 +38,14 @@ class FakeSessionManager:
             handle={},
         )
 
-    async def send(self, chat_key: str, message: str | InteractiveRequest) -> InteractiveReply:
+    async def send(
+        self,
+        chat_key: str,
+        message: str | InteractiveRequest,
+        output_event_callback=None,
+    ) -> InteractiveReply:
         del chat_key
+        del output_event_callback
         self.send_calls += 1
         if isinstance(message, InteractiveRequest):
             self.last_request = message
@@ -218,3 +225,52 @@ def test_reset_stops_active_sessions():
     agent.reset()
 
     assert agent._interactive_sessions.stop_all_calls == 1
+
+
+def test_process_task_forwards_interactive_output_events_separately() -> None:
+    agent = make_agent_with_session_manager(active_session=True)
+    runtime_events: list[dict[str, object]] = []
+    interactive_events: list[InteractiveOutputEvent] = []
+
+    async def _run() -> tuple[object, list[dict[str, object]], list[InteractiveOutputEvent]]:
+        async def _runtime_callback(event: object) -> None:
+            if isinstance(event, dict):
+                runtime_events.append(event)
+
+        async def _interactive_callback(event: InteractiveOutputEvent) -> None:
+            interactive_events.append(event)
+
+        original_send = agent._interactive_sessions.send
+
+        async def _send(chat_key: str, message: str | InteractiveRequest, output_event_callback=None):
+            if output_event_callback is not None:
+                await output_event_callback(
+                    InteractiveOutputEvent(event="message_start", text="", delta="")
+                )
+                await output_event_callback(
+                    InteractiveOutputEvent(event="message_delta", text="你", delta="你")
+                )
+                await output_event_callback(
+                    InteractiveOutputEvent(event="message_complete", text="你好", delta="")
+                )
+            return await original_send(chat_key, message)
+
+        agent._interactive_sessions.send = _send  # type: ignore[method-assign]
+
+        response = await agent.process_task(
+            "你好",
+            chat_key="feishu:c1",
+            runtime_event_callback=_runtime_callback,
+            interactive_output_callback=_interactive_callback,
+        )
+        return response, runtime_events, interactive_events
+
+    response, runtime_events, interactive_events = asyncio.run(_run())
+
+    assert response.text == "backend reply"
+    assert [event["event"] for event in runtime_events] == ["running", "completed"]
+    assert [event.event for event in interactive_events] == [
+        "message_start",
+        "message_delta",
+        "message_complete",
+    ]

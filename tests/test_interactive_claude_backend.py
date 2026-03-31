@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from babybot.interactive_sessions.types import InteractiveOutputEvent
 
 
 class _FakeReader:
@@ -163,3 +164,78 @@ def test_claude_backend_send_timeout_kills_process_and_raises_runtime_error(
 
     proc.kill.assert_awaited_once()
     proc.wait.assert_awaited_once()
+
+
+def test_interactive_output_event_exposes_minimal_streaming_fields() -> None:
+    event = InteractiveOutputEvent(
+        event="message_delta",
+        text="你好",
+        delta="好",
+        metadata={"turn_id": "turn-1"},
+    )
+
+    assert event.event == "message_delta"
+    assert event.text == "你好"
+    assert event.delta == "好"
+    assert event.metadata == {"turn_id": "turn-1"}
+
+
+def test_claude_backend_send_emits_interactive_output_events(tmp_path: Path) -> None:
+    from babybot.interactive_sessions.backends.claude import ClaudeInteractiveBackend
+
+    backend = ClaudeInteractiveBackend(
+        claude_bin="claude",
+        workspace_root=tmp_path,
+    )
+
+    async def _run() -> tuple[list[InteractiveOutputEvent], str]:
+        fake_process = _FakeProcess()
+        fake_process.stdout.push_json(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "你"}],
+                },
+            }
+        )
+        fake_process.stdout.push_json(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "你好"}],
+                },
+            }
+        )
+        fake_process.stdout.push_json(
+            {"type": "result", "subtype": "success", "result": "你好"}
+        )
+        events: list[InteractiveOutputEvent] = []
+
+        async def _callback(event: InteractiveOutputEvent) -> None:
+            events.append(event)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_process):
+            session = await backend.start(chat_key="feishu:c1")
+            reply = await backend.send(
+                session,
+                "/status",
+                output_event_callback=_callback,
+            )
+        return events, reply.text
+
+    events, text = asyncio.run(_run())
+
+    assert text == "你好"
+    assert [event.event for event in events] == [
+        "message_start",
+        "message_delta",
+        "message_delta",
+        "message_complete",
+    ]
+    assert [event.delta for event in events if event.event == "message_delta"] == [
+        "你",
+        "好",
+    ]
+    assert events[-1].text == "你好"

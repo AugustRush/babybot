@@ -8,6 +8,7 @@ from typing import Callable
 
 from .protocols import InteractiveBackend
 from .types import (
+    InteractiveOutputCallback,
     InteractiveReply,
     InteractiveRequest,
     InteractiveSession,
@@ -71,7 +72,11 @@ class InteractiveSessionManager:
             return session
 
     async def send(
-        self, chat_key: str, message: str | InteractiveRequest
+        self,
+        chat_key: str,
+        message: str | InteractiveRequest,
+        *,
+        output_event_callback: InteractiveOutputCallback | None = None,
     ) -> InteractiveReply:
         lock = self._locks[chat_key]
         async with lock:
@@ -93,7 +98,11 @@ class InteractiveSessionManager:
                 if isinstance(message, InteractiveRequest)
                 else InteractiveRequest(text=str(message or ""))
             )
-            reply = await backend.send(session.handle, request)
+            reply = await backend.send(
+                session.handle,
+                request,
+                output_event_callback=output_event_callback,
+            )
             session.last_active_at = float(self._time_fn())
             return reply
 

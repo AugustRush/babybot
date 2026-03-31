@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
+
+
+@dataclass(frozen=True)
+class InteractiveOutputEvent:
+    event: str
+    text: str = ""
+    delta: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -45,3 +53,9 @@ class InteractiveSessionStatus:
     process_pid: int | None = None
     last_error: str = ""
     backend_status: dict[str, Any] = field(default_factory=dict)
+
+
+InteractiveOutputCallback = Callable[
+    [InteractiveOutputEvent],
+    Awaitable[None] | None,
+]

@@ -17,6 +17,7 @@
 
 - `metadata.execution_constraints`：执行约束抽取后的归一化结果
 - `metadata.routing_decision`：轻量 Router 的结构化判定快照（可选）
+- interactive session 的正文增量输出不写入 `TaskContract` / `RuntimeFeedbackEvent`，而是作为独立 interactive 输出事件透传到 CLI / channel
 - Router 只允许在 `TaskContract` 冻结前覆写 `answer/debate` 路由与澄清倾向；冻结后下游运行时不得再次放宽
 
 当前观测补充：

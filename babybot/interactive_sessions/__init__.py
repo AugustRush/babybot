@@ -1,9 +1,17 @@
 from .manager import InteractiveSessionManager
 from .protocols import InteractiveBackend
-from .types import InteractiveReply, InteractiveSession, InteractiveSessionStatus
+from .types import (
+    InteractiveOutputCallback,
+    InteractiveOutputEvent,
+    InteractiveReply,
+    InteractiveSession,
+    InteractiveSessionStatus,
+)
 
 __all__ = [
     "InteractiveBackend",
+    "InteractiveOutputCallback",
+    "InteractiveOutputEvent",
     "InteractiveReply",
     "InteractiveSession",
     "InteractiveSessionManager",

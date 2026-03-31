@@ -146,6 +146,8 @@ uv run babybot
 - 当前 Claude 交互会话已经切到“常驻本地进程式交互”
 - `@session start claude` 会先创建一个按 `chat_key` 隔离的 Claude 会话上下文
 - Claude backend 会为每个会话启动一个常驻 `claude` 子进程，并通过 `stream-json` stdin/stdout 进行 turn 级通信
+- resident session 的正文输出现在走独立的 interactive 增量事件流，不再混进 `RuntimeFeedbackEvent`
+- 同一套 interactive 增量事件会被 CLI、飞书、微信复用：CLI 直接增量打印，飞书优先 patch 同一条 interactive 卡片，微信退化为轻量增量文本消息
 - `InteractiveSessionManager` 会在 `status()` / `send()` 前先清理过期会话；如果发送时发现已过期，会回退到默认 DAG 编排
 - `InteractiveSessionManager.cleanup()` 可被 runtime 维护入口复用，用于统一清理过期 session
 - 交互会话请求会保留 `media_paths`，因此图片/文件输入不会在 session 路径里丢失
@@ -156,7 +158,7 @@ uv run babybot
 
 1. 保持现有 `@session start/status/stop` 控制面不变，避免影响当前 CLI 与网关路由。
 2. 将 `InteractiveSessionManager` 继续作为按 `chat_key` 的会话注册表，不重写 MessageBus、Orchestrator 和渠道层。
-3. 继续补齐更细粒度的增量输出透传，让本地 CLI 和渠道都能复用同一 resident session 输出流。
+3. 继续在现有统一 interactive 事件流之上优化节流、错误恢复和更多 backend 兼容性，而不是再分叉新的流式协议。
 4. 将 BabyBot 自己的 session 标识与 Claude 内部 session resume 语义进一步解耦，避免状态展示误导用户。
 5. 评估在 resident session 基础上追加 `worktree` 隔离模式，而不是一开始就强推更重的会话隔离。
 6. 继续完善 backend reader/writer 生命周期、异常退出恢复和 reset/stop 清理，不把这些复杂度扩散到渠道层。

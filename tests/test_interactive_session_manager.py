@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from babybot.interactive_sessions.types import InteractiveReply
+from babybot.interactive_sessions.types import InteractiveOutputEvent, InteractiveReply
 
 
 class FakeBackend:
@@ -17,8 +17,17 @@ class FakeBackend:
         self.start_calls += 1
         return {"chat_key": chat_key, "backend": "claude", "ordinal": self.start_calls}
 
-    async def send(self, handle, message: str) -> InteractiveReply:
+    async def send(
+        self,
+        handle,
+        message: str,
+        output_event_callback=None,
+    ) -> InteractiveReply:
         self.send_calls += 1
+        if output_event_callback is not None:
+            await output_event_callback(
+                InteractiveOutputEvent(event="message_delta", text="partial", delta="partial")
+            )
         return InteractiveReply(text=f"{handle['chat_key']}:{message}")
 
     async def stop(self, handle, reason: str = "user_stop") -> None:
@@ -172,3 +181,31 @@ def test_manager_cleanup_prunes_all_expired_sessions():
 
     assert pruned == 2
     assert summary["active_count"] == 0
+
+
+def test_manager_send_forwards_interactive_output_callback():
+    from babybot.interactive_sessions.manager import InteractiveSessionManager
+
+    backend = FakeBackend()
+    manager = InteractiveSessionManager(
+        backends={"claude": backend},
+        max_age_seconds=7200,
+    )
+    async def _run() -> tuple[InteractiveReply, list[InteractiveOutputEvent]]:
+        await manager.start(chat_key="feishu:c1", backend_name="claude")
+        events: list[InteractiveOutputEvent] = []
+
+        async def _callback(event: InteractiveOutputEvent) -> None:
+            events.append(event)
+
+        reply = await manager.send(
+            "feishu:c1",
+            "hello",
+            output_event_callback=_callback,
+        )
+        return reply, events
+
+    reply, events = asyncio.run(_run())
+
+    assert "feishu:c1:InteractiveRequest(" in reply.text
+    assert [event.event for event in events] == ["message_delta"]

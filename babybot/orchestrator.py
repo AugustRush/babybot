@@ -30,7 +30,10 @@ from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
 from .interactive_sessions.backends import ClaudeInteractiveBackend
-from .interactive_sessions.types import InteractiveRequest
+from .interactive_sessions.types import (
+    InteractiveOutputCallback,
+    InteractiveRequest,
+)
 from .model_gateway import OpenAICompatibleGateway
 from .orchestration_policy import ConservativePolicySelector
 from .orchestration_policy_store import OrchestrationPolicyStore
@@ -1413,6 +1416,7 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
         stream_callback: StreamTextCallback | None = None,
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
+        interactive_output_callback: InteractiveOutputCallback | None = None,
         send_intermediate_message: Callable[[str], Awaitable[None]] | None = None,
         job_metadata_override: dict[str, Any] | None = None,
     ) -> TaskResponse:
@@ -1439,6 +1443,7 @@ class OrchestratorAgent:
                     media_paths=media_paths,
                     heartbeat=heartbeat,
                     runtime_event_callback=runtime_event_callback,
+                    interactive_output_callback=interactive_output_callback,
                 )
                 if reply is not None:
                     return reply
@@ -1905,6 +1910,7 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
         heartbeat: Heartbeat | None = None,
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
+        interactive_output_callback: InteractiveOutputCallback | None = None,
     ) -> TaskResponse | None:
         task_contract = build_task_contract(
             user_input=user_input,
@@ -1933,9 +1939,17 @@ class OrchestratorAgent:
         try:
             if heartbeat is not None:
                 async with heartbeat.keep_alive():
-                    reply = await self._interactive_sessions.send(chat_key, request)
+                    reply = await self._interactive_sessions.send(
+                        chat_key,
+                        request,
+                        output_event_callback=interactive_output_callback,
+                    )
             else:
-                reply = await self._interactive_sessions.send(chat_key, request)
+                reply = await self._interactive_sessions.send(
+                    chat_key,
+                    request,
+                    output_event_callback=interactive_output_callback,
+                )
         except RuntimeError:
             logger.warning(
                 "Interactive session send failed; falling back to DAG chat_key=%s",

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from babybot.channels.base import InboundMessage
 from babybot.agent_kernel import ChildTaskEvent
+from babybot.interactive_sessions.types import InteractiveOutputEvent
 from babybot.message_bus import MessageBus
 from babybot.orchestrator import TaskResponse
 
@@ -148,6 +149,56 @@ class _StreamingProgressEventOrchestrator:
         return TaskResponse(text="最终结果")
 
 
+class _InteractiveStreamingOrchestrator:
+    async def process_task(
+        self,
+        user_input: str,
+        chat_key: str = "",
+        heartbeat: Any = None,
+        media_paths: list[str] | None = None,
+        stream_callback: Any = None,
+        runtime_event_callback: Any = None,
+        interactive_output_callback: Any = None,
+    ) -> TaskResponse:
+        del user_input, chat_key, heartbeat, media_paths, stream_callback
+        if runtime_event_callback is not None:
+            await runtime_event_callback({
+                "flow_id": "interactive:flow-1",
+                "task_id": "interactive_session",
+                "event": "running",
+                "payload": {
+                    "stage": "interactive_session",
+                    "state": "running",
+                    "message": "交互会话处理中",
+                },
+            })
+        if interactive_output_callback is not None:
+            await interactive_output_callback(
+                InteractiveOutputEvent(event="message_start", text="", delta="")
+            )
+            await interactive_output_callback(
+                InteractiveOutputEvent(event="message_delta", text="你", delta="你")
+            )
+            await interactive_output_callback(
+                InteractiveOutputEvent(event="message_delta", text="你好", delta="好")
+            )
+            await interactive_output_callback(
+                InteractiveOutputEvent(event="message_complete", text="你好", delta="")
+            )
+        if runtime_event_callback is not None:
+            await runtime_event_callback({
+                "flow_id": "interactive:flow-1",
+                "task_id": "interactive_session",
+                "event": "completed",
+                "payload": {
+                    "stage": "interactive_session",
+                    "state": "completed",
+                    "message": "交互会话完成",
+                },
+            })
+        return TaskResponse(text="你好")
+
+
 class _FakeFeishuChannel:
     def __init__(self, stream_reply: bool) -> None:
         self.config = SimpleNamespace(stream_reply=stream_reply)
@@ -172,6 +223,20 @@ class _FakeFeishuChannel:
         assert message_id == "om_stream_1"
         self.patched.append(text)
         return True
+
+    async def send_response(
+        self, chat_id: str, response: TaskResponse, **kwargs: Any
+    ) -> None:
+        del chat_id
+        self.sent.append(response)
+        self.sent_kwargs.append(dict(kwargs))
+
+
+class _FakeWeixinChannel:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(stream_reply=False)
+        self.sent: list[TaskResponse] = []
+        self.sent_kwargs: list[dict[str, Any]] = []
 
     async def send_response(
         self, chat_id: str, response: TaskResponse, **kwargs: Any
@@ -670,3 +735,63 @@ def test_stop_does_not_block_when_queue_is_full() -> None:
         await asyncio.wait_for(bus.stop(drain=False), timeout=0.2)
 
     asyncio.run(_run())
+
+
+def test_message_bus_streams_interactive_output_to_feishu_without_mixing_runtime_post() -> None:
+    channel = _FakeFeishuChannel(stream_reply=True)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_InteractiveStreamingOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> TaskResponse:
+        await bus.start()
+        try:
+            return await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    response = asyncio.run(_run())
+
+    assert response.text == "你好"
+    assert channel.created == ["你"]
+    assert channel.patched[-1] == "你好"
+    assert len(channel.sent) == 2
+    assert channel.sent_kwargs[0]["message_format"] == "post"
+    assert channel.sent_kwargs[1]["message_format"] == "post"
+
+
+def test_message_bus_degrades_interactive_output_to_incremental_weixin_messages() -> None:
+    channel = _FakeWeixinChannel()
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_InteractiveStreamingOrchestrator(),  # type: ignore[arg-type]
+        channels={"weixin": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="weixin",
+        sender_id="wx_user_1",
+        chat_id="wx_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> TaskResponse:
+        await bus.start()
+        try:
+            return await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    response = asyncio.run(_run())
+
+    assert response.text == "你好"
+    assert [item.text for item in channel.sent] == ["你", "你好"]
