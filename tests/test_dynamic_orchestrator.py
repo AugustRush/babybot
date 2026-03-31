@@ -53,8 +53,10 @@ class DummyResourceManager:
     def __init__(self, fail_tasks: set[str] | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
         self._fail_tasks: set[str] = fail_tasks or set()
+        self.brief_calls = 0
 
     def get_resource_briefs(self) -> list[dict[str, Any]]:
+        self.brief_calls += 1
         return [
             {
                 "id": "skill.weather",
@@ -205,6 +207,22 @@ def test_system_prompt_adds_multi_resource_guidance_for_skill_creation_with_url(
     system_prompt = messages[0].content
     assert "resource_ids" in system_prompt
     assert "不要靠 create_worker 套娃补能力" in system_prompt
+
+
+def test_build_initial_messages_reuses_cached_resource_catalog() -> None:
+    gateway = DummyGateway([])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+
+    first = orch._build_initial_messages("查询天气", ExecutionContext())  # type: ignore[attr-defined]
+    second = orch._build_initial_messages("继续", ExecutionContext())  # type: ignore[attr-defined]
+
+    assert rm.brief_calls == 2
+    assert "skill.weather" in first[0].content
+    assert "- skill.weather" in second[0].content
+    assert first[0].content.split("- skill.weather", 1)[1] == second[0].content.split(
+        "- skill.weather", 1
+    )[1]
 
 
 def test_single_task() -> None:

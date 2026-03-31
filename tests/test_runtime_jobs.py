@@ -33,6 +33,16 @@ def test_runtime_job_store_returns_latest_job_for_chat(tmp_path) -> None:
     assert latest.job_id == second.job_id
 
 
+def test_runtime_job_store_enables_wal_and_busy_timeout(tmp_path) -> None:
+    store = RuntimeJobStore(tmp_path / "jobs.db")
+
+    store.create(chat_key="feishu:c1", goal="job")
+    db = store._ensure_db()
+
+    assert db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    assert int(db.execute("PRAGMA busy_timeout").fetchone()[0]) >= 3000
+
+
 def test_orchestrator_job_status_command_reads_persisted_job(tmp_path) -> None:
     store = RuntimeJobStore(tmp_path / "jobs.db")
     job = store.create(chat_key="feishu:c1", goal="long task")

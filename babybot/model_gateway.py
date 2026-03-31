@@ -23,12 +23,15 @@ from .agent_kernel import (
     ModelToolCall,
 )
 from .config import Config
+from .context import _estimate_token_count
 
 T = TypeVar("T", bound=BaseModel)
 StreamTextCallback = Callable[[str], Awaitable[None] | None]
 logger = logging.getLogger(__name__)
 
 _MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024
+_MODEL_RETRY_ATTEMPTS = 3
+_MODEL_RETRY_BASE_DELAY_S = 0.25
 
 
 def _image_to_content_part(image_ref: str) -> dict[str, Any]:
@@ -94,6 +97,68 @@ class OpenAICompatibleGateway(ModelProvider):
             logger.warning("Streaming callback failed", exc_info=True)
 
     @staticmethod
+    def _usage_payload(usage: Any) -> dict[str, int]:
+        return {
+            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+        }
+
+    @staticmethod
+    def _fallback_usage(
+        messages: list[dict[str, Any]],
+        completion_text: str,
+    ) -> dict[str, int]:
+        prompt_parts: list[str] = []
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, str):
+                prompt_parts.append(content)
+            elif isinstance(content, list):
+                prompt_parts.extend(
+                    str(item.get("text", ""))
+                    for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+        prompt_tokens = _estimate_token_count(
+            "\n".join(part for part in prompt_parts if part)
+        )
+        completion_tokens = _estimate_token_count(completion_text or "")
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int) and (status_code == 429 or status_code >= 500):
+            return True
+        text = str(exc or "").lower()
+        return any(
+            marker in text
+            for marker in (
+                "429",
+                "rate limit",
+                "too many requests",
+                "temporarily unavailable",
+                "service unavailable",
+                "bad gateway",
+                "gateway timeout",
+                "connection reset",
+                "connection refused",
+                "connection aborted",
+                "server disconnected",
+                "timed out",
+                "timeout",
+            )
+        )
+
+    async def _sleep_before_retry(self, attempt: int) -> None:
+        await asyncio.sleep(_MODEL_RETRY_BASE_DELAY_S * (2 ** max(0, attempt - 1)))
+
+    @staticmethod
     def _extract_stream_delta_text(delta: Any) -> str:
         content = getattr(delta, "content", None)
         if content is None and isinstance(delta, dict):
@@ -136,6 +201,7 @@ class OpenAICompatibleGateway(ModelProvider):
             "temperature": self._config.model.temperature,
             "max_tokens": self._config.model.max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         accumulated_text = ""
         started = time.perf_counter()
@@ -143,26 +209,45 @@ class OpenAICompatibleGateway(ModelProvider):
 
         async def _consume() -> None:
             nonlocal accumulated_text, first_chunk_elapsed
-            stream = await client.chat.completions.create(**kwargs)
-            async for chunk in stream:
-                for choice in getattr(chunk, "choices", []) or []:
-                    delta = getattr(choice, "delta", None)
-                    if delta is None:
-                        continue
-                    piece = self._extract_stream_delta_text(delta)
-                    if not piece:
-                        continue
-                    if first_chunk_elapsed is None:
-                        first_chunk_elapsed = time.perf_counter() - started
-                        logger.info(
-                            "LLM stream first_chunk task=%s step=%s elapsed=%.2fs text_len=%d",
-                            task_id,
-                            step,
-                            first_chunk_elapsed,
-                            len(piece),
-                        )
-                    accumulated_text += piece
-                    await self._call_stream_callback(on_stream_text, accumulated_text)
+            for attempt in range(1, _MODEL_RETRY_ATTEMPTS + 1):
+                try:
+                    stream = await client.chat.completions.create(**kwargs)
+                    async for chunk in stream:
+                        for choice in getattr(chunk, "choices", []) or []:
+                            delta = getattr(choice, "delta", None)
+                            if delta is None:
+                                continue
+                            piece = self._extract_stream_delta_text(delta)
+                            if not piece:
+                                continue
+                            if first_chunk_elapsed is None:
+                                first_chunk_elapsed = time.perf_counter() - started
+                                logger.info(
+                                    "LLM stream first_chunk task=%s step=%s elapsed=%.2fs text_len=%d",
+                                    task_id,
+                                    step,
+                                    first_chunk_elapsed,
+                                    len(piece),
+                                )
+                            accumulated_text += piece
+                            await self._call_stream_callback(on_stream_text, accumulated_text)
+                    return
+                except Exception as exc:
+                    if (
+                        accumulated_text
+                        or attempt >= _MODEL_RETRY_ATTEMPTS
+                        or not self._is_retryable_exception(exc)
+                    ):
+                        raise
+                    logger.warning(
+                        "LLM request retrying task=%s step=%s attempt=%d/%d reason=%s",
+                        task_id,
+                        step,
+                        attempt,
+                        _MODEL_RETRY_ATTEMPTS,
+                        str(exc)[:200],
+                    )
+                    await self._sleep_before_retry(attempt)
 
         if heartbeat is not None:
             async with heartbeat.keep_alive():
@@ -298,64 +383,95 @@ class OpenAICompatibleGateway(ModelProvider):
         tool_calls: dict[int, dict[str, str]] = {}
         started = time.perf_counter()
         first_chunk_elapsed: float | None = None
+        usage_payload = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
 
         async def _consume() -> None:
-            nonlocal streamed_text, finish_reason, saw_content_text, first_chunk_elapsed
-            stream = await client.chat.completions.create(**kwargs, stream=True)
-            async for chunk in stream:
-                for choice in getattr(chunk, "choices", []) or []:
-                    finish_reason = (
-                        getattr(choice, "finish_reason", None) or finish_reason
+            nonlocal streamed_text, finish_reason, saw_content_text, first_chunk_elapsed, usage_payload
+            for attempt in range(1, _MODEL_RETRY_ATTEMPTS + 1):
+                try:
+                    stream = await client.chat.completions.create(
+                        **kwargs,
+                        stream=True,
+                        stream_options={"include_usage": True},
                     )
-                    delta = getattr(choice, "delta", None)
-                    if delta is None:
-                        continue
-
-                    piece = self._extract_stream_delta_text(delta)
-                    if piece:
-                        if first_chunk_elapsed is None:
-                            first_chunk_elapsed = time.perf_counter() - started
-                            logger.info(
-                                "LLM stream first_chunk task=%s step=%s elapsed=%.2fs text_len=%d",
-                                task_id,
-                                step,
-                                first_chunk_elapsed,
-                                len(piece),
+                    async for chunk in stream:
+                        chunk_usage = getattr(chunk, "usage", None)
+                        if chunk_usage is not None:
+                            usage_payload = self._usage_payload(chunk_usage)
+                        for choice in getattr(chunk, "choices", []) or []:
+                            finish_reason = (
+                                getattr(choice, "finish_reason", None) or finish_reason
                             )
-                        saw_content_text = True
-                        streamed_text += piece
+                            delta = getattr(choice, "delta", None)
+                            if delta is None:
+                                continue
 
-                    for item in self._delta_tool_calls(delta):
-                        index = self._read_delta_field(item, "index")
-                        if index is None:
-                            index = len(tool_calls)
-                        acc = tool_calls.setdefault(
-                            int(index),
-                            {"id": "", "name": "", "arguments": ""},
-                        )
-                        item_id = self._read_delta_field(item, "id")
-                        if isinstance(item_id, str) and item_id:
-                            acc["id"] = item_id
-                        function = self._read_delta_field(item, "function")
-                        if function is None:
-                            continue
-                        name = self._read_delta_field(function, "name")
-                        if isinstance(name, str) and name:
-                            acc["name"] += name
-                        arguments = self._read_delta_field(function, "arguments")
-                        if isinstance(arguments, str) and arguments:
-                            acc["arguments"] += arguments
+                            piece = self._extract_stream_delta_text(delta)
+                            if piece:
+                                if first_chunk_elapsed is None:
+                                    first_chunk_elapsed = time.perf_counter() - started
+                                    logger.info(
+                                        "LLM stream first_chunk task=%s step=%s elapsed=%.2fs text_len=%d",
+                                        task_id,
+                                        step,
+                                        first_chunk_elapsed,
+                                        len(piece),
+                                    )
+                                saw_content_text = True
+                                streamed_text += piece
 
-                    next_text = streamed_text
-                    if not saw_content_text:
-                        next_text = self._extract_reply_text_from_stream_tool_calls(
-                            tool_calls
-                        )
-                    if next_text and next_text != streamed_text:
-                        streamed_text = next_text
-                        await self._call_stream_callback(on_stream_text, streamed_text)
-                    elif piece:
-                        await self._call_stream_callback(on_stream_text, streamed_text)
+                            for item in self._delta_tool_calls(delta):
+                                index = self._read_delta_field(item, "index")
+                                if index is None:
+                                    index = len(tool_calls)
+                                acc = tool_calls.setdefault(
+                                    int(index),
+                                    {"id": "", "name": "", "arguments": ""},
+                                )
+                                item_id = self._read_delta_field(item, "id")
+                                if isinstance(item_id, str) and item_id:
+                                    acc["id"] = item_id
+                                function = self._read_delta_field(item, "function")
+                                if function is None:
+                                    continue
+                                name = self._read_delta_field(function, "name")
+                                if isinstance(name, str) and name:
+                                    acc["name"] += name
+                                arguments = self._read_delta_field(function, "arguments")
+                                if isinstance(arguments, str) and arguments:
+                                    acc["arguments"] += arguments
+
+                            next_text = streamed_text
+                            if not saw_content_text:
+                                next_text = self._extract_reply_text_from_stream_tool_calls(
+                                    tool_calls
+                                )
+                            if next_text and next_text != streamed_text:
+                                streamed_text = next_text
+                                await self._call_stream_callback(on_stream_text, streamed_text)
+                            elif piece:
+                                await self._call_stream_callback(on_stream_text, streamed_text)
+                    return
+                except Exception as exc:
+                    if (
+                        streamed_text
+                        or attempt >= _MODEL_RETRY_ATTEMPTS
+                        or not self._is_retryable_exception(exc)
+                    ):
+                        raise
+                    logger.warning(
+                        "LLM request retrying task=%s step=%s attempt=%d/%d reason=%s",
+                        task_id,
+                        step,
+                        attempt,
+                        _MODEL_RETRY_ATTEMPTS,
+                        str(exc)[:200],
+                    )
+                    await self._sleep_before_retry(attempt)
 
         if heartbeat is not None:
             async with heartbeat.keep_alive():
@@ -391,11 +507,11 @@ class OpenAICompatibleGateway(ModelProvider):
             tool_calls=tuple(parsed_tool_calls),
             finish_reason=finish_reason or "stop",
             metadata={
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
+                "usage": (
+                    usage_payload
+                    if any(usage_payload.values())
+                    else self._fallback_usage(kwargs.get("messages", []), streamed_text.strip())
+                ),
                 "model": str(kwargs.get("model", self._config.model.model_name)),
             },
         )
@@ -455,17 +571,39 @@ class OpenAICompatibleGateway(ModelProvider):
                     step=step,
                     per_call_timeout=per_call_timeout,
                 )
-            if heartbeat is not None:
-                async with heartbeat.keep_alive():
-                    completion = await asyncio.wait_for(
-                        client.chat.completions.create(**kwargs),
-                        timeout=per_call_timeout,
+            completion = None
+            for attempt in range(1, _MODEL_RETRY_ATTEMPTS + 1):
+                try:
+                    if heartbeat is not None:
+                        async with heartbeat.keep_alive():
+                            completion = await asyncio.wait_for(
+                                client.chat.completions.create(**kwargs),
+                                timeout=per_call_timeout,
+                            )
+                    else:
+                        completion = await asyncio.wait_for(
+                            client.chat.completions.create(**kwargs),
+                            timeout=per_call_timeout,
+                        )
+                    break
+                except Exception as exc:
+                    if isinstance(exc, asyncio.TimeoutError):
+                        raise
+                    if (
+                        attempt >= _MODEL_RETRY_ATTEMPTS
+                        or not self._is_retryable_exception(exc)
+                    ):
+                        raise
+                    logger.warning(
+                        "LLM request retrying task=%s step=%s attempt=%d/%d reason=%s",
+                        task_id,
+                        step,
+                        attempt,
+                        _MODEL_RETRY_ATTEMPTS,
+                        str(exc)[:200],
                     )
-            else:
-                completion = await asyncio.wait_for(
-                    client.chat.completions.create(**kwargs),
-                    timeout=per_call_timeout,
-                )
+                    await self._sleep_before_retry(attempt)
+            assert completion is not None
         except asyncio.TimeoutError:
             if bool(meta.get("expected_timeout", False)):
                 logger.warning(
@@ -515,11 +653,7 @@ class OpenAICompatibleGateway(ModelProvider):
         )
         usage = completion.usage
         metadata: dict[str, Any] = {
-            "usage": {
-                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-            },
+            "usage": self._usage_payload(usage),
             "model": getattr(completion, "model", requested_model),
         }
         return ModelResponse(

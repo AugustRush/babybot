@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .sqlite_utils import connect_sqlite
+
 logger = logging.getLogger(__name__)
 
 _NO_ANCHOR_RECENT_LIMIT = 200
@@ -327,8 +329,7 @@ class TapeStore:
     def _ensure_db(self) -> sqlite3.Connection:
         if self._db is None:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._db = sqlite3.connect(str(self._db_path))
-            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db = connect_sqlite(self._db_path)
             self._create_tables()
         return self._db
 

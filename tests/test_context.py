@@ -256,6 +256,15 @@ class TestTapeStore:
         assert tape2.entries[1].payload["content"] == "hello"
         assert tape2.entries[2].payload["content"] == "world"
 
+    def test_tape_store_enables_wal_and_busy_timeout(self, tmp_path):
+        store = self._make_store(tmp_path)
+
+        store.get_or_create("chat1")
+        db = store._ensure_db()
+
+        assert db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert int(db.execute("PRAGMA busy_timeout").fetchone()[0]) >= 3000
+
     def test_search_relevant_basic(self, tmp_path):
         store = self._make_store(tmp_path)
         tape = store.get_or_create("chat1")

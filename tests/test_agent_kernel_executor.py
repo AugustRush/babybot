@@ -480,6 +480,40 @@ def test_single_agent_executor_persists_tool_call_and_result_to_tape() -> None:
     assert tool_result.payload["ok"] is True
 
 
+def test_single_agent_executor_batches_tape_store_writes_per_step() -> None:
+    class RecordingTapeStore:
+        def __init__(self) -> None:
+            self.saved_batches: list[list[str]] = []
+
+        def save_entries(self, chat_id: str, entries: list) -> None:  # type: ignore[no-untyped-def]
+            del chat_id
+            self.saved_batches.append([entry.kind for entry in entries])
+
+        def save_entry(self, chat_id: str, entry) -> None:  # type: ignore[no-untyped-def]
+            del chat_id, entry
+            raise AssertionError("expected batched save_entries")
+
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    executor = SingleAgentExecutor(model=TwoStepModel(), tools=registry)
+    tape = Tape("chat1")
+    tape_store = RecordingTapeStore()
+    context = ExecutionContext(
+        session_id="s1",
+        state={"tape": tape, "tape_store": tape_store},
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="compute"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert tape_store.saved_batches == [["tool_call"], ["tool_result"]]
+
+
 def test_single_agent_executor_enforces_token_budget() -> None:
     class BudgetModel(ModelProvider):
         async def generate(

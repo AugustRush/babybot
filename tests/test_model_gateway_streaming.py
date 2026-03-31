@@ -46,6 +46,19 @@ class _FakeCompletions:
         return _FakeStream(self._chunks)
 
 
+class _RetryThenSuccessCompletions:
+    def __init__(self, responses: list[object]) -> None:
+        self.calls: list[dict] = []
+        self._responses = list(responses)
+
+    async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class _TimeoutCompletions:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -244,6 +257,81 @@ def test_generate_streaming_logs_first_chunk_and_completion(
         "LLM stream response task=task-1 step=2" in record.message
         for record in caplog.records
     )
+
+
+def test_generate_streaming_collects_usage_from_final_chunk() -> None:
+    chunks = [
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="你"),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="好"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=11,
+                completion_tokens=7,
+                total_tokens=18,
+            ),
+        ),
+    ]
+    completions = _FakeCompletions(chunks)
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+    gateway._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    async def _run():
+        return await gateway.generate(
+            ModelRequest(messages=(ModelMessage(role="user", content="hello"),)),
+            ExecutionContext(state={"stream_callback": lambda _: None}),
+        )
+
+    response = asyncio.run(_run())
+
+    assert response.text == "你好"
+    assert response.metadata["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+    assert completions.calls[0]["stream_options"] == {"include_usage": True}
+
+
+def test_generate_retries_transient_non_streaming_failure() -> None:
+    completion = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="done", tool_calls=[]),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        model="mock-model",
+    )
+    completions = _RetryThenSuccessCompletions(
+        [RuntimeError("429 rate limit exceeded"), completion]
+    )
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+    gateway._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    async def _run():
+        return await gateway.generate(
+            ModelRequest(messages=(ModelMessage(role="user", content="hello"),)),
+            ExecutionContext(),
+        )
+
+    response = asyncio.run(_run())
+
+    assert response.text == "done"
+    assert len(completions.calls) == 2
 
 
 def test_decode_partial_json_string_keeps_valid_prefix_before_trailing_escape() -> None:

@@ -250,6 +250,60 @@ def test_runtime_dead_letters_after_retry_budget_exhausted() -> None:
     ]
 
 
+def test_runtime_caps_retry_budget_to_guard_rail() -> None:
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-cap",
+        resource_manager=_DummyResourceManager(),  # type: ignore[arg-type]
+        bridge=_ScriptedBridge([]),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+        max_retries=999,
+    )
+
+    assert runtime._max_retries <= 8
+
+
+def test_runtime_cancel_all_resets_cancelling_flag_when_gather_raises(monkeypatch) -> None:
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-cancel",
+        resource_manager=_DummyResourceManager(),  # type: ignore[arg-type]
+        bridge=_ScriptedBridge([]),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        task = loop.create_task(asyncio.sleep(10))
+        runtime._in_flight["t1"] = task
+
+        async def _boom(*args, **kwargs):  # type: ignore[no-untyped-def]
+            del args, kwargs
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            "babybot.agent_kernel.dynamic_orchestrator.asyncio.gather",
+            _boom,
+        )
+
+        async def _run() -> None:
+            with pytest.raises(RuntimeError):
+                await runtime.cancel_all()
+
+        import pytest
+
+        loop.run_until_complete(_run())
+        assert runtime._cancelling is False
+    finally:
+        for pending in list(asyncio.all_tasks(loop)):
+            pending.cancel()
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+
+
 def test_runtime_emits_progress_events_from_child_heartbeat() -> None:
     bus = InMemoryChildTaskBus()
 

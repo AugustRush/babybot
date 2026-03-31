@@ -193,18 +193,14 @@ _ORCHESTRATION_TOOL_BY_NAME: dict[str, dict[str, Any]] = {
 # ── System prompt builder ────────────────────────────────────────────────
 
 _SYSTEM_PROMPT_ROLE = (
-    "你是任务编排Agent。理解用户请求，动态调度子Agent完成任务，最终向用户回复结果。\n\n"
-    "编排规则：\n"
-    "1. 简单问题（聊天、知识问答）→ 直接调用 reply_to_user，无需创建子任务\n"
-    "2. 需要工具的任务 → dispatch_task 创建子Agent，wait_for_tasks 等待结果，reply_to_user 回复\n"
-    "3. 可并行的任务 → 同时 dispatch 多个（不设deps），再 wait_for_tasks 全部等待\n"
-    "4. 有依赖的任务 → 在 deps 中声明依赖，任务内部自动等待前置任务完成\n"
-    "5. 拿到结果后 → 调用 reply_to_user 汇总并回复用户，reply_to_user 必须单独调用且为最后一步\n"
-    "6. 禁止虚构执行结果；需要外部信息必须通过 dispatch_task 获取\n"
-    "7. 如果单个子任务同时需要多种能力，可在一次 dispatch_task 中使用 resource_ids 组合多个资源。\n"
-    "8. 对于需要查看网页/仓库说明再创建或更新技能的任务，优先在同一个子任务里组合相关技能、browser、必要的 code 资源；不要靠 create_worker 套娃补能力。\n"
-    "9. 需要多Agent协作讨论、辩论、评审或头脑风暴时 → dispatch_team，指定至少2个Agent（角色+描述），系统会自动组织多轮交替发言并返回讨论记录和总结。\n"
-    "10. 用户在请求里明确表达的执行限制与偏好（例如轮数、人数、时间预算、快/详细、是否接受部分结果）优先级高于默认策略，必须尽量直接遵守，不能忽略。"
+    "你是任务编排Agent，负责在最少步骤内调度子Agent完成任务并回复用户。\n\n"
+    "核心规则：\n"
+    "1. 简单问题直接 reply_to_user；需要外部能力时才 dispatch_task。\n"
+    "2. 并行任务不要设 deps；有依赖的任务必须显式声明 deps。\n"
+    "3. reply_to_user 必须单独调用且作为收尾；不能与其他工具混用。\n"
+    "4. 禁止虚构结果；用户明确表达的执行限制与偏好必须优先遵守。\n"
+    "5. 多资源任务优先在一次 dispatch_task 中用 resource_ids 组合能力；查看网页/仓库后创建或更新技能时，不要靠 create_worker 套娃补能力。\n"
+    "6. 需要多Agent协作讨论、辩论、评审或头脑风暴时，使用 dispatch_team。\n"
     "\n\n任务结果协议：\n"
     "- wait_for_tasks / get_task_result 返回 JSON，不是自由文本。\n"
     "- 当结果中的 reply_artifacts_ready=true 时，表示子任务已经产出可随最终回复自动附带给用户的附件/媒体。\n"
@@ -378,6 +374,8 @@ class InMemoryChildTaskBus:
 class InProcessChildTaskRuntime:
     """Current child-task runtime backed by local asyncio tasks."""
 
+    MAX_RETRY_CAP = 8
+
     def __init__(
         self,
         *,
@@ -401,7 +399,7 @@ class InProcessChildTaskRuntime:
         self._child_task_bus = child_task_bus
         self._task_heartbeat_registry = task_heartbeat_registry
         self._max_tasks = max_tasks
-        self._max_retries = max(0, int(max_retries))
+        self._max_retries = min(self.MAX_RETRY_CAP, max(0, int(max_retries)))
         self._retry_delay_seconds = retry_delay_seconds
         self._default_timeout_s = self._coerce_timeout(default_timeout_s)
         self._stale_after_s = stale_after_s
@@ -1063,20 +1061,21 @@ class InProcessChildTaskRuntime:
     async def cancel_all(self, *, grace_period_s: float = 0.0) -> None:
         # Prevent new dispatches by clearing the semaphore budget.
         self._cancelling = True
-        tasks = [task for task in self._in_flight.values() if not task.done()]
-        if not tasks:
+        try:
+            tasks = [task for task in self._in_flight.values() if not task.done()]
+            if not tasks:
+                return
+            if grace_period_s > 0:
+                done, pending = await asyncio.wait(tasks, timeout=grace_period_s)
+                del done
+                for task in pending:
+                    task.cancel()
+            else:
+                for task in tasks:
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
             self._cancelling = False
-            return
-        if grace_period_s > 0:
-            done, pending = await asyncio.wait(tasks, timeout=grace_period_s)
-            del done
-            for task in pending:
-                task.cancel()
-        else:
-            for task in tasks:
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self._cancelling = False
 
 
 # ── DynamicOrchestrator ──────────────────────────────────────────────────
@@ -1112,6 +1111,8 @@ class DynamicOrchestrator:
         self._task_stale_after_s = task_stale_after_s
         self._max_steps = max(1, int(max_steps or self.MAX_STEPS))
         self._default_task_timeout_s = default_task_timeout_s
+        self._resource_catalog_cache_key: tuple[str, ...] | None = None
+        self._resource_catalog_cache_value = ""
 
     @property
     def _executor(self) -> ExecutorPort:
@@ -1282,7 +1283,7 @@ class DynamicOrchestrator:
                 deduped_policy_hints.append(hint)
         context.state["policy_hints"] = tuple(deduped_policy_hints)
 
-        system_parts = [_SYSTEM_PROMPT_ROLE, _build_resource_catalog(briefs)]
+        system_parts = [_SYSTEM_PROMPT_ROLE, self._resource_catalog_text(briefs)]
         if _needs_deferred_task_guidance(goal):
             system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
         if history:
@@ -1302,6 +1303,15 @@ class DynamicOrchestrator:
                 images=tuple(media_paths),
             ),
         ]
+
+    def _resource_catalog_text(self, briefs: list[dict[str, Any]]) -> str:
+        cache_key = tuple(
+            json.dumps(brief, ensure_ascii=False, sort_keys=True) for brief in briefs
+        )
+        if cache_key != self._resource_catalog_cache_key:
+            self._resource_catalog_cache_key = cache_key
+            self._resource_catalog_cache_value = _build_resource_catalog(briefs)
+        return self._resource_catalog_cache_value
 
     @staticmethod
     def _prune_stale_wait_history(messages: list[ModelMessage]) -> list[ModelMessage]:

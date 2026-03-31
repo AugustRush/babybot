@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from .runtime_jobs import ACTIVE_JOB_STATES, JOB_STATES, RuntimeJob
+from .sqlite_utils import connect_sqlite
 
 
 class RuntimeJobStore:
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, busy_timeout_ms: int = 3000) -> None:
         self._db_path = Path(db_path)
+        self._busy_timeout_ms = max(1, int(busy_timeout_ms))
         self._db: sqlite3.Connection | None = None
 
     def create(
@@ -206,8 +208,11 @@ class RuntimeJobStore:
         if self._db is not None:
             return self._db
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(str(self._db_path))
-        db.row_factory = sqlite3.Row
+        db = connect_sqlite(
+            self._db_path,
+            row_factory=sqlite3.Row,
+            busy_timeout_ms=self._busy_timeout_ms,
+        )
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS runtime_jobs (

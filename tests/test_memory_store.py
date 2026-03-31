@@ -33,6 +33,19 @@ def test_hybrid_memory_store_loads_assistant_profile_markdown(tmp_path) -> None:
     assert "技术助手" in profile_text
 
 
+def test_hybrid_memory_store_enables_wal_and_busy_timeout(tmp_path) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+
+    store.ensure_bootstrap()
+    db = store._ensure_db()
+
+    assert db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    assert int(db.execute("PRAGMA busy_timeout").fetchone()[0]) >= 3000
+
+
 def test_hybrid_memory_store_extracts_soft_preferences_from_user_message(tmp_path) -> None:
     store = HybridMemoryStore(
         db_path=tmp_path / "context.db",

@@ -120,15 +120,24 @@ class SingleAgentExecutor:
         tape = context.state.get("tape")
         tape_store = context.state.get("tape_store")
 
-        def _persist_tape_entry(entry: Entry) -> None:
+        def _persist_tape_entries(entries: list[Entry]) -> None:
+            if not entries:
+                return
             if tape is None:
                 return
             if tape_store is None:
                 return
+            save_entries = getattr(tape_store, "save_entries", None)
             save_entry = getattr(tape_store, "save_entry", None)
             chat_id = getattr(tape, "chat_id", "")
-            if callable(save_entry) and chat_id:
-                save_entry(chat_id, entry)
+            if not chat_id:
+                return
+            if callable(save_entries):
+                save_entries(chat_id, entries)
+                return
+            if callable(save_entry):
+                for entry in entries:
+                    save_entry(chat_id, entry)
 
         for step in range(1, max(1, self.policy.max_steps) + 1):
             if heartbeat is not None:
@@ -176,6 +185,7 @@ class SingleAgentExecutor:
                     [tc.name for tc in response.tool_calls],
                 )
                 if tape is not None:
+                    tape_entries: list[Entry] = []
                     for tool_call in response.tool_calls:
                         entry = tape.append(
                             "tool_call",
@@ -189,7 +199,8 @@ class SingleAgentExecutor:
                                 "step": step,
                             },
                         )
-                        _persist_tape_entry(entry)
+                        tape_entries.append(entry)
+                    _persist_tape_entries(tape_entries)
                 messages.append(
                     ModelMessage(
                         role="assistant",
@@ -406,6 +417,7 @@ class SingleAgentExecutor:
                         return tc, output, list(result.artifacts or []), not result.ok
 
                     done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
+                    result_entries: list[Entry] = []
                     for tc, output, artifacts, failed in done:
                         if failed:
                             tool_failure_count += 1
@@ -425,7 +437,7 @@ class SingleAgentExecutor:
                                     "step": step,
                                 },
                             )
-                            _persist_tape_entry(entry)
+                            result_entries.append(entry)
                         tool_result_map[tc.call_id] = ModelMessage(
                             role="tool",
                             name=tc.name,
@@ -435,6 +447,7 @@ class SingleAgentExecutor:
                             ),
                             tool_call_id=tc.call_id,
                         )
+                    _persist_tape_entries(result_entries)
 
                 # Append tool results in original tool_calls order
                 for tool_call in response.tool_calls:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .orchestration_policy import build_policy_state_buckets
+from .sqlite_utils import connect_sqlite
 
 
 class OrchestrationPolicyStore:
@@ -848,10 +849,11 @@ class OrchestrationPolicyStore:
     def _ensure_db(self) -> sqlite3.Connection:
         if self._db is None:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            db = sqlite3.connect(str(self._db_path))
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
+            db = connect_sqlite(
+                self._db_path,
+                row_factory=sqlite3.Row,
+                busy_timeout_ms=self._busy_timeout_ms,
+            )
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS policy_decisions (
