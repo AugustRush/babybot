@@ -431,6 +431,7 @@ class ResourceManager:
         )
         self._python_probe_cache: dict[tuple[str, tuple[str, ...], str], str | None] = {}
         self._observability_provider: Any = None
+        self._skill_load_errors: list[dict[str, str]] = []
         self.catalog = ResourceCatalog(self)
         self.runtime = WorkerRuntime(self)
 
@@ -816,6 +817,12 @@ class ResourceManager:
                 "核心工具：定时/延时发送消息、任务调度管理（创建/修改/删除/列出定时任务）",
                 active=True,
             ),
+            "worker_control": ToolGroup(
+                "worker_control",
+                "内部编排工具：创建或分发子 worker。",
+                active=False,
+                notes="Only enable when a workflow explicitly needs nested workers.",
+            ),
             "code": ToolGroup(
                 "code",
                 "Code execution and file operations",
@@ -1086,6 +1093,109 @@ class ResourceManager:
                 )
             )
         return decision_kind.strip() or resolved_chat_key or "policy"
+
+    @staticmethod
+    def _schema_type_summary(schema: dict[str, Any]) -> str:
+        if not isinstance(schema, dict):
+            return "unknown"
+        schema_type = schema.get("type")
+        if schema_type == "array":
+            item_summary = ResourceManager._schema_type_summary(schema.get("items", {}))
+            return f"array[{item_summary}]"
+        if schema_type == "object" and isinstance(schema.get("additionalProperties"), dict):
+            nested = ResourceManager._schema_type_summary(schema["additionalProperties"])
+            return f"object[{nested}]"
+        if schema.get("enum"):
+            values = ",".join(str(value) for value in schema["enum"][:4])
+            return f"{schema_type or 'enum'}({values})"
+        if schema.get("anyOf"):
+            variants = [
+                ResourceManager._schema_type_summary(item)
+                for item in schema["anyOf"]
+                if isinstance(item, dict)
+            ]
+            return "|".join(variants) if variants else "any"
+        return str(schema_type or "any")
+
+    def _inspect_tools(
+        self,
+        query: str = "",
+        group: str = "",
+        active_only: bool = False,
+    ) -> str:
+        query_text = query.strip().lower()
+        group_filter = group.strip().lower()
+        lines = ["[Tools]"]
+        for registered in sorted(self.registry.list(), key=lambda item: item.tool.name):
+            tool_name = registered.tool.name
+            tool_group = registered.group
+            group_state = self.groups.get(tool_group)
+            is_active = bool(group_state.active) if group_state is not None else False
+            if active_only and not is_active:
+                continue
+            if group_filter and tool_group.lower() != group_filter:
+                continue
+            haystack = f"{tool_name} {tool_group}".lower()
+            if query_text and query_text not in haystack:
+                continue
+            properties = registered.tool.schema.get("properties", {})
+            schema_parts = [
+                f"{name}:{self._schema_type_summary(prop)}"
+                for name, prop in properties.items()
+                if isinstance(prop, dict)
+            ]
+            schema_summary = ", ".join(schema_parts) if schema_parts else "no-args"
+            lines.append(
+                f"- tool={tool_name} group={tool_group} active={is_active} schema={schema_summary}"
+            )
+        return "\n".join(lines) if len(lines) > 1 else "[Tools]\n- no matching tools"
+
+    def _inspect_skills(self, query: str = "", active_only: bool = False) -> str:
+        query_text = query.strip().lower()
+        lines = ["[Skills]"]
+        for skill in sorted(self.skills.values(), key=lambda item: item.name.lower()):
+            if active_only and not skill.active:
+                continue
+            haystack = f"{skill.name} {skill.description} {skill.source}".lower()
+            if query_text and query_text not in haystack:
+                continue
+            tool_list = ", ".join(skill.tools) if skill.tools else "-"
+            lines.append(
+                f"- skill={skill.name} active={skill.active} source={skill.source} "
+                f"group={skill.tool_group or '-'} tools={tool_list}"
+            )
+        return "\n".join(lines) if len(lines) > 1 else "[Skills]\n- no matching skills"
+
+    def _inspect_skill_load_errors(self, limit: int = 20) -> str:
+        capped = max(1, int(limit or 20))
+        entries = list(self._skill_load_errors[-capped:])
+        if not entries:
+            return "[Skill Load Errors]\n- none"
+        lines = ["[Skill Load Errors]"]
+        for item in entries:
+            lines.append(
+                f"- skill={item.get('skill', '')} path={item.get('path', '')} "
+                f"stage={item.get('stage', '')} error={item.get('error', '')}"
+            )
+        return "\n".join(lines)
+
+    def _record_skill_load_error(
+        self,
+        *,
+        skill: str,
+        path: str,
+        error: str,
+        stage: str,
+    ) -> None:
+        entry = {
+            "skill": str(skill),
+            "path": str(path),
+            "error": str(error),
+            "stage": str(stage),
+        }
+        self._skill_load_errors.append(entry)
+        if len(self._skill_load_errors) > 50:
+            self._skill_load_errors = self._skill_load_errors[-50:]
 
     def register_channel_tools(self, channel_tools: "ChannelTools") -> None:
         group_name = channel_tools.get_tool_group_name()

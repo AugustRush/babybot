@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 from babybot.agent_kernel import (
     ExecutionContext,
@@ -20,6 +21,7 @@ from babybot.agent_kernel import (
     ToolResult,
 )
 from babybot.resource import _check_shell_safety
+from babybot.resource_tool_loader import ResourceToolLoader
 from babybot.resource_workspace_tools import WorkspaceToolSuite
 
 
@@ -232,6 +234,29 @@ def test_cast_none_value_unchanged() -> None:
     schema = {"properties": {"n": {"type": "integer"}}}
     result = SingleAgentExecutor._cast_tool_arguments(schema, {"n": None})
     assert result["n"] is None
+
+
+def test_json_schema_for_callable_supports_common_compound_types() -> None:
+    def sample(
+        names: list[str],
+        metadata: dict[str, int],
+        mode: Literal["fast", "safe"],
+        maybe_count: int | None = None,
+        points: tuple[float] = (),
+    ) -> None:
+        return None
+
+    schema = ResourceToolLoader.json_schema_for_callable(sample)
+    props = schema["properties"]
+
+    assert props["names"] == {"type": "array", "items": {"type": "string"}}
+    assert props["metadata"] == {
+        "type": "object",
+        "additionalProperties": {"type": "integer"},
+    }
+    assert props["mode"] == {"type": "string", "enum": ["fast", "safe"]}
+    assert props["maybe_count"] == {"type": "integer"}
+    assert props["points"] == {"type": "array", "items": {"type": "number"}}
 
 
 def test_cast_integrated_with_executor() -> None:

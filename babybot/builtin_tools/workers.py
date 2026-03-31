@@ -180,6 +180,6 @@ def build_dispatch_workers_tool(owner: Any) -> Any:
 
 def iter_worker_tool_registrations(owner: Any) -> tuple[tuple[Any, str], ...]:
     return (
-        (build_create_worker_tool(owner), "basic"),
-        (build_dispatch_workers_tool(owner), "basic"),
+        (build_create_worker_tool(owner), "worker_control"),
+        (build_dispatch_workers_tool(owner), "worker_control"),
     )

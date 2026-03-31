@@ -10,10 +10,11 @@ import importlib
 import threading
 import time
 import babybot.resource as resource_module
+import pytest
 
-from babybot.agent_kernel import SkillPack, TaskResult, ToolLease
+from babybot.agent_kernel import SkillPack, TaskResult, ToolLease, ToolRegistry
 from babybot.agent_kernel.tools import ToolContext
-from babybot.builtin_tools.observability import build_inspect_chat_context_tool
+import babybot.builtin_tools.observability as observability_tools
 from babybot.context import TapeStore
 from babybot.memory_store import HybridMemoryStore
 from babybot.orchestrator import OrchestratorAgent
@@ -1425,6 +1426,39 @@ def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Pa
     assert reg.tool.schema["properties"]["prompt"]["type"] == "string"
 
 
+def test_register_skill_tools_records_error_without_import_fallback_on_parse_failure(
+    tmp_path: Path,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {}
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {"resolve_workspace_path": staticmethod(lambda value: str(value))},
+    )()
+    manager._skill_load_errors = []
+    skill_dir = tmp_path / "broken_skill"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    side_effect_path = tmp_path / "imported.txt"
+    (scripts / "broken.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(side_effect_path)!r}).write_text('imported', encoding='utf-8')\n"
+        "def broken(\n",
+        encoding="utf-8",
+    )
+
+    group, tools = manager._register_skill_tools("broken-skill", skill_dir)
+
+    assert group == "skill_broken_skill"
+    assert tools == ()
+    assert not side_effect_path.exists()
+    assert manager._skill_load_errors
+    assert manager._skill_load_errors[-1]["skill"] == "broken-skill"
+    assert manager._skill_load_errors[-1]["path"].endswith("broken.py")
+
+
 def test_scheduled_task_tools_delegate_to_manager() -> None:
     class _TaskManager:
         def render_tasks(self) -> str:
@@ -1494,6 +1528,39 @@ def test_save_scheduled_task_uses_channel_context_defaults() -> None:
 
     assert '"channel": "feishu"' in saved
     assert '"chat_id": "oc_test"' in saved
+
+
+def test_create_scheduled_task_rejects_missing_schedule() -> None:
+    class _TaskManager:
+        def create_task(self, **kwargs):
+            raise AssertionError(f"should not reach manager: {kwargs}")
+
+    manager = object.__new__(ResourceManager)
+    manager.scheduled_task_manager = _TaskManager()
+
+    with pytest.raises(ValueError, match="exactly one scheduling option"):
+        manager.create_scheduled_task_tool()(
+            name="t1",
+            prompt="p",
+            channel="feishu",
+            chat_id="c1",
+        )
+
+
+def test_update_scheduled_task_rejects_multiple_schedule_fields() -> None:
+    class _TaskManager:
+        def update_task(self, name: str, **kwargs):
+            raise AssertionError(f"should not reach manager: {name} {kwargs}")
+
+    manager = object.__new__(ResourceManager)
+    manager.scheduled_task_manager = _TaskManager()
+
+    with pytest.raises(ValueError, match="exactly one scheduling option"):
+        manager.update_scheduled_task_tool()(
+            name="t1",
+            cron="0 9 * * *",
+            interval_seconds=60,
+        )
 
 
 def test_save_scheduled_task_anchors_delay_to_request_received_time() -> None:
@@ -1939,7 +2006,7 @@ def test_inspect_chat_context_tool_invokes_without_cross_thread_sqlite_error(
     manager._default_chat_key = lambda: "feishu:chat-1"
 
     tool = CallableTool(
-        func=build_inspect_chat_context_tool(manager),
+        func=observability_tools.build_inspect_chat_context_tool(manager),
         name="inspect_chat_context",
         description="inspect context",
         schema={"type": "object", "properties": {}},
@@ -1972,6 +2039,58 @@ def test_inspect_runtime_flow_uses_provider_snapshot(tmp_path: Path) -> None:
     result = manager._inspect_runtime_flow(flow_id="orchestrator:abc123")
 
     assert result == "flow=orchestrator:abc123;chat="
+
+
+def test_inspect_tools_reports_group_schema_and_active_state() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "basic": ToolGroup("basic", "core", active=True),
+        "analysis": ToolGroup("analysis", "analysis", active=False),
+    }
+    manager.registry = ToolRegistry()
+    manager.config = Config()
+
+    def analyze(items: list[str], mode: str = "fast") -> str:
+        return f"{mode}:{len(items)}"
+
+    manager.register_tool(analyze, group_name="analysis")
+
+    payload = manager._inspect_tools(query="analy")
+
+    assert "analyze" in payload
+    assert "analysis" in payload
+    assert "active=False" in payload
+    assert "items:array[string]" in payload
+
+
+def test_inspect_skills_and_load_errors_tools_proxy_to_manager() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "demo": LoadedSkill(
+            name="demo",
+            description="Demo skill",
+            directory="/tmp/demo",
+            active=True,
+            source="auto",
+            tool_group="skill_demo",
+            tools=("demo__run",),
+        )
+    }
+    manager._skill_load_errors = [
+        {"skill": "broken", "path": "/tmp/broken.py", "error": "syntax error"}
+    ]
+
+    skills_text = asyncio.run(observability_tools.build_inspect_skills_tool(manager)())
+    errors_text = asyncio.run(observability_tools.build_inspect_skill_load_errors_tool(manager)(limit=5))
+    tools_text = asyncio.run(observability_tools.build_inspect_tools_tool(type("Owner", (), {
+        "_inspect_tools": staticmethod(lambda query="", group="", active_only=False: "ok-tools")
+    })())())
+
+    assert "demo" in skills_text
+    assert "demo__run" in skills_text
+    assert "broken" in errors_text
+    assert "/tmp/broken.py" in errors_text
+    assert tools_text == "ok-tools"
 
 
 

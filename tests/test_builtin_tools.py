@@ -83,6 +83,15 @@ class _DummyOwner:
     def _inspect_policy(self, chat_key: str = "", decision_kind: str = "") -> str:
         return decision_kind or chat_key or "policy"
 
+    def _inspect_tools(self, query: str = "", group: str = "", active_only: bool = False) -> str:
+        return f"tools:{query}:{group}:{active_only}"
+
+    def _inspect_skills(self, query: str = "", active_only: bool = False) -> str:
+        return f"skills:{query}:{active_only}"
+
+    def _inspect_skill_load_errors(self, limit: int = 20) -> str:
+        return f"errors:{limit}"
+
     def reload_skill(self, skill_path: str) -> str:
         return f"reloaded {skill_path}"
 
@@ -91,8 +100,8 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
     items = list(iter_builtin_tool_registrations(_DummyOwner()))
 
     assert [(group, func.__name__) for func, group in items] == [
-        ("basic", "create_worker"),
-        ("basic", "dispatch_workers"),
+        ("worker_control", "create_worker"),
+        ("worker_control", "dispatch_workers"),
         ("basic", "list_scheduled_tasks"),
         ("basic", "save_scheduled_task"),
         ("basic", "create_scheduled_task"),
@@ -101,6 +110,9 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("basic", "inspect_runtime_flow"),
         ("basic", "inspect_chat_context"),
         ("basic", "inspect_policy"),
+        ("basic", "inspect_tools"),
+        ("basic", "inspect_skills"),
+        ("basic", "inspect_skill_load_errors"),
         ("basic", "get_current_time"),
         ("code", "_workspace_execute_python_code"),
         ("code", "_workspace_execute_shell_command"),

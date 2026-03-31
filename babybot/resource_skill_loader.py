@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import ast
-import inspect
-import io
 import logging
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +22,36 @@ logger = logging.getLogger(__name__)
 class SkillLoader:
     def __init__(self, owner: Any) -> None:
         self._owner = owner
+
+    def _record_load_error(
+        self,
+        *,
+        skill_name: str,
+        path: Path,
+        error: str,
+        stage: str,
+    ) -> None:
+        recorder = getattr(self._owner, "_record_skill_load_error", None)
+        if callable(recorder):
+            recorder(
+                skill=skill_name,
+                path=str(path),
+                error=error,
+                stage=stage,
+            )
+            return
+        errors = getattr(self._owner, "_skill_load_errors", None)
+        if errors is None:
+            errors = []
+            self._owner._skill_load_errors = errors
+        errors.append(
+            {
+                "skill": skill_name,
+                "path": str(path),
+                "error": error,
+                "stage": stage,
+            }
+        )
 
     def register_configured_skills(self, configured: dict[str, dict]) -> None:
         for name, conf in configured.items():
@@ -97,6 +124,12 @@ class SkillLoader:
                     )
                 )
             except Exception as exc:
+                self._record_load_error(
+                    skill_name=name,
+                    path=Path(conf.get("directory", "")) if conf.get("directory") else Path("."),
+                    error=str(exc),
+                    stage="configured-skill",
+                )
                 logger.warning("Failed to load configured skill %s: %s", name, exc)
 
     def discover_skills(self) -> None:
@@ -161,6 +194,12 @@ class SkillLoader:
                         )
                     )
                 except Exception as exc:
+                    self._record_load_error(
+                        skill_name=child.name,
+                        path=child,
+                        error=str(exc),
+                        stage="discover-skill",
+                    )
                     logger.warning("Failed to auto-load skill %s: %s", child, exc)
 
     def register_skill_tools(
@@ -190,6 +229,17 @@ class SkillLoader:
             if py_file.name.startswith("_"):
                 continue
             before_count = len(tool_names)
+            try:
+                ast.parse(py_file.read_text(encoding="utf-8", errors="ignore"))
+            except Exception as exc:
+                self._record_load_error(
+                    skill_name=skill_name,
+                    path=py_file,
+                    error=str(exc),
+                    stage="parse-script",
+                )
+                logger.warning("Failed to parse skill script %s: %s", py_file, exc)
+                continue
             specs = self.extract_function_specs_from_script(py_file)
             if specs:
                 for spec in specs:
@@ -210,34 +260,6 @@ class SkillLoader:
                         group=group_name,
                     )
                     tool_names.append(tool_name)
-            else:
-                try:
-                    _saved_stdout, _saved_stderr = sys.stdout, sys.stderr
-                    sys.stdout = io.StringIO()
-                    sys.stderr = io.StringIO()
-                    try:
-                        module = self._owner._load_tool_module(str(py_file))
-                    finally:
-                        sys.stdout, sys.stderr = _saved_stdout, _saved_stderr
-                    for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                        if (
-                            func.__module__ != module.__name__
-                            or self.skip_skill_function_name(func_name)
-                        ):
-                            continue
-                        tool_name = f"{slug}__{func_name}"
-                        self._owner.register_tool(
-                            func=func,
-                            group_name=group_name,
-                            func_name=tool_name,
-                        )
-                        tool_names.append(tool_name)
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to import skill script %s: %s",
-                        py_file,
-                        exc,
-                    )
             if len(tool_names) == before_count:
                 cli_spec = self.extract_cli_tool_spec_from_script(py_file)
                 if cli_spec is not None:

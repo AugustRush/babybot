@@ -69,6 +69,28 @@ def anchor_delay_to_request_time(
     return None, anchored.isoformat(timespec="seconds")
 
 
+def validate_schedule_selection(
+    *,
+    cron: str | None,
+    interval_seconds: float | None,
+    run_at: str | None,
+    delay_seconds: float | None,
+    allow_omitted: bool = False,
+) -> None:
+    provided = [
+        ("cron", cron),
+        ("interval_seconds", interval_seconds),
+        ("run_at", run_at),
+        ("delay_seconds", delay_seconds),
+    ]
+    count = sum(value is not None for _, value in provided)
+    if allow_omitted and count == 0:
+        return
+    if count != 1:
+        options = ", ".join(name for name, _ in provided)
+        raise ValueError(f"Provide exactly one scheduling option: {options}.")
+
+
 def build_list_scheduled_tasks_tool(owner: Any) -> Any:
     def list_scheduled_tasks() -> str:
         """List all scheduled tasks from the workspace task file."""
@@ -98,6 +120,12 @@ def build_create_scheduled_task_tool(owner: Any) -> Any:
         - cron: recurring cron expression
         - interval_seconds: recurring every N seconds
         """
+        validate_schedule_selection(
+            cron=cron,
+            interval_seconds=interval_seconds,
+            run_at=run_at,
+            delay_seconds=delay_seconds,
+        )
         channel_name, target_chat_id = resolve_scheduled_task_target(channel, chat_id)
         delay_seconds_resolved, run_at_resolved = anchor_delay_to_request_time(
             delay_seconds=delay_seconds,
@@ -141,6 +169,12 @@ def build_save_scheduled_task_tool(owner: Any) -> Any:
         - cron: recurring cron expression
         - interval_seconds: recurring every N seconds
         """
+        validate_schedule_selection(
+            cron=cron,
+            interval_seconds=interval_seconds,
+            run_at=run_at,
+            delay_seconds=delay_seconds,
+        )
         channel_name, target_chat_id = resolve_scheduled_task_target(channel, chat_id)
         delay_seconds_resolved, run_at_resolved = anchor_delay_to_request_time(
             delay_seconds=delay_seconds,
@@ -184,6 +218,13 @@ def build_update_scheduled_task_tool(owner: Any) -> Any:
         - cron: recurring cron expression
         - interval_seconds: recurring every N seconds
         """
+        validate_schedule_selection(
+            cron=cron,
+            interval_seconds=interval_seconds,
+            run_at=run_at,
+            delay_seconds=delay_seconds,
+            allow_omitted=True,
+        )
         channel_name = channel
         target_chat_id = chat_id
         if channel_name is None or target_chat_id is None:

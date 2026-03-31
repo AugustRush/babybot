@@ -128,7 +128,11 @@ class ResourceToolLoader:
             return {"type": "array", "items": item_schema}
 
         if origin is dict:
-            return {"type": "object"}
+            value_schema = cls.schema_for_annotation(args[1]) if len(args) >= 2 else {}
+            schema = {"type": "object"}
+            if value_schema:
+                schema["additionalProperties"] = value_schema
+            return schema
 
         if origin is Literal:
             values = [value for value in args if isinstance(value, (str, int, float, bool))]

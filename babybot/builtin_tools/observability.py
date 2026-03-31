@@ -27,9 +27,40 @@ def build_inspect_policy_tool(owner: Any) -> Any:
     return inspect_policy
 
 
+def build_inspect_tools_tool(owner: Any) -> Any:
+    async def inspect_tools(
+        query: str = "",
+        group: str = "",
+        active_only: bool = False,
+    ) -> str:
+        """Inspect available tools, grouped by tool group, active state, and schema summary."""
+        return owner._inspect_tools(query=query, group=group, active_only=active_only)
+
+    return inspect_tools
+
+
+def build_inspect_skills_tool(owner: Any) -> Any:
+    async def inspect_skills(query: str = "", active_only: bool = False) -> str:
+        """Inspect discovered skills, their source, active state, tool group, and exposed tools."""
+        return owner._inspect_skills(query=query, active_only=active_only)
+
+    return inspect_skills
+
+
+def build_inspect_skill_load_errors_tool(owner: Any) -> Any:
+    async def inspect_skill_load_errors(limit: int = 20) -> str:
+        """Inspect recent skill loading failures with path and error details."""
+        return owner._inspect_skill_load_errors(limit=limit)
+
+    return inspect_skill_load_errors
+
+
 def iter_observability_tool_registrations(owner: Any) -> tuple[tuple[Any, str], ...]:
     return (
         (build_inspect_runtime_flow_tool(owner), "basic"),
         (build_inspect_chat_context_tool(owner), "basic"),
         (build_inspect_policy_tool(owner), "basic"),
+        (build_inspect_tools_tool(owner), "basic"),
+        (build_inspect_skills_tool(owner), "basic"),
+        (build_inspect_skill_load_errors_tool(owner), "basic"),
     )
