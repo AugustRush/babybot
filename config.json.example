@@ -11,6 +11,9 @@
       "type": "stdio",
       "command": "npx",
       "args": ["@playwright/mcp@latest"],
+      "env": {
+        "PLAYWRIGHT_MCP_OUTPUT_DIR": "~/.babybot/workspace/output"
+      },
       "group_name": "browser",
       "active": false
     },

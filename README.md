@@ -477,6 +477,9 @@ uv run gateway
       "type": "stdio",
       "command": "npx",
       "args": ["@playwright/mcp@latest"],
+      "env": {
+        "PLAYWRIGHT_MCP_OUTPUT_DIR": "~/.babybot/workspace/output"
+      },
       "group_name": "browser",
       "active": false
     },
@@ -492,6 +495,8 @@ uv run gateway
 ```
 
 支持 `stdio`（子进程）和 `http`（HTTP/SSE）两种 MCP 传输方式。
+
+对于 `@playwright/mcp`，BabyBot 会默认把分析产物和临时输出定向到 `~/.babybot/workspace/output`，避免在当前项目目录生成 `.playwright-mcp/`。如果你需要自定义目录，也可以像上面的示例一样通过 `env.PLAYWRIGHT_MCP_OUTPUT_DIR` 显式覆盖。
 
 ### 工具组
 

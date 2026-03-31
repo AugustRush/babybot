@@ -528,10 +528,18 @@ class ResourceManager:
                 mcp_type = server_conf.get("type", "http")
                 group_name = server_conf.get("group_name", name)
                 if mcp_type == "stdio":
-                    await self.register_mcp_stdio(
+                    command, args, cwd, env = self._prepare_mcp_stdio_launch(
                         name=name,
                         command=server_conf["command"],
                         args=server_conf.get("args", []),
+                        server_conf=server_conf,
+                    )
+                    await self.register_mcp_stdio(
+                        name=name,
+                        command=command,
+                        args=args,
+                        cwd=cwd,
+                        env=env,
                         group_name=group_name,
                     )
                 else:
@@ -578,9 +586,11 @@ class ResourceManager:
         name: str,
         command: str,
         args: list[str],
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
         group_name: str = "mcp",
     ) -> None:
-        client = StdioMCPRuntimeClient(command=command, args=args)
+        client = StdioMCPRuntimeClient(command=command, args=args, cwd=cwd, env=env)
         await client.connect()
         self.mcp_clients[name] = client
         self.mcp_server_groups[name] = group_name
@@ -591,6 +601,58 @@ class ResourceManager:
                 active=False,
             )
         await register_mcp_tools(self.registry, client, group=group_name)
+
+    def _prepare_mcp_stdio_launch(
+        self,
+        name: str,
+        command: str,
+        args: list[str],
+        server_conf: dict[str, Any],
+    ) -> tuple[str, list[str], str | None, dict[str, str] | None]:
+        cwd = self._normalize_stdio_mcp_path(server_conf.get("cwd"))
+        env = self._normalize_stdio_mcp_env(server_conf.get("env"))
+        if self._is_playwright_mcp_server(name=name, command=command, args=args):
+            env = dict(env or {})
+            env.setdefault(
+                "PLAYWRIGHT_MCP_OUTPUT_DIR",
+                str(self._get_output_dir().resolve()),
+            )
+        return command, list(args), cwd, env or None
+
+    def _normalize_stdio_mcp_env(
+        self,
+        raw_env: Any,
+    ) -> dict[str, str]:
+        if not isinstance(raw_env, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for key, value in raw_env.items():
+            if value is None:
+                continue
+            text = os.path.expandvars(str(value))
+            if "/" in text or text.startswith("~"):
+                text = str(Path(text).expanduser().resolve())
+            normalized[str(key)] = text
+        return normalized
+
+    @staticmethod
+    def _is_playwright_mcp_server(
+        *,
+        name: str,
+        command: str,
+        args: list[str],
+    ) -> bool:
+        if name.strip().lower() == "playwright":
+            return True
+        joined = " ".join([command, *args]).lower()
+        return "@playwright/mcp" in joined or "playwright/mcp" in joined
+
+    @staticmethod
+    def _normalize_stdio_mcp_path(value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        text = os.path.expandvars(str(value))
+        return str(Path(text).expanduser().resolve())
 
     def _load_config(self) -> None:
         tool_groups = {

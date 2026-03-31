@@ -52,9 +52,20 @@ class BaseMCPRuntimeClient:
 class StdioMCPRuntimeClient(BaseMCPRuntimeClient):
     """MCP client over stdio transport."""
 
-    def __init__(self, command: str, args: list[str], cwd: str | None = None):
+    def __init__(
+        self,
+        command: str,
+        args: list[str],
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ):
         _require_mcp_package()
-        self._params = StdioServerParameters(command=command, args=args, cwd=cwd)
+        self._params = StdioServerParameters(
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+        )
         self._stdio_cm: Any | None = None
         self._session: ClientSession | None = None
 
