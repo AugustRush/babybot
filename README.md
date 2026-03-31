@@ -477,15 +477,13 @@ uv run gateway
       "type": "stdio",
       "command": "npx",
       "args": ["@playwright/mcp@latest"],
-      "env": {
-        "PLAYWRIGHT_MCP_OUTPUT_DIR": "~/.babybot/workspace/output"
-      },
       "group_name": "browser",
       "active": false
     },
     "gaode_map": {
       "type": "http",
       "url": "https://mcp.amap.com/mcp?key=YOUR_KEY",
+      "headers": {},
       "transport": "streamable_http",
       "group_name": "map_services",
       "active": false
@@ -496,7 +494,13 @@ uv run gateway
 
 支持 `stdio`（子进程）和 `http`（HTTP/SSE）两种 MCP 传输方式。
 
-对于 `@playwright/mcp`，BabyBot 会默认把分析产物和临时输出定向到 `~/.babybot/workspace/output`，避免在当前项目目录生成 `.playwright-mcp/`。如果你需要自定义目录，也可以像上面的示例一样通过 `env.PLAYWRIGHT_MCP_OUTPUT_DIR` 显式覆盖。
+BabyBot 会为每个 MCP 统一分配本地 artifact 根目录：`~/.babybot/workspace/output/mcp/<server-name>`。
+
+- `stdio` MCP：默认以该目录作为工作目录，并注入 `BABYBOT_MCP_SERVER_NAME`、`BABYBOT_MCP_WORKSPACE_ROOT`、`BABYBOT_MCP_ARTIFACT_ROOT`
+- `http` MCP：会在请求头里附带 `X-Babybot-Mcp-Server`、`X-Babybot-Workspace-Root`、`X-Babybot-Artifact-Root`
+- 如果你在配置中显式提供 `cwd`、`env` 或 `headers`，会在默认值基础上合并；同名键以你的配置为准
+
+这样可以把大多数 MCP 的临时产物统一收敛到 BabyBot workspace 下，而不是散落到当前项目目录。
 
 ### 工具组
 

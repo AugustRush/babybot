@@ -544,9 +544,15 @@ class ResourceManager:
                     )
                 else:
                     transport = server_conf.get("transport", "streamable_http")
-                    await self.register_mcp(
+                    url, headers = self._prepare_mcp_http_launch(
                         name=name,
                         url=server_conf["url"],
+                        server_conf=server_conf,
+                    )
+                    await self.register_mcp(
+                        name=name,
+                        url=url,
+                        headers=headers,
                         transport=transport,
                         group_name=group_name,
                     )
@@ -559,6 +565,7 @@ class ResourceManager:
         self,
         name: str,
         url: str,
+        headers: dict[str, str] | None = None,
         transport: str = "streamable_http",
         group_name: str = "mcp",
     ) -> None:
@@ -569,7 +576,7 @@ class ResourceManager:
                 name,
             )
             return
-        client = HttpMCPRuntimeClient(url=url)
+        client = HttpMCPRuntimeClient(url=url, headers=headers)
         await client.connect()
         self.mcp_clients[name] = client
         self.mcp_server_groups[name] = group_name
@@ -609,43 +616,40 @@ class ResourceManager:
         args: list[str],
         server_conf: dict[str, Any],
     ) -> tuple[str, list[str], str | None, dict[str, str] | None]:
+        defaults = self._build_mcp_stdio_env(name)
+        env = self._normalize_stdio_mcp_env(server_conf.get("env"), defaults=defaults)
         cwd = self._normalize_stdio_mcp_path(server_conf.get("cwd"))
-        env = self._normalize_stdio_mcp_env(server_conf.get("env"))
-        if self._is_playwright_mcp_server(name=name, command=command, args=args):
-            env = dict(env or {})
-            env.setdefault(
-                "PLAYWRIGHT_MCP_OUTPUT_DIR",
-                str(self._get_output_dir().resolve()),
-            )
+        if cwd is None:
+            cwd = env["BABYBOT_MCP_ARTIFACT_ROOT"]
+        Path(cwd).mkdir(parents=True, exist_ok=True)
         return command, list(args), cwd, env or None
 
     def _normalize_stdio_mcp_env(
         self,
         raw_env: Any,
+        *,
+        defaults: dict[str, str] | None = None,
     ) -> dict[str, str]:
+        normalized: dict[str, str] = dict(defaults or {})
         if not isinstance(raw_env, dict):
-            return {}
-        normalized: dict[str, str] = {}
+            return normalized
         for key, value in raw_env.items():
             if value is None:
                 continue
-            text = os.path.expandvars(str(value))
-            if "/" in text or text.startswith("~"):
-                text = str(Path(text).expanduser().resolve())
-            normalized[str(key)] = text
+            normalized[str(key)] = self._normalize_mcp_mapping_value(str(key), value)
         return normalized
 
-    @staticmethod
-    def _is_playwright_mcp_server(
-        *,
+    def _prepare_mcp_http_launch(
+        self,
         name: str,
-        command: str,
-        args: list[str],
-    ) -> bool:
-        if name.strip().lower() == "playwright":
-            return True
-        joined = " ".join([command, *args]).lower()
-        return "@playwright/mcp" in joined or "playwright/mcp" in joined
+        url: str,
+        server_conf: dict[str, Any],
+    ) -> tuple[str, dict[str, str] | None]:
+        headers = self._normalize_http_mcp_headers(
+            server_conf.get("headers"),
+            defaults=self._build_mcp_http_headers(name),
+        )
+        return url, headers or None
 
     @staticmethod
     def _normalize_stdio_mcp_path(value: Any) -> str | None:
@@ -653,6 +657,64 @@ class ResourceManager:
             return None
         text = os.path.expandvars(str(value))
         return str(Path(text).expanduser().resolve())
+
+    def _normalize_http_mcp_headers(
+        self,
+        raw_headers: Any,
+        *,
+        defaults: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        normalized: dict[str, str] = dict(defaults or {})
+        if not isinstance(raw_headers, dict):
+            return normalized
+        for key, value in raw_headers.items():
+            if value is None:
+                continue
+            normalized[str(key)] = self._normalize_mcp_mapping_value(str(key), value)
+        return normalized
+
+    def _build_mcp_stdio_env(self, name: str) -> dict[str, str]:
+        metadata = self._build_mcp_runtime_metadata(name)
+        return {
+            "BABYBOT_MCP_SERVER_NAME": metadata["server_name"],
+            "BABYBOT_MCP_WORKSPACE_ROOT": metadata["workspace_root"],
+            "BABYBOT_MCP_ARTIFACT_ROOT": metadata["artifact_root"],
+        }
+
+    def _build_mcp_http_headers(self, name: str) -> dict[str, str]:
+        metadata = self._build_mcp_runtime_metadata(name)
+        return {
+            "X-Babybot-Mcp-Server": metadata["server_name"],
+            "X-Babybot-Workspace-Root": metadata["workspace_root"],
+            "X-Babybot-Artifact-Root": metadata["artifact_root"],
+        }
+
+    def _build_mcp_runtime_metadata(self, name: str) -> dict[str, str]:
+        workspace_root = str(self.config.workspace_dir.resolve())
+        artifact_root = str(self._get_mcp_artifact_root(name))
+        return {
+            "server_name": name,
+            "workspace_root": workspace_root,
+            "artifact_root": artifact_root,
+        }
+
+    def _get_mcp_artifact_root(self, name: str) -> Path:
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", name.strip()) or "mcp"
+        root = self._get_output_dir() / "mcp" / safe_name
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @staticmethod
+    def _normalize_mcp_mapping_value(key: str, value: Any) -> str:
+        text = os.path.expandvars(str(value))
+        if ResourceManager._is_path_like_mcp_key(key):
+            return str(Path(text).expanduser().resolve())
+        return text
+
+    @staticmethod
+    def _is_path_like_mcp_key(key: str) -> bool:
+        upper = key.upper().replace("-", "_")
+        return upper.endswith(("_ROOT", "_DIR", "_PATH"))
 
     def _load_config(self) -> None:
         tool_groups = {

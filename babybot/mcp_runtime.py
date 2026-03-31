@@ -6,6 +6,8 @@ import asyncio
 import logging
 from typing import Any
 
+import httpx
+
 try:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -133,14 +135,20 @@ class StdioMCPRuntimeClient(BaseMCPRuntimeClient):
 class HttpMCPRuntimeClient(BaseMCPRuntimeClient):
     """MCP client over streamable HTTP transport."""
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, headers: dict[str, str] | None = None):
         _require_mcp_package()
         self._url = url
+        self._headers = dict(headers or {})
         self._http_cm: Any | None = None
+        self._http_client: httpx.AsyncClient | None = None
         self._session: ClientSession | None = None
 
     async def connect(self) -> None:
-        self._http_cm = streamable_http_client(self._url)
+        self._http_client = httpx.AsyncClient(headers=self._headers or None)
+        self._http_cm = streamable_http_client(
+            self._url,
+            http_client=self._http_client,
+        )
         read_stream, write_stream, _get_session_id = await self._http_cm.__aenter__()
         try:
             self._session = ClientSession(read_stream, write_stream)
@@ -153,6 +161,12 @@ class HttpMCPRuntimeClient(BaseMCPRuntimeClient):
             except Exception:
                 pass
             self._http_cm = None
+            if self._http_client is not None:
+                try:
+                    await self._http_client.aclose()
+                except Exception:
+                    pass
+                self._http_client = None
             self._session = None
             raise
 
@@ -195,6 +209,12 @@ class HttpMCPRuntimeClient(BaseMCPRuntimeClient):
             except Exception:
                 pass
             self._http_cm = None
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
 
 
 def close_clients_best_effort(clients: dict[str, BaseMCPRuntimeClient]) -> None:
