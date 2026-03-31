@@ -22,6 +22,7 @@ class _System:
     max_concurrency: int = 1
     max_per_chat: int = 1
     send_ack: bool = False
+    debug_runtime_feedback: bool = False
     message_queue_maxsize: int = 100
     scheduled_max_concurrency: int = 0
 
@@ -722,6 +723,51 @@ def test_message_bus_caches_send_intermediate_message_signature_support(monkeypa
     asyncio.run(_run())
 
     assert signature_calls == 1
+
+
+def test_message_bus_sends_debug_intermediate_message_as_post() -> None:
+    class _IntermediateOrchestrator:
+        async def process_task(
+            self,
+            user_input: str,
+            chat_key: str = "",
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            send_intermediate_message: Any = None,
+        ) -> TaskResponse:
+            del user_input, chat_key, heartbeat, media_paths
+            if send_intermediate_message is not None:
+                await send_intermediate_message("调试：编排决策\nrouting=rule/tool_workflow")
+            return TaskResponse(text="ok")
+
+    cfg = _Config()
+    cfg.system.debug_runtime_feedback = True
+    channel = _FakeFeishuChannel(stream_reply=False)
+    bus = MessageBus(
+        config=cfg,  # type: ignore[arg-type]
+        orchestrator=_IntermediateOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> None:
+        await bus.start()
+        try:
+            await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    asyncio.run(_run())
+
+    assert len(channel.sent) == 2
+    assert channel.sent[0].text.startswith("调试：编排决策")
+    assert channel.sent_kwargs[0]["message_format"] == "post"
 
 
 

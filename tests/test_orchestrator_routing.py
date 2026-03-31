@@ -906,6 +906,71 @@ def test_answer_with_dag_skips_model_router_for_short_nonquestion_goal(tmp_path:
     assert "routing_decision" not in seen
 
 
+def test_answer_with_dag_sends_debug_policy_summary_when_enabled() -> None:
+    gateway = _FakeGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    agent.config.system.debug_runtime_feedback = True
+    debug_messages: list[str] = []
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal, context
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    async def _send_intermediate_message(text: str) -> None:
+        debug_messages.append(text)
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(
+            agent._answer_with_dag(
+                "请总结一下这段内容",
+                send_intermediate_message=_send_intermediate_message,
+            )
+        )
+
+    assert text == "ok"
+    assert media == []
+    assert len(debug_messages) == 1
+    assert "调试：编排决策" in debug_messages[0]
+    assert "routing=" in debug_messages[0]
+    assert "scheduling=" in debug_messages[0]
+    assert "worker=" in debug_messages[0]
+
+
+def test_answer_with_dag_does_not_send_debug_policy_summary_by_default() -> None:
+    gateway = _FakeGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+    debug_messages: list[str] = []
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **_: Any) -> None:
+            del resource_manager, gateway
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal, context
+            return type("R", (), {"conclusion": "ok", "task_results": {}})()
+
+    async def _send_intermediate_message(text: str) -> None:
+        debug_messages.append(text)
+
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(
+            agent._answer_with_dag(
+                "请总结一下这段内容",
+                send_intermediate_message=_send_intermediate_message,
+            )
+        )
+
+    assert text == "ok"
+    assert media == []
+    assert debug_messages == []
+
+
 def test_should_call_model_router_allows_short_open_ended_goal() -> None:
     snapshot = RoutingContextSnapshot(
         chat_key="feishu:c1",

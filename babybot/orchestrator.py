@@ -405,6 +405,107 @@ class OrchestratorAgent:
         return hints
 
     @staticmethod
+    def _debug_policy_line(
+        label: str,
+        value: str,
+        *,
+        explain: str = "",
+    ) -> str:
+        normalized_label = str(label or "").strip() or "unknown"
+        normalized_value = str(value or "").strip() or "-"
+        normalized_explain = str(explain or "").strip()
+        if not normalized_explain:
+            return f"{normalized_label}={normalized_value}"
+        return f"{normalized_label}={normalized_value}; explain={normalized_explain}"
+
+    def _build_debug_policy_summary(
+        self,
+        *,
+        flow_id: str,
+        decomposition_action: str,
+        decomposition_hint: str,
+        route_mode: str,
+        router_skip_reason: str,
+        routing_decision: RoutingDecision | None,
+        scheduling_policy: dict[str, Any],
+        worker_policy: dict[str, Any],
+    ) -> str:
+        routing_value = (
+            "/".join(
+                part
+                for part in (
+                    str(routing_decision.decision_source or "").strip(),
+                    str(routing_decision.route_mode or "").strip(),
+                    str(routing_decision.execution_style or "").strip(),
+                )
+                if part
+            )
+            if routing_decision is not None
+            else f"fallback/{str(route_mode or '').strip() or 'tool_workflow'}"
+        )
+        routing_explain = (
+            str(routing_decision.explain or "").strip()
+            if routing_decision is not None
+            else f"router_skip_reason={str(router_skip_reason or 'fallback').strip()}"
+        )
+        lines = [
+            "调试：编排决策",
+            f"flow_id={str(flow_id or '').strip() or '-'}",
+            self._debug_policy_line(
+                "decomposition",
+                str(decomposition_action or "").strip(),
+                explain=decomposition_hint,
+            ),
+            self._debug_policy_line(
+                "routing",
+                routing_value,
+                explain=routing_explain,
+            ),
+            self._debug_policy_line(
+                "scheduling",
+                str(scheduling_policy.get('action_name', '') or '').strip(),
+                explain=str(scheduling_policy.get("explain", "") or ""),
+            ),
+            self._debug_policy_line(
+                "worker",
+                str(worker_policy.get('action_name', '') or '').strip(),
+                explain=str(worker_policy.get("explain", "") or ""),
+            ),
+        ]
+        return "\n".join(line for line in lines if line.strip())
+
+    async def _maybe_send_debug_policy_summary(
+        self,
+        *,
+        send_intermediate_message: Callable[[str], Awaitable[None]] | None,
+        flow_id: str,
+        decomposition_action: str,
+        decomposition_hint: str,
+        route_mode: str,
+        router_skip_reason: str,
+        routing_decision: RoutingDecision | None,
+        scheduling_policy: dict[str, Any],
+        worker_policy: dict[str, Any],
+    ) -> None:
+        if send_intermediate_message is None:
+            return
+        if not bool(getattr(self.config.system, "debug_runtime_feedback", False)):
+            return
+        text = self._build_debug_policy_summary(
+            flow_id=flow_id,
+            decomposition_action=decomposition_action,
+            decomposition_hint=decomposition_hint,
+            route_mode=route_mode,
+            router_skip_reason=router_skip_reason,
+            routing_decision=routing_decision,
+            scheduling_policy=scheduling_policy,
+            worker_policy=worker_policy,
+        )
+        if not text.strip():
+            return
+        await send_intermediate_message(text)
+
+    @staticmethod
     def _format_reflection_hint(payload: dict[str, Any]) -> str:
         return (
             "历史反思："
@@ -1037,6 +1138,17 @@ class OrchestratorAgent:
             hint = self._format_reflection_hint(payload)
             if hint not in policy_hints:
                 policy_hints.append(hint)
+        await self._maybe_send_debug_policy_summary(
+            send_intermediate_message=send_intermediate_message,
+            flow_id=flow_id,
+            decomposition_action=decomposition_action,
+            decomposition_hint=decomposition_hint,
+            route_mode=route_mode,
+            router_skip_reason=router_skip_reason,
+            routing_decision=routing_decision,
+            scheduling_policy=scheduling_policy,
+            worker_policy=worker_policy,
+        )
 
         context = ExecutionContext(
             session_id=flow_id,

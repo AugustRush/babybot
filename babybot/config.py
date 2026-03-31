@@ -71,6 +71,7 @@ class SystemConfig:
     routing_timeout: float = 3.0
     reflection_enabled: bool = True
     reflection_max_hints: int = 3
+    debug_runtime_feedback: bool = False
     policy_learning_enabled: bool = True
     policy_learning_min_samples: int = 0
     policy_learning_explore_ratio: float = -1.0
@@ -216,6 +217,7 @@ class Config:
             routing_timeout=system_conf.get("routing_timeout", 3.0),
             reflection_enabled=system_conf.get("reflection_enabled", True),
             reflection_max_hints=system_conf.get("reflection_max_hints", 3),
+            debug_runtime_feedback=system_conf.get("debug_runtime_feedback", False),
             policy_learning_enabled=system_conf.get("policy_learning_enabled", True),
             policy_learning_min_samples=system_conf.get(
                 "policy_learning_min_samples", 0
@@ -378,6 +380,7 @@ class Config:
                 "routing_timeout": 3.0,
                 "reflection_enabled": True,
                 "reflection_max_hints": 3,
+                "debug_runtime_feedback": False,
                 "policy_learning_enabled": True,
                 "policy_learning_min_samples": 0,
                 "policy_learning_explore_ratio": -1.0,
@@ -488,6 +491,7 @@ class Config:
                 "routing_timeout": self.system.routing_timeout,
                 "reflection_enabled": self.system.reflection_enabled,
                 "reflection_max_hints": self.system.reflection_max_hints,
+                "debug_runtime_feedback": self.system.debug_runtime_feedback,
                 "policy_learning_enabled": self.system.policy_learning_enabled,
                 "policy_learning_min_samples": self.system.policy_learning_min_samples,
                 "policy_learning_explore_ratio": self.system.policy_learning_explore_ratio,

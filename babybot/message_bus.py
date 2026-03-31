@@ -387,11 +387,19 @@ class MessageBus:
             if not text or not text.strip() or channel is None:
                 return
             try:
+                send_kwargs: dict[str, Any] = {
+                    "sender_id": msg.sender_id,
+                    "metadata": msg.metadata,
+                }
+                if (
+                    bool(getattr(self._config.system, "debug_runtime_feedback", False))
+                    and text.strip().startswith("调试：")
+                ):
+                    send_kwargs["message_format"] = "post"
                 await channel.send_response(
                     msg.chat_id,
                     TaskResponse(text=text),
-                    sender_id=msg.sender_id,
-                    metadata=msg.metadata,
+                    **send_kwargs,
                 )
             except Exception:
                 logger.warning(

@@ -98,6 +98,25 @@ def test_routing_config_fields_loaded_from_system(tmp_path, monkeypatch):
     assert cfg.system.reflection_max_hints == 2
 
 
+def test_debug_runtime_feedback_loaded_from_system(tmp_path, monkeypatch):
+    monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "home" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "system": {"debug_runtime_feedback": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config(str(config_path))
+
+    assert cfg.system.debug_runtime_feedback is True
+
+
 def test_bootstrap_fallback_config_matches_router_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("BABYBOT_HOME", str(tmp_path / "home"))
     config_path = tmp_path / "home" / "config.json"

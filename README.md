@@ -179,6 +179,7 @@ uv run babybot
 - `routing_timeout` 默认 `3.0` 秒；只有进入小模型 router 时才使用，并会根据最近模型路由 telemetry 做保守 fail-fast 调整，优先不阻塞主会话流程
 - router 的短超时属于软回退：命中上限时会直接退回默认合同，并按低噪音日志记录，而不是把整条会话记成模型调用错误
 - `reflection_enabled` 默认开启；`reflection_max_hints` 默认最多注入 3 条历史反思
+- `debug_runtime_feedback` 默认关闭；开启后，消息通道会额外发送开发态调试卡片，直接展示 decomposition / routing / scheduling / worker 的 explain 摘要，不影响正式最终回复
 - 对稳定命中的成功 bucket，会优先复用带时间衰减的历史成功反思直达同类路由；这些成功经验也会回流到调度/worker gate 的保守选择，并单独统计 execution_style / parallelism / worker_gate 命中率
 - 对规则和 reflection 都没命中的模糊请求，会先尝试一个极轻量的稳定意图桶缓存；只有缓存也没把握时，才进入一次小模型 router
 - 意图桶缓存会对旧样本做时间衰减；如果历史成功样本不足或过旧，会自动回退到模型 router
@@ -444,6 +445,7 @@ uv run gateway
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
     "context_max_chats": 500,
+    "debug_runtime_feedback": false
   }
 }
 ```
@@ -464,6 +466,7 @@ uv run gateway
 | `context_history_tokens` | 2000 | 历史上下文 token 预算 |
 | `context_compact_threshold` | 3000 | 触发锚点压缩的 token 阈值 |
 | `context_max_chats` | 500 | 内存中 LRU 缓存的最大会话数 |
+| `debug_runtime_feedback` | false | 是否额外发送开发态调试卡片，展示编排 explain 摘要 |
 
 ### MCP 服务
 
