@@ -706,6 +706,30 @@ class TestBuildHistoryMessages:
         assert "独立开发者" in warm_text
         assert "代码架构助手" in warm_text
 
+
+def test_history_messages_include_assistant_profile_markdown(tmp_path):
+    from babybot.agent_kernel.executor import _build_history_messages
+    from babybot.memory_store import HybridMemoryStore
+
+    tape = Tape("chat1")
+    tape.append("anchor", {"name": "compact/1", "state": {"summary": "继续当前任务"}})
+
+    memory_store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    memory_store.ensure_bootstrap()
+
+    msgs = _build_history_messages(
+        tape,
+        2000,
+        query="继续处理",
+        memory_store=memory_store,
+    )
+    system_texts = [m.content for m in msgs if m.role == "system"]
+
+    assert any(text.startswith("[Assistant Profile]") for text in system_texts)
+
     def test_context_view_demotes_decaying_soft_memory(self, tmp_path):
         from babybot.context_views import build_context_view
         from babybot.memory_store import HybridMemoryStore

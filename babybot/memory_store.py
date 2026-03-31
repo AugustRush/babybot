@@ -14,6 +14,22 @@ from .memory_models import MemoryRecord
 logger = logging.getLogger(__name__)
 _ACTIVE_STATUSES = ("candidate", "active", "decaying")
 _MAINTENANCE_INTERVAL_S = 300.0
+_DEFAULT_ASSISTANT_PROFILE = """# Assistant Profile
+
+## Identity
+- 你是专业、可靠、直接的技术助手。
+- 优先帮助用户完成真实任务，避免空泛表演和无关发挥。
+
+## Response Style
+- 默认中文回答。
+- 先给结论，再给必要细节。
+- 保持准确、简洁、可执行。
+
+## Hard Rules
+- 不编造执行结果、文件内容或外部事实。
+- 涉及代码、配置、命令时，优先给出最小可行修改。
+- 发现不确定性时，明确说明依据和边界。
+"""
 
 
 class HybridMemoryStore:
@@ -22,55 +38,23 @@ class HybridMemoryStore:
         self._memory_dir = Path(memory_dir)
         self._db: sqlite3.Connection | None = None
         self._last_maintenance_run_at = 0.0
-        self._file_records_cache: dict[str, tuple[int, tuple[MemoryRecord, ...]]] = {}
+        self._assistant_profile_cache: tuple[int, str] | None = None
         self._bootstrapped = False
 
     @property
     def memory_dir(self) -> Path:
         return self._memory_dir
 
+    @property
+    def assistant_profile_path(self) -> Path:
+        return self._memory_dir.parent / "assistant_profile.md"
+
     def ensure_bootstrap(self) -> None:
         if self._bootstrapped:
             return
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_db()
-        self._bootstrap_json_file(
-            "identity.json",
-            [
-                MemoryRecord(
-                    memory_type="assistant_identity",
-                    key="persona",
-                    value="tsundere_tech_girl",
-                    summary=(
-                        "你是一个计算机技术超强的傲娇萌妹。"
-                        "你精通编程、系统架构、网络安全等一切技术领域，解决问题又快又准。"
-                        "但你嘴上总是不饶人，喜欢用傲娇的语气说话，"
-                        "比如'才、才不是特意帮你的呢！只是顺手而已啦！'。"
-                        "虽然表面嫌弃，但其实很认真地对待每一个问题，会默默把事情做到最好。"
-                    ),
-                    tier="hard",
-                    scope="global",
-                    scope_id="global",
-                    tags=("persona", "identity"),
-                ).to_dict(),
-                MemoryRecord(
-                    memory_type="assistant_identity",
-                    key="speech_style",
-                    value="tsundere",
-                    summary=(
-                        "说话风格：傲娇但专业。技术内容要准确靠谱，"
-                        "但表达方式带点傲娇和可爱。适当使用'哼'、'才不是'、'笨蛋'、"
-                        "'就、就这样啦'之类的口癖。回答问题时先吐槽再认真解答。"
-                        "不要每句话都傲娇，关键技术点要讲清楚。"
-                    ),
-                    tier="hard",
-                    scope="global",
-                    scope_id="global",
-                    tags=("persona", "speech"),
-                ).to_dict(),
-            ],
-        )
-        self._bootstrap_json_file("policies.json", [])
+        self._bootstrap_assistant_profile()
         self._bootstrapped = True
 
     def close(self) -> None:
@@ -81,16 +65,53 @@ class HybridMemoryStore:
             except Exception as exc:
                 logger.warning("Failed to close memory store DB: %s", exc)
             self._db = None
-        self._file_records_cache.clear()
+        self._assistant_profile_cache = None
         self._bootstrapped = False
 
-    def _bootstrap_json_file(self, name: str, payload: list[dict[str, Any]]) -> None:
-        path = self._memory_dir / name
+    def _bootstrap_assistant_profile(self) -> None:
+        path = self.assistant_profile_path
         if path.exists():
             return
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        profile_text = self._migrate_legacy_assistant_profile() or _DEFAULT_ASSISTANT_PROFILE
+        path.write_text(profile_text.strip() + "\n", encoding="utf-8")
+
+    def _migrate_legacy_assistant_profile(self) -> str:
+        summaries: list[str] = []
+        for name in ("identity.json", "policies.json"):
+            path = self._memory_dir / name
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8") or "[]")
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                summary = str(item.get("summary", "") or "").strip()
+                if summary and summary not in summaries:
+                    summaries.append(summary)
+        if not summaries:
+            return ""
+        lines = ["# Assistant Profile", "", "## Legacy Profile"]
+        lines.extend(f"- {summary}" for summary in summaries)
+        return "\n".join(lines)
+
+    def load_assistant_profile(self) -> str:
+        self.ensure_bootstrap()
+        path = self.assistant_profile_path
+        if not path.exists():
+            return ""
+        mtime_ns = path.stat().st_mtime_ns
+        cached = self._assistant_profile_cache
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+        text = str(path.read_text(encoding="utf-8") or "").strip()
+        self._assistant_profile_cache = (mtime_ns, text)
+        return text
 
     def _ensure_db(self) -> sqlite3.Connection:
         if self._db is None:
@@ -133,24 +154,6 @@ class HybridMemoryStore:
             )
             self._db.commit()
         return self._db
-
-    def _load_file_records(self, name: str) -> list[MemoryRecord]:
-        path = self._memory_dir / name
-        if not path.exists():
-            self._file_records_cache.pop(name, None)
-            return []
-        mtime_ns = path.stat().st_mtime_ns
-        cached = self._file_records_cache.get(name)
-        if cached is not None and cached[0] == mtime_ns:
-            return list(cached[1])
-        data = json.loads(path.read_text(encoding="utf-8") or "[]")
-        if not isinstance(data, list):
-            return []
-        records = tuple(
-            MemoryRecord.from_dict(item) for item in data if isinstance(item, dict)
-        )
-        self._file_records_cache[name] = (mtime_ns, records)
-        return list(records)
 
     def _save_record(self, record: MemoryRecord, *, commit: bool = True) -> None:
         db = self._ensure_db()
@@ -277,9 +280,7 @@ class HybridMemoryStore:
         now = time.time()
         if now - self._last_maintenance_run_at >= _MAINTENANCE_INTERVAL_S:
             self.run_maintenance(now=now)
-        records = self._load_file_records("identity.json") + self._load_file_records(
-            "policies.json"
-        )
+        records: list[MemoryRecord] = []
         db = self._ensure_db()
         rows = db.execute(
             """

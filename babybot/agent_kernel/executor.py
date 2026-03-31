@@ -797,6 +797,15 @@ def _build_history_messages(
 
     chat_id = getattr(tape, "chat_id", "")
     if memory_store is not None and chat_id:
+        load_assistant_profile = getattr(memory_store, "load_assistant_profile", None)
+        if callable(load_assistant_profile):
+            assistant_profile = str(load_assistant_profile() or "").strip()
+            if assistant_profile:
+                profile_text = "[Assistant Profile]\n" + assistant_profile
+                profile_cost = max(1, _estimate_token_count(profile_text))
+                if budget_remaining >= profile_cost:
+                    messages.append(ModelMessage(role="system", content=profile_text))
+                    budget_remaining -= profile_cost
         memory_messages = build_context_view_messages(
             memory_store=memory_store,
             chat_id=chat_id,

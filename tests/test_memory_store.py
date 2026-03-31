@@ -15,8 +15,22 @@ def test_hybrid_memory_store_bootstraps_hard_memory_files(tmp_path) -> None:
 
     store.ensure_bootstrap()
 
-    assert (tmp_path / "memory" / "identity.json").exists()
-    assert (tmp_path / "memory" / "policies.json").exists()
+    assert (tmp_path / "assistant_profile.md").exists()
+    assert not (tmp_path / "memory" / "identity.json").exists()
+    assert not (tmp_path / "memory" / "policies.json").exists()
+
+
+def test_hybrid_memory_store_loads_assistant_profile_markdown(tmp_path) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+
+    store.ensure_bootstrap()
+    profile_text = store.load_assistant_profile()
+
+    assert "# Assistant Profile" in profile_text
+    assert "技术助手" in profile_text
 
 
 def test_hybrid_memory_store_extracts_soft_preferences_from_user_message(tmp_path) -> None:
@@ -221,14 +235,14 @@ def test_hybrid_memory_store_run_maintenance_batches_record_saves(tmp_path, monk
     assert all(flag is False for flag in commit_flags)
 
 
-def test_hybrid_memory_store_caches_static_file_records_between_reads(tmp_path, monkeypatch) -> None:
+def test_hybrid_memory_store_caches_assistant_profile_between_reads(tmp_path, monkeypatch) -> None:
     store = HybridMemoryStore(
         db_path=tmp_path / "context.db",
         memory_dir=tmp_path / "memory",
     )
     store.ensure_bootstrap()
 
-    read_counts = {"identity.json": 0, "policies.json": 0}
+    read_counts = {"assistant_profile.md": 0}
     original_read_text = Path.read_text
 
     def _wrapped_read_text(path_obj, *args, **kwargs):
@@ -238,11 +252,11 @@ def test_hybrid_memory_store_caches_static_file_records_between_reads(tmp_path, 
 
     monkeypatch.setattr(Path, "read_text", _wrapped_read_text)
 
-    store.list_memories(chat_id="feishu:chat-1")
-    store.list_memories(chat_id="feishu:chat-1")
-    store.list_memories(chat_id="feishu:chat-2")
+    store.load_assistant_profile()
+    store.load_assistant_profile()
+    store.load_assistant_profile()
 
-    assert read_counts == {"identity.json": 1, "policies.json": 1}
+    assert read_counts == {"assistant_profile.md": 1}
 
 
 def test_hybrid_memory_store_close_logs_db_close_failures(tmp_path, monkeypatch, caplog) -> None:

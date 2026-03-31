@@ -44,6 +44,11 @@ def build_history_summary(
     parts: list[str] = []
     chat_id = getattr(tape, "chat_id", "")
     if memory_store is not None and chat_id:
+        load_assistant_profile = getattr(memory_store, "load_assistant_profile", None)
+        if callable(load_assistant_profile):
+            assistant_profile = str(load_assistant_profile() or "").strip()
+            if assistant_profile:
+                parts.append("[Assistant Profile]\n" + assistant_profile)
         memory_summary = summarize_context_view(
             memory_store=memory_store,
             chat_id=chat_id,

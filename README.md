@@ -706,8 +706,8 @@ BabyBot 支持通过 `dispatch_team` 组织多个 Agent 进行结构化多轮协
 
 1. **Tape** — 单个会话的 append-only 时间线，记录消息、工具调用、runtime event、锚点等
 2. **Anchor（锚点）** — 当累积 token 超过阈值时，LLM 自动生成结构化摘要（summary / entities / user_intent / pending / next_steps / artifacts / decisions），创建新锚点并压缩旧条目
-3. **Hybrid Memory** — 额外维护硬记忆、软记忆、临时记忆：
-   - 硬记忆：文件保存的稳定规则，如主/子 agent 边界
+3. **Hybrid Memory** — 额外维护软记忆、临时记忆；静态助手画像单独放在 `~/.babybot/assistant_profile.md`：
+   - 静态画像：`assistant_profile.md`，直接注入 system prompt，不参与 memory 检索
    - 软记忆：用户偏好、用户画像、助手角色、任务决策
    - 临时记忆：最近失败、最近成功、当前待办、当前产物
 4. **Hot / Warm / Cold 视图** — query-aware 的三层上下文整理：

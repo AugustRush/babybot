@@ -1051,6 +1051,30 @@ def test_system_prompt_explains_reply_artifacts_are_auto_attached() -> None:
     assert "不要再创建专门的发送子任务" in system_prompt
 
 
+def test_system_prompt_includes_assistant_profile_markdown(tmp_path) -> None:
+    from babybot.context import Tape
+    from babybot.memory_store import HybridMemoryStore
+
+    rm = DummyResourceManager()
+    gateway = DummyGateway([])
+    orchestrator = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    tape = Tape("chat1")
+    memory_store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    memory_store.ensure_bootstrap()
+    context = ExecutionContext(
+        session_id="flow-1",
+        state={"tape": tape, "memory_store": memory_store},
+    )
+
+    messages = orchestrator._build_initial_messages("继续处理", context)
+    system_prompt = messages[0].content
+
+    assert "# Assistant Profile" in system_prompt
+
+
 def test_build_initial_messages_includes_media_paths() -> None:
     gateway = DummyGateway([])
     rm = DummyResourceManager()
