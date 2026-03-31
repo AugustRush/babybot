@@ -28,6 +28,7 @@ from babybot.orchestration_router import (
     RoutingContextSnapshot,
     build_routing_intent_bucket,
     route_task,
+    should_call_model_router,
 )
 from babybot.task_contract import TaskContract
 
@@ -903,6 +904,37 @@ def test_answer_with_dag_skips_model_router_for_short_nonquestion_goal(tmp_path:
         call for call in gateway.structured_calls if call["model_cls"] == "RoutingDecision"
     ] == []
     assert "routing_decision" not in seen
+
+
+def test_should_call_model_router_allows_short_open_ended_goal() -> None:
+    snapshot = RoutingContextSnapshot(
+        chat_key="feishu:c1",
+        goal="这个该怎么办",
+    )
+
+    should_call, reason = should_call_model_router(
+        snapshot,
+        intent_bucket=build_routing_intent_bucket("这个该怎么办", has_media=False),
+    )
+
+    assert should_call is True
+    assert reason == "eligible"
+
+
+def test_should_call_model_router_allows_short_contextual_followup() -> None:
+    snapshot = RoutingContextSnapshot(
+        chat_key="feishu:c1",
+        goal="这个方案呢",
+        anchor_summary="用户刚刚在讨论一个 API 编排方案。",
+    )
+
+    should_call, reason = should_call_model_router(
+        snapshot,
+        intent_bucket=build_routing_intent_bucket("这个方案呢", has_media=False),
+    )
+
+    assert should_call is True
+    assert reason == "eligible"
 
 
 def test_route_task_timeout_logs_at_info(caplog) -> None:

@@ -38,12 +38,40 @@ _EXPLICIT_DEBATE_MARKERS = (
     "不同观点",
 )
 
-_MODEL_ROUTER_PRIORITY_MARKERS = (
+_OPEN_ENDED_QUERY_MARKERS = (
+    "如何",
+    "怎么",
+    "怎么办",
+    "为何",
+    "为什么",
+    "建议",
+    "思路",
+)
+
+_COMPARATIVE_QUERY_MARKERS = (
     "比较",
     "对比",
-    "取舍",
     "区别",
+    "差异",
     "优缺点",
+    "利弊",
+    "异同",
+    "取舍",
+)
+
+_REFERENTIAL_FOLLOWUP_MARKERS = (
+    "这个",
+    "这个方案",
+    "这个问题",
+    "这件事",
+    "这样",
+    "这样做",
+    "这里",
+    "上面",
+    "前面",
+    "刚才",
+    "那这个",
+    "它",
 )
 
 _RETRIEVE_FIRST_MARKERS = (
@@ -104,6 +132,27 @@ def _estimate_subtask_count(text: str) -> int:
     for token in ("同时", "分别", "并行", "并且"):
         count += str(text or "").count(token)
     return max(1, count)
+
+
+def _has_open_ended_shortform_signal(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _OPEN_ENDED_QUERY_MARKERS)
+
+
+def _has_comparative_shortform_signal(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _COMPARATIVE_QUERY_MARKERS)
+
+
+def _looks_contextual_followup(text: str, *, has_context: bool) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized or not has_context:
+        return False
+    return any(marker in normalized for marker in _REFERENTIAL_FOLLOWUP_MARKERS)
 
 
 class RoutingDecision(BaseModel):
@@ -176,14 +225,18 @@ def should_call_model_router(
         or snapshot.cold_context
         or snapshot.recent_flow_ids
     )
-    has_priority_marker = any(marker in goal for marker in _MODEL_ROUTER_PRIORITY_MARKERS)
-    if length_flag == "l_short" and question_flag == "q0" and not has_priority_marker:
+    shortform_signal = (
+        _has_open_ended_shortform_signal(goal)
+        or _has_comparative_shortform_signal(goal)
+        or _looks_contextual_followup(goal, has_context=has_context)
+    )
+    if length_flag == "l_short" and question_flag == "q0" and not shortform_signal:
         return False, "short_nonquestion"
     if (
         length_flag == "l_short"
         and media_flag == "m0"
         and not has_context
-        and not has_priority_marker
+        and not shortform_signal
     ):
         return False, "short_low_context"
     return True, "eligible"
