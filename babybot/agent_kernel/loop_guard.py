@@ -19,6 +19,7 @@ class LoopGuardConfig:
     ping_pong_window: int = 6
     per_tool_call_budget: int = 20
     max_context_messages: int = 100
+    max_exploration_streak: int = 6
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class LoopGuard:
         self._tool_sequence: deque[str] = deque(
             maxlen=max(2, config.ping_pong_window * 2)
         )
+        self._exploration_streak = 0
 
     @property
     def enabled(self) -> bool:
@@ -72,6 +74,22 @@ class LoopGuard:
                 ),
                 disable_tool=True,
             )
+
+        if self.is_exploration_tool(tool_name):
+            self._exploration_streak += 1
+            if (
+                self._config.max_exploration_streak > 0
+                and self._exploration_streak >= self._config.max_exploration_streak
+            ):
+                return LoopVerdict(
+                    blocked=True,
+                    reason=(
+                        "Exploration-only tool pattern repeated too many times "
+                        f"({self._exploration_streak})."
+                    ),
+                )
+        else:
+            self._exploration_streak = 0
 
         self._tool_sequence.append(f"{tool_name}:{digest}")
         if len(self._tool_sequence) >= max(4, self._config.ping_pong_window):
@@ -165,3 +183,27 @@ class LoopGuard:
             if all(tail[idx] == pattern[idx % period] for idx in range(span)):
                 return True
         return False
+
+    @staticmethod
+    def is_exploration_tool(tool_name: str) -> bool:
+        normalized = (tool_name or "").strip().lower().lstrip("_")
+        if not normalized:
+            return False
+        if normalized.endswith("execute_shell_command"):
+            return True
+        leaf = normalized.split("__")[-1]
+        markers = (
+            "view_",
+            "read_",
+            "list_",
+            "inspect_",
+            "check_",
+            "take_snapshot",
+            "take_screenshot",
+            "evaluate_script",
+            "get_console",
+            "get_network",
+        )
+        return leaf.startswith(markers) or any(
+            f"_{marker}" in leaf for marker in markers
+        )

@@ -124,6 +124,9 @@ class OpenAICompatibleGateway(ModelProvider):
         messages: list[dict[str, Any]],
         heartbeat: Any = None,
         on_stream_text: StreamTextCallback | None = None,
+        *,
+        task_id: Any = "?",
+        step: Any = "?",
     ) -> str:
         client = self._ensure_client()
         per_call_timeout = max(1.0, float(self._config.system.subtask_timeout))
@@ -135,9 +138,11 @@ class OpenAICompatibleGateway(ModelProvider):
             "stream": True,
         }
         accumulated_text = ""
+        started = time.perf_counter()
+        first_chunk_elapsed: float | None = None
 
         async def _consume() -> None:
-            nonlocal accumulated_text
+            nonlocal accumulated_text, first_chunk_elapsed
             stream = await client.chat.completions.create(**kwargs)
             async for chunk in stream:
                 for choice in getattr(chunk, "choices", []) or []:
@@ -147,6 +152,15 @@ class OpenAICompatibleGateway(ModelProvider):
                     piece = self._extract_stream_delta_text(delta)
                     if not piece:
                         continue
+                    if first_chunk_elapsed is None:
+                        first_chunk_elapsed = time.perf_counter() - started
+                        logger.info(
+                            "LLM stream first_chunk task=%s step=%s elapsed=%.2fs text_len=%d",
+                            task_id,
+                            step,
+                            first_chunk_elapsed,
+                            len(piece),
+                        )
                     accumulated_text += piece
                     await self._call_stream_callback(on_stream_text, accumulated_text)
 
@@ -155,6 +169,15 @@ class OpenAICompatibleGateway(ModelProvider):
                 await asyncio.wait_for(_consume(), timeout=per_call_timeout)
         else:
             await asyncio.wait_for(_consume(), timeout=per_call_timeout)
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "LLM stream response task=%s step=%s elapsed=%.2fs first_chunk=%.2fs text_len=%d",
+            task_id,
+            step,
+            elapsed,
+            first_chunk_elapsed if first_chunk_elapsed is not None else -1.0,
+            len(accumulated_text.strip()),
+        )
         return accumulated_text.strip()
 
     @staticmethod
@@ -273,9 +296,11 @@ class OpenAICompatibleGateway(ModelProvider):
         saw_content_text = False
         finish_reason = "stop"
         tool_calls: dict[int, dict[str, str]] = {}
+        started = time.perf_counter()
+        first_chunk_elapsed: float | None = None
 
         async def _consume() -> None:
-            nonlocal streamed_text, finish_reason, saw_content_text
+            nonlocal streamed_text, finish_reason, saw_content_text, first_chunk_elapsed
             stream = await client.chat.completions.create(**kwargs, stream=True)
             async for chunk in stream:
                 for choice in getattr(chunk, "choices", []) or []:
@@ -288,6 +313,15 @@ class OpenAICompatibleGateway(ModelProvider):
 
                     piece = self._extract_stream_delta_text(delta)
                     if piece:
+                        if first_chunk_elapsed is None:
+                            first_chunk_elapsed = time.perf_counter() - started
+                            logger.info(
+                                "LLM stream first_chunk task=%s step=%s elapsed=%.2fs text_len=%d",
+                                task_id,
+                                step,
+                                first_chunk_elapsed,
+                                len(piece),
+                            )
                         saw_content_text = True
                         streamed_text += piece
 
@@ -340,6 +374,17 @@ class OpenAICompatibleGateway(ModelProvider):
             ],
             task_id=task_id,
             step=step,
+        )
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "LLM stream response task=%s step=%s elapsed=%.2fs first_chunk=%.2fs finish=%s text_len=%d tool_calls=%s",
+            task_id,
+            step,
+            elapsed,
+            first_chunk_elapsed if first_chunk_elapsed is not None else -1.0,
+            finish_reason or "stop",
+            len(streamed_text.strip()) if saw_content_text else 0,
+            [tc.name for tc in parsed_tool_calls] or "none",
         )
         return ModelResponse(
             text=(streamed_text.strip() if saw_content_text else ""),
@@ -506,6 +551,8 @@ class OpenAICompatibleGateway(ModelProvider):
                 ],
                 heartbeat=heartbeat,
                 on_stream_text=on_stream_text,
+                task_id="?",
+                step="?",
             )
         req = ModelRequest(
             messages=(
@@ -544,6 +591,8 @@ class OpenAICompatibleGateway(ModelProvider):
                 payload,
                 heartbeat=heartbeat,
                 on_stream_text=on_stream_text,
+                task_id="?",
+                step="?",
             )
         req = ModelRequest(
             messages=tuple(messages),

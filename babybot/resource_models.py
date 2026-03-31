@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .agent_kernel import ToolLease
@@ -55,6 +56,8 @@ class LoadedSkill:
     description: str
     directory: str
     prompt: str = ""
+    prompt_body: str = ""
+    prompt_body_path: str = ""
     role: str = ""
     keywords: tuple[str, ...] = ()
     phrases: tuple[str, ...] = ()
@@ -64,6 +67,26 @@ class LoadedSkill:
     tool_group: str = ""
     tools: tuple[str, ...] = ()
     runtime: SkillRuntimeConfig = field(default_factory=lambda: SkillRuntimeConfig())
+
+    def resolve_prompt(self, *, load_full: bool = False) -> str:
+        if not load_full:
+            return self.prompt
+        if self.prompt_body:
+            return self.prompt_body
+        if self.prompt_body_path:
+            skill_md = Path(self.prompt_body_path)
+            try:
+                text = skill_md.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return self.prompt
+            if text.startswith("---\n"):
+                end = text.find("\n---", 4)
+                if end != -1:
+                    text = text[end + 4 :]
+            self.prompt_body = text.strip()
+            if self.prompt_body:
+                return self.prompt_body
+        return self.prompt
 
 
 @dataclass(frozen=True)

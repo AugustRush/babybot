@@ -1349,6 +1349,50 @@ def test_build_worker_prompt_guides_skill_edits_to_skill_md_and_verification() -
     assert "config.yaml" in prompt
     assert "先检查目标技能是否存在" in prompt
     assert "output" in prompt
+    assert "优先使用文件工具" in prompt
+    assert "修改完成后必须 reload_skill" in prompt
+
+
+def test_select_skill_packs_uses_summary_prompt_by_default() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="Check weather forecasts",
+            directory="/tmp/weather-query",
+            prompt="summary prompt",
+            prompt_body="FULL BODY PROMPT",
+            active=True,
+            keywords=("weather", "forecast"),
+            phrases=("weather forecast",),
+        ),
+    }
+
+    packs = asyncio.run(manager._select_skill_packs("give me a weather forecast"))
+
+    assert [pack.name for pack in packs] == ["weather-query"]
+    assert packs[0].system_prompt == "summary prompt"
+
+
+def test_select_skill_packs_loads_full_body_for_explicit_skill_request() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "weather-query": LoadedSkill(
+            name="weather-query",
+            description="Check weather forecasts",
+            directory="/tmp/weather-query",
+            prompt="summary prompt",
+            prompt_body="FULL BODY PROMPT",
+            active=True,
+            keywords=("weather", "forecast"),
+            phrases=("weather forecast",),
+        ),
+    }
+
+    packs = asyncio.run(manager._select_skill_packs("请使用 $weather-query 处理这个请求"))
+
+    assert [pack.name for pack in packs] == ["weather-query"]
+    assert packs[0].system_prompt == "FULL BODY PROMPT"
 
 
 def test_build_task_lease_excludes_nested_orchestration_tools_by_default() -> None:

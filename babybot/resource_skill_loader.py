@@ -63,7 +63,7 @@ class SkillLoader:
                 if not skill_dir.exists() or not skill_dir.is_dir():
                     logger.warning("Configured skill not found: %s", skill_dir)
                     continue
-                meta, prompt = self.read_skill_document(skill_dir)
+                meta, prompt_summary, prompt_body = self.read_skill_document(skill_dir)
                 resolved_name = meta.get("name", name)
                 runtime = self._owner._build_skill_runtime({**meta, **conf})
                 tool_group, tool_names = self.register_skill_tools(
@@ -89,7 +89,9 @@ class SkillLoader:
                         name=meta.get("name", name),
                         description=description or f"Skill: {name}",
                         directory=str(skill_dir.resolve()),
-                        prompt=prompt,
+                        prompt=prompt_summary,
+                        prompt_body="",
+                        prompt_body_path=str((skill_dir / "SKILL.md").resolve()),
                         role=meta.get("role", ""),
                         keywords=keywords,
                         phrases=phrases,
@@ -141,7 +143,7 @@ class SkillLoader:
                 if not child.is_dir() or not (child / "SKILL.md").exists():
                     continue
                 try:
-                    meta, prompt = self.read_skill_document(child)
+                    meta, prompt_summary, prompt_body = self.read_skill_document(child)
                     name = meta.get("name", child.name)
                     runtime = self._owner._build_skill_runtime(meta)
                     tool_group, tool_names = self.register_skill_tools(
@@ -159,7 +161,7 @@ class SkillLoader:
                     description = meta.get("description", f"Skill: {name}")
                     keywords = self.normalize_keywords(
                         None,
-                        fallback=(description, name, prompt[:400]),
+                        fallback=(description, name, prompt_summary[:400]),
                     )
                     phrases = self.normalize_phrases(
                         None,
@@ -170,7 +172,9 @@ class SkillLoader:
                             name=name,
                             description=description,
                             directory=str(child.resolve()),
-                            prompt=prompt,
+                            prompt=prompt_summary,
+                            prompt_body="",
+                            prompt_body_path=str((child / "SKILL.md").resolve()),
                             role=meta.get("role", ""),
                             keywords=keywords,
                             phrases=phrases,
@@ -331,14 +335,20 @@ class SkillLoader:
         return tuple(dict.fromkeys(items))
 
     @classmethod
-    def read_skill_document(cls, skill_dir: Path) -> tuple[dict[str, str], str]:
+    def read_skill_document(cls, skill_dir: Path) -> tuple[dict[str, str], str, str]:
         skill_md = skill_dir / "SKILL.md"
         text = skill_md.read_text(encoding="utf-8", errors="ignore")
         meta, body = cls.parse_frontmatter(text)
-        prompt = body.strip()
-        if len(prompt) > 4000:
-            prompt = prompt[:4000]
-        return meta, prompt
+        prompt_body = body.strip()
+        prompt_summary = cls.build_prompt_summary(prompt_body)
+        return meta, prompt_summary, prompt_body
+
+    @staticmethod
+    def build_prompt_summary(prompt_body: str, max_chars: int = 1200) -> str:
+        prompt = (prompt_body or "").strip()
+        if len(prompt) <= max_chars:
+            return prompt
+        return prompt[:max_chars].rstrip() + "\n\n[技能正文已省略；仅在强命中时再加载完整 SKILL.md]"
 
     @staticmethod
     def skip_skill_function_name(name: str) -> bool:

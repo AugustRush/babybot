@@ -128,6 +128,27 @@ def test_disabled_guard_never_blocks() -> None:
         assert not guard.check_call("tool_a", {"same": True}).blocked
 
 
+def test_exploration_streak_blocks_read_only_wandering() -> None:
+    guard = LoopGuard(
+        LoopGuardConfig(
+            max_identical_calls=20,
+            per_tool_call_budget=20,
+            ping_pong_window=20,
+            max_exploration_streak=4,
+        )
+    )
+
+    verdict = LoopVerdict()
+    for idx in range(4):
+        verdict = guard.check_call(
+            "_workspace_view_text_file",
+            {"file_path": f"skill_{idx}.md"},
+        )
+
+    assert verdict.blocked
+    assert "exploration" in verdict.reason.lower()
+
+
 # ---------------------------------------------------------------------------
 # Compress messages tests
 # ---------------------------------------------------------------------------

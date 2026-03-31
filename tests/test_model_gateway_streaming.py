@@ -198,6 +198,54 @@ def test_generate_streams_reply_to_user_tool_arguments() -> None:
     assert completions.calls[0]["stream"] is True
 
 
+def test_generate_streaming_logs_first_chunk_and_completion(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chunks = [
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="你"),
+                    finish_reason=None,
+                )
+            ]
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="好"),
+                    finish_reason="stop",
+                )
+            ]
+        ),
+    ]
+    completions = _FakeCompletions(chunks)
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+    gateway._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    async def _run():
+        return await gateway.generate(
+            ModelRequest(
+                messages=(ModelMessage(role="user", content="hello"),),
+                metadata={"task_id": "task-1", "step": 2},
+            ),
+            ExecutionContext(state={"stream_callback": lambda _: None}),
+        )
+
+    with caplog.at_level(logging.INFO, logger="babybot.model_gateway"):
+        response = asyncio.run(_run())
+
+    assert response.text == "你好"
+    assert any(
+        "LLM stream first_chunk task=task-1 step=2" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "LLM stream response task=task-1 step=2" in record.message
+        for record in caplog.records
+    )
+
+
 def test_decode_partial_json_string_keeps_valid_prefix_before_trailing_escape() -> None:
     gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
 

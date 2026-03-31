@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .agent_kernel import SkillPack, ToolLease
@@ -39,6 +40,62 @@ class ResourceSkillRuntime:
         score += sum(1 for keyword in keywords if keyword in query_terms)
         return score
 
+    def _should_load_full_prompt(
+        self,
+        skill: Any,
+        task_description: str,
+        *,
+        explicit: bool,
+    ) -> bool:
+        if explicit:
+            return True
+        query = (task_description or "").strip().lower()
+        if not query:
+            return False
+        skill_name = skill.name.strip().lower()
+        resource_id = self._owner._skill_resource_id(skill).strip().lower()
+        return (
+            f"${skill_name}" in query
+            or resource_id in query
+            or (len(skill_name) >= 3 and skill_name in query)
+        )
+
+    @staticmethod
+    def _load_prompt_body_from_path(path: str) -> str:
+        if not path:
+            return ""
+        skill_md = Path(path)
+        try:
+            text = skill_md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return ""
+        if text.startswith("---\n"):
+            end = text.find("\n---", 4)
+            if end != -1:
+                text = text[end + 4 :]
+        return text.strip()
+
+    def _resolve_skill_prompt(
+        self,
+        skill: Any,
+        task_description: str,
+        *,
+        explicit: bool,
+    ) -> str:
+        if not self._should_load_full_prompt(
+            skill,
+            task_description,
+            explicit=explicit,
+        ):
+            return skill.prompt
+        if getattr(skill, "prompt_body", ""):
+            return skill.prompt_body
+        body = self._load_prompt_body_from_path(getattr(skill, "prompt_body_path", ""))
+        if body:
+            skill.prompt_body = body
+            return body
+        return skill.prompt
+
     async def select_skill_packs(
         self,
         task_description: str,
@@ -47,7 +104,8 @@ class ResourceSkillRuntime:
         active = [skill for skill in self._owner.skills.values() if skill.active]
         if not active:
             return []
-        if skill_ids is not None:
+        explicit = skill_ids is not None
+        if explicit:
             wanted = {
                 item.strip().lower()
                 for item in skill_ids
@@ -77,7 +135,11 @@ class ResourceSkillRuntime:
         return [
             SkillPack(
                 name=skill.name,
-                system_prompt=skill.prompt,
+                system_prompt=self._resolve_skill_prompt(
+                    skill,
+                    task_description,
+                    explicit=explicit,
+                ),
                 tool_lease=skill.lease,
             )
             for skill in active
@@ -116,6 +178,9 @@ class ResourceSkillRuntime:
             "8. 在宣称“新增支持/删除完成”前，必须先核对当前实现是否已经支持该能力，或目标是否本就不存在。",
             "9. 如果当前工具里包含 send_text/send_image/send_file/send_audio/send_card 等渠道工具，且任务目标是把最终结果交付给当前对话，可直接发送最终内容。",
             "10. 避免发送中间状态、调试信息或重复消息；只在任务完成或确有必要时发送用户可见内容。",
+            "11. 对代码或技能维护任务，优先使用文件工具（view/edit/write/insert），不要先做大范围 shell 扫描。",
+            "12. 定位目标时，最多做少量探测；通常 1-2 次 shell 探测和 1-2 次文件读取后就应进入编辑。",
+            "13. 修改完成后必须 reload_skill，确认技能可重新加载。",
         ]
         return "\n".join(lines)
 

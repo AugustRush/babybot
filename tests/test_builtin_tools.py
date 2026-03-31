@@ -66,6 +66,15 @@ class _DummyOwner:
     async def _workspace_write_text_file(self, file_path: str, content: str) -> str:
         return f"{file_path}:{content}"
 
+    async def _workspace_edit_text_file(
+        self,
+        file_path: str,
+        old_text: str,
+        new_text: str,
+        replace_all: bool = False,
+    ) -> str:
+        return f"{file_path}:{old_text}:{new_text}:{replace_all}"
+
     async def _workspace_insert_text_file(
         self,
         file_path: str,
@@ -118,6 +127,7 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("code", "_workspace_execute_shell_command"),
         ("code", "_workspace_view_text_file"),
         ("code", "_workspace_write_text_file"),
+        ("code", "_workspace_edit_text_file"),
         ("code", "_workspace_insert_text_file"),
         ("basic", "reload_skill"),
     ]

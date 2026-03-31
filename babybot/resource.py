@@ -629,7 +629,7 @@ class ResourceManager:
             return f"Not a valid skill directory: {skill_dir}"
 
         loader = self._skill_loader_view()
-        meta, prompt = loader.read_skill_document(skill_dir)
+        meta, prompt_summary, prompt_body = loader.read_skill_document(skill_dir)
         name = meta.get("name", skill_dir.name)
         key = name.strip().lower()
 
@@ -652,7 +652,9 @@ class ResourceManager:
         meta_exclude_tools = loader._parse_frontmatter_list(meta.get("exclude_tools"))
 
         description = meta.get("description", f"Skill: {name}")
-        keywords = loader.normalize_keywords(None, fallback=(description, name, prompt[:400]))
+        keywords = loader.normalize_keywords(
+            None, fallback=(description, name, prompt_summary[:400])
+        )
         phrases = loader.normalize_phrases(None, fallback=(description, name))
 
         self._upsert_skill(
@@ -660,7 +662,9 @@ class ResourceManager:
                 name=name,
                 description=description,
                 directory=str(skill_dir),
-                prompt=prompt,
+                prompt=prompt_summary,
+                prompt_body="",
+                prompt_body_path=str((skill_dir / "SKILL.md").resolve()),
                 keywords=keywords,
                 phrases=phrases,
                 source="hot-reload",
@@ -807,7 +811,9 @@ class ResourceManager:
         return SkillLoader.parse_frontmatter(text)
 
     @classmethod
-    def _read_skill_document(cls, skill_dir: Path) -> tuple[dict[str, str], str]:
+    def _read_skill_document(
+        cls, skill_dir: Path
+    ) -> tuple[dict[str, str], str, str]:
         return SkillLoader.read_skill_document(skill_dir)
 
     def _setup_tool_groups(self, user_groups: dict[str, dict]) -> None:
@@ -1504,10 +1510,14 @@ class ResourceManager:
         self,
         file_path: str,
         ranges: list[int] | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> str:
         return await self._workspace_tools_view().view_text_file(
             file_path,
             ranges=ranges,
+            offset=offset,
+            limit=limit,
         )
 
     async def _workspace_write_text_file(
@@ -1520,6 +1530,20 @@ class ResourceManager:
             file_path,
             content,
             ranges=ranges,
+        )
+
+    async def _workspace_edit_text_file(
+        self,
+        file_path: str,
+        old_text: str,
+        new_text: str,
+        replace_all: bool = False,
+    ) -> str:
+        return await self._workspace_tools_view().edit_text_file(
+            file_path,
+            old_text,
+            new_text,
+            replace_all=replace_all,
         )
 
     async def _workspace_insert_text_file(

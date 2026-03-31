@@ -332,7 +332,13 @@ class SingleAgentExecutor:
                             ),
                         )
                 else:
-                    no_progress_turns = 0
+                    if all(
+                        loop_guard.is_exploration_tool(tool_call.name)
+                        for tool_call, _ in valid_calls
+                    ):
+                        no_progress_turns += 1
+                    else:
+                        no_progress_turns = 0
 
                 # Phase 2: parallel execution of validated tool calls
                 if valid_calls:
@@ -434,6 +440,33 @@ class SingleAgentExecutor:
                 for tool_call in response.tool_calls:
                     if tool_call.call_id in tool_result_map:
                         messages.append(tool_result_map[tool_call.call_id])
+
+                if no_progress_turns >= max(1, int(self.policy.max_no_progress_turns)):
+                    error = (
+                        f"No progress after {no_progress_turns} consecutive tool-only turns."
+                        " Only exploratory tools were used; switch to edit/write/action tools or finish."
+                    )
+                    logger.warning(
+                        "Executor no-progress fail task=%s turns=%d mode=exploration_only",
+                        task.task_id,
+                        no_progress_turns,
+                    )
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                        metadata=self._build_usage_metadata(
+                            usage_totals,
+                            extra={
+                                "no_progress_turns": no_progress_turns,
+                                "blocked_tools": sorted(blocked_tool_names),
+                                "tool_call_count": tool_call_count,
+                                "tool_failure_count": tool_failure_count,
+                                "loop_guard_block_count": loop_guard_block_count,
+                                "max_step_exhausted_count": 0,
+                            },
+                        ),
+                    )
 
                 if heartbeat is not None:
                     heartbeat.beat()

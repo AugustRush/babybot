@@ -35,20 +35,8 @@ class _FakeGateway:
         return _StructuredResult(self._payload)
 
 
-def test_infer_execution_constraints_uses_model_output() -> None:
-    gateway = _FakeGateway(
-        {
-            "mode": "interactive",
-            "hard_limits": {
-                "max_rounds": 1,
-                "max_total_seconds": 600,
-                "max_turn_seconds": 30,
-                "max_agents": 2,
-            },
-            "soft_preferences": {"resolution_style": "single_pass"},
-            "degradation": {"on_budget_exhausted": "summarize_partial"},
-        }
-    )
+def test_infer_execution_constraints_extracts_rule_based_limits() -> None:
+    gateway = _FakeGateway(None)
 
     constraints = asyncio.run(
         infer_execution_constraints(
@@ -58,8 +46,9 @@ def test_infer_execution_constraints_uses_model_output() -> None:
         )
     )
 
-    assert gateway.calls
+    assert gateway.calls == []
     assert constraints["hard_limits"]["max_rounds"] == 1
+    assert constraints["hard_limits"]["max_agents"] == 2
     assert constraints["hard_limits"]["max_total_seconds"] == 600.0
     assert constraints["hard_limits"]["max_turn_seconds"] == 30.0
     assert constraints["soft_preferences"]["resolution_style"] == "single_pass"
@@ -80,6 +69,22 @@ def test_infer_execution_constraints_falls_back_to_default_budget_when_model_fai
     assert constraints["hard_limits"]["max_rounds"] is None
     assert constraints["hard_limits"]["max_total_seconds"] == 600.0
     assert constraints["degradation"]["on_budget_exhausted"] == "summarize_partial"
+    assert gateway.calls == []
+
+
+def test_infer_execution_constraints_extracts_soft_preferences_without_gateway() -> None:
+    gateway = _FakeGateway(None)
+
+    constraints = asyncio.run(
+        infer_execution_constraints(
+            gateway,
+            "请尽快给我一个简洁结论，不要展开成长篇讨论。",
+            default_max_total_seconds=600.0,
+        )
+    )
+
+    assert gateway.calls == []
+    assert constraints["soft_preferences"]["resolution_style"] == "fast_consensus"
 
 
 def test_infer_execution_constraints_skips_short_greeting() -> None:

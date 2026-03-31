@@ -9,5 +9,6 @@ def iter_code_tool_registrations(owner: Any) -> tuple[tuple[Any, str], ...]:
         (owner._workspace_execute_shell_command, "code"),
         (owner._workspace_view_text_file, "code"),
         (owner._workspace_write_text_file, "code"),
+        (owner._workspace_edit_text_file, "code"),
         (owner._workspace_insert_text_file, "code"),
     )

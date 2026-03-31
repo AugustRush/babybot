@@ -413,31 +413,7 @@ def test_answer_with_dag_passes_orchestrator_max_steps() -> None:
 
 def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
     rm = _FakeResourceManager()
-    class _ConstraintGateway(_FakeGateway):
-        async def complete_structured(
-            self,
-            system_prompt: str,
-            user_prompt: str,
-            model_cls: type,
-            heartbeat: Any = None,
-        ):
-            del system_prompt, user_prompt, model_cls, heartbeat
-            class _Result:
-                def model_dump(self) -> dict[str, Any]:
-                    return {
-                        "mode": "interactive",
-                        "hard_limits": {
-                            "max_rounds": 1,
-                            "max_total_seconds": 600,
-                            "max_turn_seconds": None,
-                        },
-                        "soft_preferences": {"resolution_style": "single_pass"},
-                        "degradation": {"on_budget_exhausted": "summarize_partial"},
-                    }
-
-            return _Result()
-
-    agent = _make_agent(_ConstraintGateway([]), rm)
+    agent = _make_agent(_FakeGateway([]), rm)
     agent.config.system.timeout = 600
     seen: dict[str, Any] = {}
 
@@ -451,7 +427,9 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
             return type("R", (), {"conclusion": "ok"})()
 
     with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
-        text, media = asyncio.run(agent._answer_with_dag("两个专家讨论，一轮定胜负。"))
+        text, media = asyncio.run(
+            agent._answer_with_dag("两个专家讨论，一轮定胜负，总时长不超过10分钟。")
+        )
 
     assert text == "ok"
     assert media == []
@@ -463,7 +441,7 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
     contract = seen["task_contract"]
     assert contract == TaskContract(
         chat_key="",
-        goal="两个专家讨论，一轮定胜负。",
+        goal="两个专家讨论，一轮定胜负，总时长不超过10分钟。",
         mode="debate",
         deliverable="final_answer",
         round_budget=1,

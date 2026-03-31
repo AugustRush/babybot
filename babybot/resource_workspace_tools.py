@@ -59,6 +59,8 @@ def check_python_safety(code: str) -> str | None:
 
 
 class WorkspaceToolSuite:
+    DEFAULT_VIEW_LINE_LIMIT = 120
+
     def __init__(self, owner: Any) -> None:
         self._owner = owner
 
@@ -161,6 +163,8 @@ class WorkspaceToolSuite:
         self,
         file_path: str,
         ranges: list[int] | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> str:
         resolved, err = self._owner._resolve_workspace_file(file_path)
         if err:
@@ -171,14 +175,37 @@ class WorkspaceToolSuite:
             errors="ignore",
         )
         line_list = lines.splitlines(keepends=True)
-        if not ranges:
-            return "".join(line_list)
-        chunks: list[str] = []
-        for i in range(0, len(ranges), 2):
-            start = max(1, int(ranges[i]))
-            end = int(ranges[i + 1]) if i + 1 < len(ranges) else start
-            chunks.extend(line_list[start - 1 : end])
-        return "".join(chunks)
+        if ranges:
+            selected: list[tuple[int, str]] = []
+            for i in range(0, len(ranges), 2):
+                start = max(1, int(ranges[i]))
+                end = int(ranges[i + 1]) if i + 1 < len(ranges) else start
+                for lineno in range(start, min(len(line_list), end) + 1):
+                    selected.append((lineno, line_list[lineno - 1]))
+            return self._format_file_view(
+                resolved,
+                selected,
+                total_lines=len(line_list),
+                truncated=False,
+                next_offset=None,
+                limit=None,
+            )
+
+        start_idx = max(0, int(offset or 0))
+        window = max(1, int(limit or self.DEFAULT_VIEW_LINE_LIMIT))
+        end_idx = min(len(line_list), start_idx + window)
+        selected = [
+            (idx + 1, line_list[idx])
+            for idx in range(start_idx, end_idx)
+        ]
+        return self._format_file_view(
+            resolved,
+            selected,
+            total_lines=len(line_list),
+            truncated=end_idx < len(line_list),
+            next_offset=end_idx if end_idx < len(line_list) else None,
+            limit=window,
+        )
 
     async def write_text_file(
         self,
@@ -226,3 +253,60 @@ class WorkspaceToolSuite:
         lines[idx:idx] = content.splitlines(keepends=True)
         await asyncio.to_thread(target.write_text, "".join(lines), encoding="utf-8")
         return f"Inserted text into: {target}"
+
+    async def edit_text_file(
+        self,
+        file_path: str,
+        old_text: str,
+        new_text: str,
+        replace_all: bool = False,
+    ) -> str:
+        if not old_text:
+            return "Cannot edit file: old_text must not be empty."
+        resolved, err = self._owner._resolve_workspace_file(file_path)
+        if err:
+            return err
+        target = Path(resolved)
+        if not target.exists():
+            return f"File not found: {target}"
+        existing = await asyncio.to_thread(target.read_text, encoding="utf-8")
+        occurrences = existing.count(old_text)
+        if occurrences <= 0:
+            return f"Text not found in file: {target}"
+        if replace_all:
+            updated = existing.replace(old_text, new_text)
+            replaced = occurrences
+        else:
+            updated = existing.replace(old_text, new_text, 1)
+            replaced = 1
+        await asyncio.to_thread(target.write_text, updated, encoding="utf-8")
+        suffix = "occurrence" if replaced == 1 else "occurrences"
+        return f"Updated file: {target} (replaced {replaced} {suffix})"
+
+    @staticmethod
+    def _format_file_view(
+        resolved: str,
+        selected: list[tuple[int, str]],
+        *,
+        total_lines: int,
+        truncated: bool,
+        next_offset: int | None,
+        limit: int | None,
+    ) -> str:
+        if selected:
+            start_line = selected[0][0]
+            end_line = selected[-1][0]
+        else:
+            start_line = 1
+            end_line = 0
+        header = f"[File: {resolved} | lines {start_line}-{end_line} of {total_lines}]"
+        body = "\n".join(
+            f"{lineno} | {line.rstrip()}" for lineno, line in selected
+        )
+        if truncated and next_offset is not None:
+            footer = (
+                f"[Truncated. Use offset={next_offset} limit={limit or WorkspaceToolSuite.DEFAULT_VIEW_LINE_LIMIT} "
+                "or ranges=[start,end] to read more.]"
+            )
+            return "\n".join(part for part in (header, body, footer) if part)
+        return "\n".join(part for part in (header, body) if part)

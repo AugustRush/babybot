@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -119,6 +120,224 @@ def _coerce_float(value: Any) -> float | None:
     return None
 
 
+_CN_NUM_MAP = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+
+def _parse_cn_number(text: str) -> int | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    if raw in _CN_NUM_MAP:
+        return _CN_NUM_MAP[raw]
+    if raw.startswith("十"):
+        tail = _CN_NUM_MAP.get(raw[1:], 0) if len(raw) > 1 else 0
+        return 10 + int(tail)
+    if raw.endswith("十"):
+        head = _CN_NUM_MAP.get(raw[:-1], 1)
+        return int(head) * 10
+    if "十" in raw:
+        head, tail = raw.split("十", 1)
+        high = _CN_NUM_MAP.get(head, 1)
+        low = _CN_NUM_MAP.get(tail, 0)
+        return int(high) * 10 + int(low)
+    return None
+
+
+def _parse_loose_number(raw: str) -> int | None:
+    value = _coerce_int(raw)
+    if value is not None:
+        return value
+    return _parse_cn_number(raw)
+
+
+def _parse_duration_to_seconds(value: str, unit: str) -> float | None:
+    amount = _coerce_float(value)
+    if amount is None:
+        parsed = _parse_cn_number(value)
+        amount = float(parsed) if parsed is not None else None
+    if amount is None:
+        return None
+    normalized_unit = str(unit or "").strip().lower()
+    if normalized_unit in {"秒", "秒钟", "second", "seconds", "s"}:
+        return float(amount)
+    if normalized_unit in {"分钟", "分", "minute", "minutes", "min", "mins", "m"}:
+        return float(amount) * 60.0
+    if normalized_unit in {"小时", "时", "hour", "hours", "h"}:
+        return float(amount) * 3600.0
+    return None
+
+
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _infer_hard_limits(goal: str) -> dict[str, Any]:
+    hard_limits: dict[str, Any] = {}
+
+    round_matches = [
+        re.search(pattern, goal)
+        for pattern in (
+            r"(?:最多|至多|不超过|最多进行)?\s*([0-9零〇一二两三四五六七八九十]+)\s*轮",
+            r"([0-9零〇一二两三四五六七八九十]+)\s*轮(?:内|结束|搞定|定胜负)?",
+        )
+    ]
+    for match in round_matches:
+        if not match:
+            continue
+        parsed = _parse_loose_number(match.group(1))
+        if parsed is not None:
+            hard_limits["max_rounds"] = max(1, int(parsed))
+            break
+    if "单轮" in goal or "一轮定胜负" in goal:
+        hard_limits["max_rounds"] = 1
+
+    agent_matches = [
+        re.search(pattern, goal)
+        for pattern in (
+            r"([0-9零〇一二两三四五六七八九十]+)\s*(?:个)?(?:专家|agent|智能体|助手|人)(?:讨论|协作|评审|辩论)?",
+            r"(?:最多|至多|不超过)\s*([0-9零〇一二两三四五六七八九十]+)\s*(?:个)?(?:专家|agent|智能体|助手|人)",
+        )
+    ]
+    for match in agent_matches:
+        if not match:
+            continue
+        parsed = _parse_loose_number(match.group(1))
+        if parsed is not None:
+            hard_limits["max_agents"] = max(1, int(parsed))
+            break
+
+    total_budget_match = re.search(
+        r"(?:总时长|整体执行预算|执行预算|总预算|限时|在)\s*(?:不超过|最多|控制在|限制在)?\s*([0-9]+(?:\.[0-9]+)?|[零〇一二两三四五六七八九十]+)\s*(秒钟?|秒|分钟?|分|小时|时)",
+        goal,
+    )
+    if total_budget_match:
+        seconds = _parse_duration_to_seconds(
+            total_budget_match.group(1), total_budget_match.group(2)
+        )
+        if seconds is not None:
+            hard_limits["max_total_seconds"] = seconds
+
+    turn_budget_match = re.search(
+        r"(?:每轮|单轮|每个(?:agent|智能体|专家)?(?:发言|turn)?|单个agent发言/turn预算)\s*(?:不超过|最多|控制在|限制在)?\s*([0-9]+(?:\.[0-9]+)?|[零〇一二两三四五六七八九十]+)\s*(秒钟?|秒|分钟?|分|小时|时)",
+        goal,
+    )
+    if turn_budget_match:
+        seconds = _parse_duration_to_seconds(
+            turn_budget_match.group(1), turn_budget_match.group(2)
+        )
+        if seconds is not None:
+            hard_limits["max_turn_seconds"] = seconds
+
+    return hard_limits
+
+
+def _infer_resolution_style(goal: str) -> str:
+    if _contains_any(
+        goal,
+        (
+            "单轮",
+            "一轮定胜负",
+            "一步到位",
+            "直接给最终答案",
+            "只要一个方案",
+        ),
+    ):
+        return "single_pass"
+    if _contains_any(
+        goal,
+        (
+            "尽快",
+            "快速",
+            "快点",
+            "简洁",
+            "简明",
+            "先给结论",
+            "不要展开",
+            "不要长篇讨论",
+            "快速收敛",
+        ),
+    ):
+        return "fast_consensus"
+    if _contains_any(
+        goal,
+        (
+            "详细",
+            "充分",
+            "深入",
+            "全面",
+            "仔细",
+            "展开",
+            "完整分析",
+        ),
+    ):
+        return "thorough"
+    return "balanced"
+
+
+def _infer_degradation_policy(goal: str) -> str:
+    if _contains_any(
+        goal,
+        (
+            "不要部分结果",
+            "超时就报错",
+            "失败就报错",
+            "不要总结已有结果",
+            "超时直接失败",
+        ),
+    ):
+        return "raise_timeout"
+    return "summarize_partial"
+
+
+def infer_execution_constraints_from_text(
+    text: str,
+    *,
+    default_max_total_seconds: float | None = None,
+) -> dict[str, Any]:
+    defaults = default_execution_constraints(
+        default_max_total_seconds=default_max_total_seconds
+    )
+    goal = str(text or "").strip()
+    if not goal or is_trivial_social_message(goal):
+        return defaults
+
+    hard_limits = _infer_hard_limits(goal)
+    if (
+        hard_limits.get("max_total_seconds") is None
+        and default_max_total_seconds is not None
+    ):
+        hard_limits["max_total_seconds"] = float(default_max_total_seconds)
+
+    return normalize_execution_constraints(
+        {
+            "mode": "interactive",
+            "hard_limits": hard_limits,
+            "soft_preferences": {
+                "resolution_style": _infer_resolution_style(goal),
+            },
+            "degradation": {
+                "on_budget_exhausted": _infer_degradation_policy(goal),
+            },
+        }
+    )
+
+
 def default_execution_constraints(
     *,
     default_max_total_seconds: float | None = None,
@@ -193,47 +412,11 @@ async def infer_execution_constraints(
     heartbeat: Any = None,
     default_max_total_seconds: float | None = None,
 ) -> dict[str, Any]:
-    defaults = default_execution_constraints(
-        default_max_total_seconds=default_max_total_seconds
+    del gateway, heartbeat
+    return infer_execution_constraints_from_text(
+        text,
+        default_max_total_seconds=default_max_total_seconds,
     )
-    complete_structured = getattr(gateway, "complete_structured", None)
-    if not callable(complete_structured):
-        return defaults
-    goal = str(text or "").strip()
-    if not goal:
-        return defaults
-    if is_trivial_social_message(goal):
-        return defaults
-    system_prompt = (
-        "你负责从用户请求中抽取执行约束，输出结构化 JSON。"
-        "不要规划任务，不要解释，只抽取用户明确表达或强烈暗示的执行限制与偏好。"
-        "数字字段必须输出阿拉伯数字或 null；无法确定时输出 null。"
-    )
-    user_prompt = (
-        "请根据下面的用户请求，提取执行约束。\n"
-        "字段含义：\n"
-        "- hard_limits.max_rounds: 多Agent讨论允许的最大轮数\n"
-        "- hard_limits.max_agents: 允许的最大Agent数量\n"
-        "- hard_limits.max_total_seconds: 整体执行预算秒数\n"
-        "- hard_limits.max_turn_seconds: 单个agent发言/turn预算秒数\n"
-        "- soft_preferences.resolution_style: balanced/single_pass/fast_consensus/thorough\n"
-        "- degradation.on_budget_exhausted: summarize_partial/raise_timeout\n\n"
-        f"用户请求：{goal}"
-    )
-    structured = await complete_structured(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        model_cls=ExecutionConstraintsModel,
-        heartbeat=heartbeat,
-    )
-    payload = normalize_execution_constraints(_structured_to_dict(structured))
-    if payload["hard_limits"].get("max_total_seconds") is None:
-        payload["hard_limits"]["max_total_seconds"] = default_max_total_seconds
-    if not payload.get("degradation"):
-        payload["degradation"] = defaults["degradation"]
-    if not payload.get("soft_preferences"):
-        payload["soft_preferences"] = defaults["soft_preferences"]
-    return payload
 
 
 def build_execution_constraint_hints(constraints: Any) -> list[str]:

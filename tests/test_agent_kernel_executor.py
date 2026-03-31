@@ -64,6 +64,34 @@ class CountingAddTool(AddTool):
         return await super().invoke(args, context)
 
 
+class CountingViewTool(Tool):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return "_workspace_view_text_file"
+
+    @property
+    def description(self) -> str:
+        return "View workspace file."
+
+    @property
+    def schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+            },
+            "required": ["file_path"],
+        }
+
+    async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+        del context
+        self.calls += 1
+        return ToolResult(ok=True, content=f"view:{args['file_path']}")
+
+
 def test_single_agent_executor_runs_tool_then_returns_final_text() -> None:
     registry = ToolRegistry()
     registry.register(AddTool(), group="math")
@@ -238,6 +266,50 @@ def test_single_agent_executor_fails_fast_after_consecutive_no_progress_turns() 
     assert "No progress" in result.error
     assert tool.calls == 3
     assert model.calls < 10
+
+
+def test_single_agent_executor_fails_fast_on_exploration_only_turns() -> None:
+    class ExploringModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del request, context
+            self.calls += 1
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=f"call-{self.calls}",
+                        name="_workspace_view_text_file",
+                        arguments={"file_path": f"skills/demo_{self.calls}.md"},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    tool = CountingViewTool()
+    registry.register(tool, group="code")
+    model = ExploringModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="find and edit a skill"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "failed"
+    assert "No progress" in result.error
+    assert tool.calls <= 3
+    assert model.calls <= 4
 
 
 def test_single_agent_executor_collects_usage_metadata() -> None:

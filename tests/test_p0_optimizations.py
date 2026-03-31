@@ -368,9 +368,49 @@ def test_workspace_file_operations_use_to_thread(monkeypatch, tmp_path: Path) ->
     async def _run() -> None:
         await suite.write_text_file("demo.txt", "alpha\nbeta\n")
         content = await suite.view_text_file("demo.txt")
-        assert content == "alpha\nbeta\n"
+        assert "1 | alpha" in content
+        assert "2 | beta" in content
         await suite.insert_text_file("demo.txt", "zero\n", 1)
 
     asyncio.run(_run())
 
     assert len(to_thread_calls) >= 3
+
+
+def test_workspace_view_text_file_defaults_to_numbered_window(tmp_path: Path) -> None:
+    file_path = tmp_path / "demo.txt"
+    file_path.write_text(
+        "".join(f"line-{idx:03d}\n" for idx in range(1, 181)),
+        encoding="utf-8",
+    )
+    owner = SimpleNamespace(
+        _resolve_workspace_file=lambda path: (str(file_path), None),
+    )
+    suite = WorkspaceToolSuite(owner)
+
+    content = asyncio.run(suite.view_text_file("demo.txt"))
+
+    assert "[File:" in content
+    assert "lines 1-" in content
+    assert "1 | line-001" in content
+    assert "line-180" not in content
+    assert "offset=" in content
+
+
+def test_workspace_edit_text_file_replaces_target_text(tmp_path: Path) -> None:
+    file_path = tmp_path / "demo.txt"
+    file_path.write_text("alpha\nbeta\nbeta\n", encoding="utf-8")
+    owner = SimpleNamespace(
+        _resolve_workspace_file=lambda path: (str(file_path), None),
+    )
+    suite = WorkspaceToolSuite(owner)
+
+    async def _run() -> tuple[str, str]:
+        result = await suite.edit_text_file("demo.txt", "beta", "gamma")
+        updated = file_path.read_text(encoding="utf-8")
+        return result, updated
+
+    result, updated = asyncio.run(_run())
+
+    assert "Updated file" in result
+    assert updated == "alpha\ngamma\nbeta\n"
