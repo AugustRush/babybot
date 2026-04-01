@@ -62,6 +62,7 @@ logger = logging.getLogger(__name__)
 StreamTextCallback = Callable[[str], Awaitable[None] | None]
 
 _SUMMARIZE_PROMPT = (
+    "CRITICAL: 仅输出纯文本 JSON，禁止调用任何工具，禁止任何 markdown 代码块包裹。\n\n"
     "请将以下对话历史浓缩为 JSON 格式（用中文填写），严格按以下结构输出，不要输出其他内容：\n"
     '{"summary":"不超过200字的摘要，保留关键事实和已完成操作",'
     '"entities":["提到的关键实体，如人名、物品、话题等，最多5个"],'

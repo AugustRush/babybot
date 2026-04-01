@@ -201,6 +201,14 @@ _SYSTEM_PROMPT_ROLE = (
     "4. 禁止虚构结果；用户明确表达的执行限制与偏好必须优先遵守。\n"
     "5. 多资源任务优先在一次 dispatch_task 中用 resource_ids 组合能力；查看网页/仓库后创建或更新技能时，不要靠 create_worker 套娃补能力。\n"
     "6. 需要多Agent协作讨论、辩论、评审或头脑风暴时，使用 dispatch_team。\n"
+    "\n\n执行阶段协议：\n"
+    "按以下四阶段有序推进，不允许跨阶段跳跃或在错误阶段执行动作：\n"
+    "  [Research]     — 信息收集：仅读取、搜索、获取外部数据，不做修改或写入。\n"
+    "  [Synthesis]    — 分析综合：基于 Research 阶段结果制定具体方案，不执行任何写入。\n"
+    "  [Implementation] — 执行：按 Synthesis 方案执行写入、调用、修改等动作。\n"
+    "  [Verification] — 验证：检查执行结果，与目标对比，发现问题则局部补救，完成后 reply_to_user。\n"
+    "- 简单任务（直接问答、无外部调用）可省略 Research/Synthesis/Verification，直接 reply_to_user。\n"
+    "- 每阶段的子任务描述中必须标注所在阶段，例如：[Research] 搜索相关文档。\n"
     "\n\n任务结果协议：\n"
     "- wait_for_tasks / get_task_result 返回 JSON，不是自由文本。\n"
     "- 当结果中的 reply_artifacts_ready=true 时，表示子任务已经产出可随最终回复自动附带给用户的附件/媒体。\n"
@@ -1292,6 +1300,7 @@ class DynamicOrchestrator:
                     heartbeat.beat()
 
                 messages = self._prune_stale_wait_history(messages)
+                messages = self._prune_messages_by_count(messages)
                 logger.debug("DynamicOrchestrator: step=%d calling model", step)
                 response = await self._call_model(messages, context, step=step)
 
@@ -1418,6 +1427,10 @@ class DynamicOrchestrator:
         for hint in policy_hints:
             if hint and hint not in deduped_policy_hints:
                 deduped_policy_hints.append(hint)
+        # Cap at 20 hints to prevent prompt bloat from unbounded accumulation.
+        _MAX_POLICY_HINTS = 20
+        if len(deduped_policy_hints) > _MAX_POLICY_HINTS:
+            deduped_policy_hints = deduped_policy_hints[:_MAX_POLICY_HINTS]
         context.state["policy_hints"] = tuple(deduped_policy_hints)
 
         system_parts = [_SYSTEM_PROMPT_ROLE, self._resource_catalog_text(briefs)]
@@ -1425,19 +1438,25 @@ class DynamicOrchestrator:
             system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
         if history:
             system_parts.append(f"\n{history}")
-        if execution_constraints:
-            system_parts.append(
-                "\n执行约束：\n"
-                + format_execution_constraints_for_prompt(execution_constraints)
-            )
         if deduped_policy_hints:
             system_parts.append("\n策略建议：\n- " + "\n- ".join(deduped_policy_hints))
+
+        # execution_constraints is dynamic and request-scoped — inject it as a
+        # dedicated context block immediately before the user message so it is
+        # clearly separated from the static role/catalog and from conversation
+        # history, making it easier for the model to locate and respect.
+        user_context_prefix = ""
+        if execution_constraints:
+            constraints_text = format_execution_constraints_for_prompt(
+                execution_constraints
+            )
+            user_context_prefix = f"[执行约束]\n{constraints_text}\n\n[用户请求]\n"
 
         return [
             ModelMessage(role="system", content="\n".join(system_parts)),
             ModelMessage(
                 role="user",
-                content=goal,
+                content=user_context_prefix + goal,
                 images=tuple(media_paths),
             ),
         ]
@@ -1457,6 +1476,7 @@ class DynamicOrchestrator:
         description: str,
         resource_ids: tuple[str, ...],
         context: ExecutionContext,
+        upstream_results: dict[str, "TaskResult"] | None = None,
     ) -> str:
         raw_description = str(description or "").strip()
         if not raw_description:
@@ -1469,6 +1489,23 @@ class DynamicOrchestrator:
         maintenance_like = _looks_like_repo_or_skill_maintenance(
             f"{raw_description}\n{original_goal}"
         )
+
+        # Build upstream results section — only include successful outputs from dep tasks.
+        upstream_lines: list[str] = []
+        if upstream_results:
+            for tid, result in upstream_results.items():
+                output_snippet = str(result.output or "").strip()
+                if output_snippet:
+                    # Truncate to 300 chars to avoid prompt bloat.
+                    truncated = output_snippet[:300] + (
+                        "…" if len(output_snippet) > 300 else ""
+                    )
+                    upstream_lines.append(f"  [{tid}]: {truncated}")
+        upstream_section: list[str] = []
+        if upstream_lines:
+            upstream_section = [
+                "- upstream_results (上游依赖任务的输出摘要):"
+            ] + upstream_lines
 
         expected_output_lines = [
             "- 返回当前子任务的执行结果摘要。",
@@ -1493,6 +1530,7 @@ class DynamicOrchestrator:
             "[输入]",
             f"- parent_goal: {original_goal or '-'}",
             f"- resource_ids: {resource_summary}",
+            *upstream_section,
             "[预期输出]",
             *expected_output_lines,
             "[完成条件]",
@@ -1555,6 +1593,39 @@ class DynamicOrchestrator:
         if keep_wait_call_id not in tool_ids_present:
             return messages
         return pruned
+
+    @staticmethod
+    def _prune_messages_by_count(
+        messages: list[ModelMessage],
+        *,
+        max_non_system: int = 80,
+        keep_recent: int = 60,
+    ) -> list[ModelMessage]:
+        """Fallback count-based pruning to prevent unbounded message growth.
+
+        When the total number of non-system messages exceeds ``max_non_system``,
+        only the system message (index 0) plus the most recent ``keep_recent``
+        non-system messages are retained.  This is a safety net — it does NOT
+        do token-based compaction, but it bounds worst-case prompt size in long
+        task chains.
+        """
+        if not messages:
+            return messages
+
+        system_msgs = [m for m in messages if m.role == "system"]
+        non_system = [m for m in messages if m.role != "system"]
+
+        if len(non_system) <= max_non_system:
+            return messages
+
+        logger.warning(
+            "DynamicOrchestrator: message count exceeded %d (actual=%d); "
+            "pruning to %d most recent non-system messages",
+            max_non_system,
+            len(non_system),
+            keep_recent,
+        )
+        return system_msgs + non_system[-keep_recent:]
 
     async def _call_model(
         self,
@@ -1634,13 +1705,19 @@ class DynamicOrchestrator:
         if name == "dispatch_task":
             dispatch_args = dict(args)
             resource_ids = _dispatch_resource_ids(dispatch_args)
+            deps = list(dispatch_args.get("deps", []) or [])
             if "group.scheduler" not in resource_ids:
+                # Collect completed upstream results for dep tasks so the child task
+                # knows what its dependencies produced (break the black-box problem).
+                upstream_results = {
+                    tid: runtime.results[tid] for tid in deps if tid in runtime.results
+                } or None
                 dispatch_args["description"] = self._normalize_child_task_description(
                     description=str(dispatch_args.get("description", "") or ""),
                     resource_ids=resource_ids,
                     context=context,
+                    upstream_results=upstream_results,
                 )
-            deps = list(dispatch_args.get("deps", []) or [])
             active_in_flight = len(runtime.in_flight)
             scheduling_action = (
                 "parallel_dispatch"
@@ -1707,19 +1784,26 @@ class DynamicOrchestrator:
                 )
             all_dead, dead_ids = runtime.all_tasks_dead_lettered_with_no_success()
             if all_dead:
-                # Log a warning — the model may be about to fabricate results.
-                # We still allow reply_to_user so the model can honestly report failure,
-                # but we inject a reminder in the tool result to reinforce honesty.
+                # All child tasks failed — inject an explicit honesty reminder into the
+                # tool result so the model cannot silently fabricate success.
                 errors = "; ".join(
                     str(runtime.results[tid].error or "unknown error")[:120]
                     for tid in dead_ids
                 )
                 logger.warning(
                     "reply_to_user after all tasks dead-lettered (%s); "
-                    "model must report failure honestly. errors: %s",
+                    "injecting honesty reminder. errors: %s",
                     ", ".join(dead_ids),
                     errors,
                 )
+                dead_reminder = (
+                    "[SYSTEM NOTICE] 所有子任务均已失败，没有任何成功的执行结果。\n"
+                    f"失败任务: {', '.join(dead_ids)}\n"
+                    f"错误摘要: {errors}\n"
+                    "你必须如实向用户报告任务失败及原因，禁止虚构或推断未执行的结果。"
+                )
+                user_text = args.get("text", "")
+                return f"{dead_reminder}\n\n你当前提供的回复文本:\n{user_text}"
             return args.get("text", "")
         if name == "dispatch_team":
             return await self._run_team(args, context)

@@ -74,7 +74,9 @@ class HybridMemoryStore:
         if path.exists():
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        profile_text = self._migrate_legacy_assistant_profile() or _DEFAULT_ASSISTANT_PROFILE
+        profile_text = (
+            self._migrate_legacy_assistant_profile() or _DEFAULT_ASSISTANT_PROFILE
+        )
         path.write_text(profile_text.strip() + "\n", encoding="utf-8")
 
     def _migrate_legacy_assistant_profile(self) -> str:
@@ -110,7 +112,21 @@ class HybridMemoryStore:
         cached = self._assistant_profile_cache
         if cached is not None and cached[0] == mtime_ns:
             return cached[1]
-        text = str(path.read_text(encoding="utf-8") or "").strip()
+        raw = str(path.read_text(encoding="utf-8") or "").strip()
+        # Hard-cap to prevent prompt explosion: max 200 lines or 25 KB.
+        _MAX_LINES = 200
+        _MAX_BYTES = 25 * 1024  # 25 KB
+        lines = raw.splitlines()
+        if len(lines) > _MAX_LINES:
+            lines = lines[:_MAX_LINES]
+            lines.append("… [profile truncated at 200 lines]")
+        text = "\n".join(lines)
+        if len(text.encode("utf-8")) > _MAX_BYTES:
+            encoded = text.encode("utf-8")[:_MAX_BYTES]
+            text = (
+                encoded.decode("utf-8", errors="ignore")
+                + "\n… [profile truncated at 25KB]"
+            )
         self._assistant_profile_cache = (mtime_ns, text)
         return text
 
@@ -585,6 +601,8 @@ def _extract_brief_phrase(text: str, *, prefix: str) -> str:
     if any(marker in candidate for marker in ("请", "需要", "希望", "回复", "回答")):
         return ""
     return candidate
+
+
 def _detect_language_preference(text: str) -> str:
     lowered = text.lower()
     if any(token in lowered for token in ("english", "英文", "英语")):
