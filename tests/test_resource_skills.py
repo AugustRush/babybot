@@ -235,6 +235,7 @@ def test_agent_admin_skill_exists_and_guides_builtin_admin_workflows() -> None:
     assert "## Example Requests" in body
     assert "list_admin_skills" in body
     assert "set_assistant_profile" in body
+    assert "delete_skill" in body
     assert "reload_skill" in body
 
 
@@ -2309,6 +2310,76 @@ def test_reload_skill_preserves_existing_active_state(tmp_path: Path) -> None:
 
     assert "reloaded successfully" in result
     assert manager.skills["demo"].active is False
+
+
+def test_delete_skill_removes_workspace_skill_files_and_registry_entries(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    workspace_dir = tmp_path / "workspace"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "workspace_dir": str(workspace_dir),
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = ResourceManager(Config(str(config_path)))
+    skill_dir = workspace_dir / "skills" / "demo"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+    (scripts / "helper.py").write_text(
+        'def greet() -> str:\n    """Say hello."""\n    return "hi"\n',
+        encoding="utf-8",
+    )
+
+    manager.reload_skill(str(skill_dir))
+
+    result = manager.delete_skill("skill.demo")
+
+    assert "deleted" in result.lower()
+    assert "demo" not in manager.skills
+    assert skill_dir.exists() is False
+    assert "skill_demo" not in manager.groups
+    assert manager.registry.get("demo__greet") is None
+
+
+def test_delete_skill_rejects_builtin_skill_directories(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    workspace_dir = tmp_path / "workspace"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "workspace_dir": str(workspace_dir),
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = ResourceManager(Config(str(config_path)))
+    builtin_dir = tmp_path / "builtin-skills"
+    builtin_dir.mkdir()
+    manager.config.builtin_skills_dir = builtin_dir
+    skill_dir = builtin_dir / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Builtin demo skill\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+
+    manager.reload_skill(str(skill_dir))
+
+    result = manager.delete_skill("demo")
+
+    assert "workspace" in result.lower()
+    assert skill_dir.exists() is True
+    assert "demo" in manager.skills
 
 
 

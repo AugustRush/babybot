@@ -119,6 +119,9 @@ class _DummyOwner:
     def disable_skill(self, skill_name: str) -> str:
         return f"disabled {skill_name}"
 
+    def delete_skill(self, skill_name: str) -> str:
+        return f"deleted {skill_name}"
+
 
 def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> None:
     items = list(iter_builtin_tool_registrations(_DummyOwner()))
@@ -149,6 +152,7 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("admin", "list_admin_skills"),
         ("admin", "enable_skill"),
         ("admin", "disable_skill"),
+        ("admin", "delete_skill"),
         ("basic", "reload_skill"),
     ]
 

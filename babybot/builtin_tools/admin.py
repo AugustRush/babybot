@@ -56,6 +56,14 @@ def build_disable_skill_tool(owner: Any) -> Any:
     return disable_skill
 
 
+def build_delete_skill_tool(owner: Any) -> Any:
+    def delete_skill(skill_name: str) -> str:
+        """Delete a workspace skill by name or resource id."""
+        return owner.delete_skill(skill_name)
+
+    return delete_skill
+
+
 def iter_admin_tool_registrations(owner: Any) -> tuple[tuple[Any, str], ...]:
     return (
         (build_get_assistant_profile_tool(owner), "admin"),
@@ -63,4 +71,5 @@ def iter_admin_tool_registrations(owner: Any) -> tuple[tuple[Any, str], ...]:
         (build_list_admin_skills_tool(owner), "admin"),
         (build_enable_skill_tool(owner), "admin"),
         (build_disable_skill_tool(owner), "admin"),
+        (build_delete_skill_tool(owner), "admin"),
     )

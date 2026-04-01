@@ -951,6 +951,35 @@ class ResourceManager:
         skill.active = False
         return f"Skill '{skill.name}' disabled."
 
+    def delete_skill(self, skill_name: str) -> str:
+        skill = self._resolve_skill_record(skill_name)
+        if skill is None:
+            return f"Skill not found: {skill_name}"
+
+        skill_dir = Path(skill.directory).expanduser().resolve()
+        workspace_root = self.config.workspace_skills_dir.expanduser().resolve()
+        try:
+            skill_dir.relative_to(workspace_root)
+        except ValueError:
+            return (
+                "Refusing to delete non-workspace skill. "
+                "Only workspace custom skills can be deleted."
+            )
+
+        if skill.tool_group:
+            removed = self.registry.unregister_group(skill.tool_group)
+            self.groups.pop(skill.tool_group, None)
+            logger.info(
+                "Deleted skill %s and unregistered %d tools",
+                skill.name,
+                len(removed),
+            )
+
+        self.skills.pop(skill.name.strip().lower(), None)
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir)
+        return f"Skill '{skill.name}' deleted from workspace."
+
     def _register_skill_tools(
         self,
         skill_name: str,
