@@ -232,6 +232,8 @@ class ResourceScopeHelper:
             include_groups = list(include_groups)
             if "basic" not in include_groups:
                 include_groups.append("basic")
+            if "code" in self._owner.groups and "code" not in include_groups:
+                include_groups.append("code")
             include_groups = [
                 group
                 for group in include_groups

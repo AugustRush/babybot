@@ -1308,10 +1308,14 @@ class ResourceManager:
         query: str = "",
         group: str = "",
         active_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
     ) -> str:
         query_text = query.strip().lower()
         group_filter = group.strip().lower()
-        lines = ["[Tools]"]
+        normalized_limit = max(1, min(int(limit or 50), 200))
+        normalized_offset = max(0, int(offset or 0))
+        rows: list[str] = []
         for registered in sorted(self.registry.list(), key=lambda item: item.tool.name):
             tool_name = registered.tool.name
             tool_group = registered.group
@@ -1331,14 +1335,40 @@ class ResourceManager:
                 if isinstance(prop, dict)
             ]
             schema_summary = ", ".join(schema_parts) if schema_parts else "no-args"
-            lines.append(
+            rows.append(
                 f"- tool={tool_name} group={tool_group} active={is_active} schema={schema_summary}"
             )
-        return "\n".join(lines) if len(lines) > 1 else "[Tools]\n- no matching tools"
+        total = len(rows)
+        window = rows[normalized_offset : normalized_offset + normalized_limit]
+        lines = [
+            "[Tools]",
+            (
+                f"- total={total} returned={len(window)} "
+                f"offset={normalized_offset} limit={normalized_limit}"
+            ),
+        ]
+        if not window:
+            lines.append("- no matching tools")
+            return "\n".join(lines)
+        lines.extend(window)
+        if normalized_offset + len(window) < total:
+            lines.append(
+                f"[Truncated. Use offset={normalized_offset + len(window)} "
+                f"limit={normalized_limit} to read more.]"
+            )
+        return "\n".join(lines)
 
-    def _inspect_skills(self, query: str = "", active_only: bool = False) -> str:
+    def _inspect_skills(
+        self,
+        query: str = "",
+        active_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> str:
         query_text = query.strip().lower()
-        lines = ["[Skills]"]
+        normalized_limit = max(1, min(int(limit or 50), 200))
+        normalized_offset = max(0, int(offset or 0))
+        rows: list[str] = []
         for skill in sorted(self.skills.values(), key=lambda item: item.name.lower()):
             if active_only and not skill.active:
                 continue
@@ -1346,11 +1376,29 @@ class ResourceManager:
             if query_text and query_text not in haystack:
                 continue
             tool_list = ", ".join(skill.tools) if skill.tools else "-"
-            lines.append(
+            rows.append(
                 f"- skill={skill.name} active={skill.active} source={skill.source} "
                 f"group={skill.tool_group or '-'} tools={tool_list}"
             )
-        return "\n".join(lines) if len(lines) > 1 else "[Skills]\n- no matching skills"
+        total = len(rows)
+        window = rows[normalized_offset : normalized_offset + normalized_limit]
+        lines = [
+            "[Skills]",
+            (
+                f"- total={total} returned={len(window)} "
+                f"offset={normalized_offset} limit={normalized_limit}"
+            ),
+        ]
+        if not window:
+            lines.append("- no matching skills")
+            return "\n".join(lines)
+        lines.extend(window)
+        if normalized_offset + len(window) < total:
+            lines.append(
+                f"[Truncated. Use offset={normalized_offset + len(window)} "
+                f"limit={normalized_limit} to read more.]"
+            )
+        return "\n".join(lines)
 
     def _inspect_skill_load_errors(self, limit: int = 20) -> str:
         capped = max(1, int(limit or 20))

@@ -1446,6 +1446,7 @@ def test_build_task_lease_adds_basic_group_and_filters_unknown_include_tools() -
     manager = object.__new__(ResourceManager)
     manager.groups = {
         "basic": ToolGroup("basic", "core", active=True),
+        "code": ToolGroup("code", "code", active=True),
         "analysis": ToolGroup("analysis", "analysis", active=False),
     }
     manager.registry = ToolRegistry()
@@ -1462,8 +1463,22 @@ def test_build_task_lease_adds_basic_group_and_filters_unknown_include_tools() -
         }
     )
 
-    assert lease.include_groups == ("analysis", "basic")
+    assert lease.include_groups == ("analysis", "basic", "code")
     assert lease.include_tools == ("regular_tool",)
+
+
+def test_build_task_lease_keeps_code_as_default_baseline_for_browser_tasks() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "basic": ToolGroup("basic", "core", active=True),
+        "code": ToolGroup("code", "code", active=True),
+        "browser": ToolGroup("browser", "browser", active=False),
+    }
+    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+
+    lease = manager._build_task_lease({"include_groups": ["browser"]})
+
+    assert lease.include_groups == ("browser", "basic", "code")
 
 
 def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:
@@ -2130,6 +2145,54 @@ def test_inspect_tools_reports_group_schema_and_active_state() -> None:
     assert "items:array[string]" in payload
 
 
+def test_inspect_tools_and_skills_support_limit_and_offset() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.groups = {"basic": ToolGroup("basic", "core", active=True)}
+    manager.registry = ToolRegistry()
+    manager.config = Config()
+    manager.skills = {
+        "alpha": LoadedSkill(
+            name="alpha",
+            description="Alpha skill",
+            directory="/tmp/alpha",
+            active=True,
+            source="auto",
+            tool_group="skill_alpha",
+            tools=("alpha__run",),
+        ),
+        "beta": LoadedSkill(
+            name="beta",
+            description="Beta skill",
+            directory="/tmp/beta",
+            active=True,
+            source="auto",
+            tool_group="skill_beta",
+            tools=("beta__run",),
+        ),
+    }
+
+    def aaa() -> str:
+        return "a"
+
+    def zzz() -> str:
+        return "z"
+
+    manager.register_tool(aaa, group_name="basic")
+    manager.register_tool(zzz, group_name="basic")
+
+    tools_text = manager._inspect_tools(limit=1, offset=0)
+    tools_text_offset = manager._inspect_tools(limit=1, offset=1)
+    skills_text = manager._inspect_skills(limit=1, offset=0)
+    skills_text_offset = manager._inspect_skills(limit=1, offset=1)
+
+    assert "returned=1" in tools_text
+    assert "Truncated." in tools_text
+    assert "tool=zzz" in tools_text_offset
+    assert "returned=1" in skills_text
+    assert "Truncated." in skills_text
+    assert "skill=beta" in skills_text_offset
+
+
 def test_inspect_skills_and_load_errors_tools_proxy_to_manager() -> None:
     manager = object.__new__(ResourceManager)
     manager.skills = {
@@ -2150,7 +2213,9 @@ def test_inspect_skills_and_load_errors_tools_proxy_to_manager() -> None:
     skills_text = asyncio.run(observability_tools.build_inspect_skills_tool(manager)())
     errors_text = asyncio.run(observability_tools.build_inspect_skill_load_errors_tool(manager)(limit=5))
     tools_text = asyncio.run(observability_tools.build_inspect_tools_tool(type("Owner", (), {
-        "_inspect_tools": staticmethod(lambda query="", group="", active_only=False: "ok-tools")
+        "_inspect_tools": staticmethod(
+            lambda query="", group="", active_only=False, limit=50, offset=0: "ok-tools"
+        )
     })())())
 
     assert "demo" in skills_text

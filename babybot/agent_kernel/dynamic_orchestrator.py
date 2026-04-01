@@ -480,6 +480,66 @@ class InProcessChildTaskRuntime:
             normalized.setdefault("plan_step_id", self._plan_step_id)
         return normalized
 
+    @staticmethod
+    def _normalize_dispatch_description(description: str) -> str:
+        return " ".join(str(description or "").split()).strip().lower()
+
+    @classmethod
+    def _dispatch_signature(
+        cls,
+        resource_ids: tuple[str, ...],
+        description: str,
+    ) -> tuple[tuple[str, ...], str]:
+        normalized_ids = tuple(sorted({rid.strip() for rid in resource_ids if rid.strip()}))
+        return normalized_ids, cls._normalize_dispatch_description(description)
+
+    def _duplicate_dispatch_reason(
+        self,
+        *,
+        resource_ids: tuple[str, ...],
+        description: str,
+    ) -> str | None:
+        target_signature = self._dispatch_signature(resource_ids, description)
+
+        for task_id, state in self._task_state.items():
+            state_resource_ids = state.get("resource_ids")
+            if isinstance(state_resource_ids, (list, tuple)):
+                state_ids = tuple(str(item).strip() for item in state_resource_ids)
+            else:
+                state_resource_id = str(state.get("resource_id", "") or "").strip()
+                state_ids = (state_resource_id,) if state_resource_id else ()
+            state_description = str(state.get("description", "") or "")
+            if self._dispatch_signature(state_ids, state_description) != target_signature:
+                continue
+            state_status = str(state.get("status", "") or "").strip().lower()
+            if (
+                state_status in {"queued", "started", "retrying"}
+                and task_id in self._in_flight
+                and task_id not in self._results
+            ):
+                return f"error: similar task already in progress: {task_id}"
+
+        for task_id, result in self._results.items():
+            metadata = dict(result.metadata or {})
+            metadata_resource_ids = metadata.get("resource_ids")
+            if isinstance(metadata_resource_ids, (list, tuple)):
+                metadata_ids = tuple(str(item).strip() for item in metadata_resource_ids)
+            else:
+                metadata_resource_id = str(metadata.get("resource_id", "") or "").strip()
+                metadata_ids = (metadata_resource_id,) if metadata_resource_id else ()
+            metadata_description = str(metadata.get("description", "") or "")
+            if (
+                self._dispatch_signature(metadata_ids, metadata_description)
+                != target_signature
+            ):
+                continue
+            if result.status == "failed" and metadata.get("dead_lettered") is True:
+                return (
+                    "error: similar task already dead-lettered in this flow; "
+                    "revise description/resource_ids or summarize the failure"
+                )
+        return None
+
     async def _promote_stalled_tasks(self, task_ids: list[str]) -> None:
         for task_id in self._stale_task_ids(task_ids):
             running = self._in_flight.pop(task_id, None)
@@ -631,6 +691,13 @@ class InProcessChildTaskRuntime:
         for dep in deps:
             if dep not in self._in_flight and dep not in self._results:
                 return f"error: unknown dep task_id: {dep}"
+
+        duplicate_reason = self._duplicate_dispatch_reason(
+            resource_ids=resource_ids,
+            description=description,
+        )
+        if duplicate_reason is not None:
+            return duplicate_reason
 
         task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
         flow_id = self._flow_id

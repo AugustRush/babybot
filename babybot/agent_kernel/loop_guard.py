@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -75,7 +76,7 @@ class LoopGuard:
                 disable_tool=True,
             )
 
-        if self.is_exploration_tool(tool_name):
+        if self.is_exploration_call(tool_name, arguments):
             self._exploration_streak += 1
             if (
                 self._config.max_exploration_streak > 0
@@ -207,3 +208,48 @@ class LoopGuard:
         return leaf.startswith(markers) or any(
             f"_{marker}" in leaf for marker in markers
         )
+
+    @classmethod
+    def _is_read_only_shell_command(cls, command: str) -> bool:
+        lowered = str(command or "").strip().lower()
+        if not lowered:
+            return True
+        if any(hint in lowered for hint in cls._WRITE_SHELL_HINTS):
+            return False
+        return any(re.search(pattern, lowered) for pattern in cls._READ_ONLY_SHELL_PATTERNS)
+
+    @classmethod
+    def is_exploration_call(cls, tool_name: str, arguments: Any) -> bool:
+        normalized = (tool_name or "").strip().lower().lstrip("_")
+        if not normalized:
+            return False
+        if normalized.endswith("execute_shell_command"):
+            if isinstance(arguments, dict):
+                return cls._is_read_only_shell_command(
+                    str(arguments.get("command", "") or "")
+                )
+            return True
+        if normalized.endswith("execute_python_code"):
+            return False
+        return cls.is_exploration_tool(tool_name)
+    _READ_ONLY_SHELL_PATTERNS = (
+        r"^\s*(ls|pwd|whoami|which|type|cat|head|tail|grep|rg|find|tree|wc|stat|echo)\b",
+        r"^\s*git\s+(status|log|show|diff|branch)\b",
+    )
+    _WRITE_SHELL_HINTS = (
+        " >",
+        ">>",
+        "tee ",
+        "sed -i",
+        "mv ",
+        "cp ",
+        "rm ",
+        "mkdir ",
+        "touch ",
+        "truncate ",
+        "git add",
+        "git commit",
+        "git apply",
+        "chmod ",
+        "chown ",
+    )

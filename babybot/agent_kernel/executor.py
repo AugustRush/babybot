@@ -372,7 +372,7 @@ class SingleAgentExecutor:
                         )
                 else:
                     if all(
-                        loop_guard.is_exploration_tool(tool_call.name)
+                        loop_guard.is_exploration_call(tool_call.name, tool_call.arguments)
                         for tool_call, _ in valid_calls
                     ):
                         no_progress_turns += 1

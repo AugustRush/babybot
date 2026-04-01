@@ -341,6 +341,32 @@ def test_decode_partial_json_string_keeps_valid_prefix_before_trailing_escape() 
     assert gateway._decode_partial_json_string('abc\\u4f60\\') == 'abc你'
 
 
+def test_parse_tool_calls_recovers_workspace_write_args_from_malformed_json() -> None:
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+    raw_arguments = (
+        '{"content":"line1\\nline2","file_path":'
+        '"/Users/shike/.babybot/workspace/output/skill.demo/SKILL.md"'
+    )
+
+    calls = gateway._parse_tool_calls(
+        [("call_1", "_workspace_write_text_file", raw_arguments)],
+        task_id="task_demo",
+        step=6,
+    )
+
+    assert len(calls) == 1
+    assert calls[0].arguments == {
+        "content": "line1\nline2",
+        "file_path": "/Users/shike/.babybot/workspace/output/skill.demo/SKILL.md",
+    }
+
+
+def test_decode_partial_json_string_falls_back_for_literal_newline() -> None:
+    gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
+
+    assert gateway._decode_partial_json_string("line1\nline2") == "line1\nline2"
+
+
 def test_complete_expected_timeout_logs_warning_not_error(caplog: pytest.LogCaptureFixture) -> None:
     completions = _TimeoutCompletions()
     gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]

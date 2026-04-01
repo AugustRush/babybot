@@ -149,6 +149,45 @@ def test_exploration_streak_blocks_read_only_wandering() -> None:
     assert "exploration" in verdict.reason.lower()
 
 
+def test_exploration_streak_counts_read_only_shell_commands() -> None:
+    guard = LoopGuard(
+        LoopGuardConfig(
+            max_identical_calls=20,
+            per_tool_call_budget=20,
+            ping_pong_window=20,
+            max_exploration_streak=3,
+        )
+    )
+
+    verdict = LoopVerdict()
+    for idx in range(3):
+        verdict = guard.check_call(
+            "_workspace_execute_shell_command",
+            {"command": f"cat skills/demo_{idx}.md"},
+        )
+
+    assert verdict.blocked
+    assert "exploration" in verdict.reason.lower()
+
+
+def test_exploration_streak_does_not_block_shell_write_commands() -> None:
+    guard = LoopGuard(
+        LoopGuardConfig(
+            max_identical_calls=20,
+            per_tool_call_budget=20,
+            ping_pong_window=20,
+            max_exploration_streak=3,
+        )
+    )
+
+    for idx in range(3):
+        verdict = guard.check_call(
+            "_workspace_execute_shell_command",
+            {"command": f"printf 'x' > /tmp/demo_{idx}.txt"},
+        )
+        assert not verdict.blocked
+
+
 # ---------------------------------------------------------------------------
 # Compress messages tests
 # ---------------------------------------------------------------------------

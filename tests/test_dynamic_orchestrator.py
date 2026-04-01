@@ -869,6 +869,56 @@ def test_dispatch_times_out_hung_child_task() -> None:
     assert was_cancelled is True
 
 
+def test_runtime_blocks_repeated_dispatch_after_dead_letter() -> None:
+    from babybot.agent_kernel.dynamic_orchestrator import (
+        InMemoryChildTaskBus,
+        InProcessChildTaskRuntime,
+    )
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="ignored",
+                status="failed",
+                error="forced failure",
+            )
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-repeat-dead-letter",
+        resource_manager=DummyResourceManager(),  # type: ignore[arg-type]
+        bridge=_Bridge(),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+        max_retries=0,
+    )
+    context = ExecutionContext(session_id="flow-repeat-dead-letter")
+
+    async def _run() -> tuple[str, str]:
+        first_task_id = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "same work"},
+            task_counter=0,
+            context=context,
+        )
+        await runtime.wait_for_tasks([first_task_id])
+        second_result = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "same work"},
+            task_counter=1,
+            context=context,
+        )
+        return first_task_id, second_result
+
+    first_task_id, second_result = asyncio.run(_run())
+
+    assert first_task_id.startswith("task_0_")
+    assert second_result.startswith(
+        "error: similar task already dead-lettered in this flow"
+    )
+
+
 def test_orchestrator_reply_blocked_by_live_work_still_cleans_up_on_fallback() -> None:
     cleaned_up = asyncio.Event()
     started = asyncio.Event()

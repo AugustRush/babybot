@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import shlex
 from pathlib import Path
@@ -60,6 +61,11 @@ def check_python_safety(code: str) -> str | None:
 
 class WorkspaceToolSuite:
     DEFAULT_VIEW_LINE_LIMIT = 120
+    MAX_VIEW_LINE_LIMIT = 400
+
+    @staticmethod
+    def _render_command_result(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def __init__(self, owner: Any) -> None:
         self._owner = owner
@@ -73,7 +79,17 @@ class WorkspaceToolSuite:
         del kwargs
         safety_error = check_python_safety(code)
         if safety_error:
-            return safety_error
+            return self._render_command_result(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "reason": safety_error,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "output": safety_error,
+                }
+            )
         ws = str(self._owner._get_active_write_root())
         proc = await asyncio.create_subprocess_exec(
             self._owner._get_user_python(),
@@ -98,7 +114,19 @@ class WorkspaceToolSuite:
                 await proc.communicate()
             except Exception:
                 pass
-            return f"Timeout: python execution exceeded {timeout_s}s."
+            timeout_message = f"Timeout: python execution exceeded {timeout_s}s."
+            return self._render_command_result(
+                {
+                    "ok": False,
+                    "timed_out": True,
+                    "blocked": False,
+                    "reason": timeout_message,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "output": timeout_message,
+                }
+            )
         except Exception:
             try:
                 communicate_coro.close()
@@ -110,7 +138,17 @@ class WorkspaceToolSuite:
         text = out.strip()
         if err.strip():
             text = f"{text}\n{err.strip()}".strip()
-        return text
+        return self._render_command_result(
+            {
+                "ok": int(proc.returncode or 0) == 0,
+                "timed_out": False,
+                "blocked": False,
+                "exit_code": int(proc.returncode or 0),
+                "stdout": out.strip(),
+                "stderr": err.strip(),
+                "output": text,
+            }
+        )
 
     async def execute_shell_command(
         self,
@@ -121,7 +159,17 @@ class WorkspaceToolSuite:
         del kwargs
         safety_error = check_shell_safety(command)
         if safety_error:
-            return safety_error
+            return self._render_command_result(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "reason": safety_error,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "output": safety_error,
+                }
+            )
         ws = shlex.quote(str(self._owner._get_active_write_root()))
         guarded = f"cd {ws} && {command}"
         proc = await asyncio.create_subprocess_shell(
@@ -145,7 +193,19 @@ class WorkspaceToolSuite:
                 await proc.communicate()
             except Exception:
                 pass
-            return f"Timeout: shell command exceeded {timeout_s}s."
+            timeout_message = f"Timeout: shell command exceeded {timeout_s}s."
+            return self._render_command_result(
+                {
+                    "ok": False,
+                    "timed_out": True,
+                    "blocked": False,
+                    "reason": timeout_message,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "output": timeout_message,
+                }
+            )
         except Exception:
             try:
                 communicate_coro.close()
@@ -157,7 +217,17 @@ class WorkspaceToolSuite:
         text = out.strip()
         if err.strip():
             text = f"{text}\n{err.strip()}".strip()
-        return text
+        return self._render_command_result(
+            {
+                "ok": int(proc.returncode or 0) == 0,
+                "timed_out": False,
+                "blocked": False,
+                "exit_code": int(proc.returncode or 0),
+                "stdout": out.strip(),
+                "stderr": err.strip(),
+                "output": text,
+            }
+        )
 
     async def view_text_file(
         self,
@@ -176,23 +246,33 @@ class WorkspaceToolSuite:
         )
         line_list = lines.splitlines(keepends=True)
         if ranges:
+            requested_limit = int(limit) if limit is not None else None
+            effective_limit = max(1, int(limit or self.MAX_VIEW_LINE_LIMIT))
+            effective_limit = min(effective_limit, self.MAX_VIEW_LINE_LIMIT)
             selected: list[tuple[int, str]] = []
             for i in range(0, len(ranges), 2):
                 start = max(1, int(ranges[i]))
                 end = int(ranges[i + 1]) if i + 1 < len(ranges) else start
                 for lineno in range(start, min(len(line_list), end) + 1):
                     selected.append((lineno, line_list[lineno - 1]))
+            truncated = len(selected) > effective_limit
+            if truncated:
+                selected = selected[:effective_limit]
+            next_offset = selected[-1][0] if truncated and selected else None
             return self._format_file_view(
                 resolved,
                 selected,
                 total_lines=len(line_list),
-                truncated=False,
-                next_offset=None,
-                limit=None,
+                truncated=truncated,
+                next_offset=next_offset,
+                limit=effective_limit,
+                requested_limit=requested_limit,
             )
 
         start_idx = max(0, int(offset or 0))
+        requested_limit = int(limit) if limit is not None else None
         window = max(1, int(limit or self.DEFAULT_VIEW_LINE_LIMIT))
+        window = min(window, self.MAX_VIEW_LINE_LIMIT)
         end_idx = min(len(line_list), start_idx + window)
         selected = [
             (idx + 1, line_list[idx])
@@ -205,6 +285,7 @@ class WorkspaceToolSuite:
             truncated=end_idx < len(line_list),
             next_offset=end_idx if end_idx < len(line_list) else None,
             limit=window,
+            requested_limit=requested_limit,
         )
 
     async def write_text_file(
@@ -292,6 +373,7 @@ class WorkspaceToolSuite:
         truncated: bool,
         next_offset: int | None,
         limit: int | None,
+        requested_limit: int | None = None,
     ) -> str:
         if selected:
             start_line = selected[0][0]
@@ -300,13 +382,27 @@ class WorkspaceToolSuite:
             start_line = 1
             end_line = 0
         header = f"[File: {resolved} | lines {start_line}-{end_line} of {total_lines}]"
+        meta = (
+            f"[Meta: returned_lines={len(selected)} "
+            f"truncated={'true' if truncated else 'false'} "
+            f"next_offset={next_offset if next_offset is not None else '-'} "
+            f"limit={limit if limit is not None else '-'}]"
+        )
         body = "\n".join(
             f"{lineno} | {line.rstrip()}" for lineno, line in selected
         )
         if truncated and next_offset is not None:
-            footer = (
+            footer_parts = [
                 f"[Truncated. Use offset={next_offset} limit={limit or WorkspaceToolSuite.DEFAULT_VIEW_LINE_LIMIT} "
                 "or ranges=[start,end] to read more.]"
-            )
-            return "\n".join(part for part in (header, body, footer) if part)
-        return "\n".join(part for part in (header, body) if part)
+            ]
+            if requested_limit is not None and limit is not None and requested_limit > limit:
+                footer_parts.append(
+                    f"[Requested limit={requested_limit} was capped at {limit}.]"
+                )
+            footer = "\n".join(footer_parts)
+            return "\n".join(part for part in (header, meta, body, footer) if part)
+        if truncated:
+            footer = "[Truncated. Narrow ranges or use offset/limit to continue.]"
+            return "\n".join(part for part in (header, meta, body, footer) if part)
+        return "\n".join(part for part in (header, meta, body) if part)

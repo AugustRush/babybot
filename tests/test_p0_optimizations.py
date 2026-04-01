@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -347,7 +348,11 @@ def test_python_safety_blocks_dangerous_code(monkeypatch, tmp_path: Path) -> Non
         suite.execute_python_code("import shutil\nshutil.rmtree('/tmp/demo')")
     )
 
-    assert result.startswith("Blocked:")
+    payload = json.loads(result)
+    assert payload["ok"] is False
+    assert payload["blocked"] is True
+    assert "Blocked:" in payload["reason"]
+    assert payload["exit_code"] is None
 
 
 def test_workspace_file_operations_use_to_thread(monkeypatch, tmp_path: Path) -> None:
@@ -395,6 +400,40 @@ def test_workspace_view_text_file_defaults_to_numbered_window(tmp_path: Path) ->
     assert "1 | line-001" in content
     assert "line-180" not in content
     assert "offset=" in content
+
+
+def test_workspace_view_text_file_caps_limit_and_reports_meta(tmp_path: Path) -> None:
+    file_path = tmp_path / "demo.txt"
+    file_path.write_text(
+        "".join(f"line-{idx:03d}\n" for idx in range(1, 1201)),
+        encoding="utf-8",
+    )
+    owner = SimpleNamespace(
+        _resolve_workspace_file=lambda path: (str(file_path), None),
+    )
+    suite = WorkspaceToolSuite(owner)
+
+    content = asyncio.run(suite.view_text_file("demo.txt", limit=10000))
+
+    assert "[Meta:" in content
+    assert "requested limit=10000" in content.lower()
+    assert "line-401" not in content
+
+
+def test_workspace_shell_command_returns_structured_output(tmp_path: Path) -> None:
+    owner = SimpleNamespace(
+        _get_active_write_root=lambda: tmp_path,
+        _clean_env=lambda: {},
+        _coerce_timeout=lambda timeout, default=300.0: default,
+    )
+    suite = WorkspaceToolSuite(owner)
+
+    raw = asyncio.run(suite.execute_shell_command("printf 'hello'"))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["exit_code"] == 0
+    assert payload["stdout"] == "hello"
 
 
 def test_workspace_edit_text_file_replaces_target_text(tmp_path: Path) -> None:

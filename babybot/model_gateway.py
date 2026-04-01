@@ -293,18 +293,25 @@ class OpenAICompatibleGateway(ModelProvider):
 
     @staticmethod
     def _extract_text_field_from_partial_json(raw: str) -> str:
-        marker = '"text"'
+        value = OpenAICompatibleGateway._extract_string_field_from_partial_json(
+            raw, "text"
+        )
+        return value or ""
+
+    @staticmethod
+    def _extract_string_field_from_partial_json(raw: str, field_name: str) -> str | None:
+        marker = f'"{field_name}"'
         start = raw.find(marker)
         if start < 0:
-            return ""
+            return None
         colon = raw.find(":", start + len(marker))
         if colon < 0:
-            return ""
+            return None
         idx = colon + 1
         while idx < len(raw) and raw[idx] in " \t\r\n":
             idx += 1
         if idx >= len(raw) or raw[idx] != '"':
-            return ""
+            return None
         idx += 1
         chars: list[str] = []
         escaped = False
@@ -323,7 +330,67 @@ class OpenAICompatibleGateway(ModelProvider):
         return OpenAICompatibleGateway._decode_partial_json_string("".join(chars))
 
     @staticmethod
+    def _best_effort_unescape(raw: str) -> str:
+        text = raw.replace("\\r\\n", "\n")
+        text = text.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+        text = text.replace('\\"', '"').replace("\\\\", "\\")
+        return text
+
+    def _recover_tool_arguments(
+        self,
+        *,
+        call_name: str,
+        raw_arguments: str,
+    ) -> dict[str, Any] | None:
+        recover_fields: dict[str, tuple[str, ...]] = {
+            "reply_to_user": ("text",),
+            "_workspace_write_text_file": ("file_path", "content"),
+            "_workspace_edit_text_file": ("file_path", "old_text", "new_text"),
+            "_workspace_insert_text_file": ("file_path", "text"),
+            "_workspace_view_text_file": ("file_path",),
+            "_workspace_execute_shell_command": ("command",),
+            "_workspace_execute_python_code": ("code",),
+            "reload_skill": ("skill_path",),
+            "browser_navigate": ("url",),
+        }
+        fields = recover_fields.get(call_name)
+        if not fields:
+            return None
+        recovered: dict[str, Any] = {}
+        for field in fields:
+            value = self._extract_string_field_from_partial_json(raw_arguments, field)
+            if value is not None:
+                recovered[field] = value
+        if call_name == "_workspace_write_text_file":
+            if "file_path" not in recovered or "content" not in recovered:
+                return None
+        if call_name == "_workspace_edit_text_file":
+            if (
+                "file_path" not in recovered
+                or "old_text" not in recovered
+                or "new_text" not in recovered
+            ):
+                return None
+        if call_name == "_workspace_insert_text_file":
+            if "file_path" not in recovered or "text" not in recovered:
+                return None
+        if call_name in {
+            "_workspace_view_text_file",
+            "_workspace_execute_shell_command",
+            "_workspace_execute_python_code",
+            "reload_skill",
+            "browser_navigate",
+            "reply_to_user",
+        }:
+            required = fields[0]
+            if required not in recovered:
+                return None
+        return recovered
+
+    @staticmethod
     def _decode_partial_json_string(raw: str) -> str:
+        if "\n" in raw or "\r" in raw:
+            return OpenAICompatibleGateway._best_effort_unescape(raw)
         for trim in range(0, min(len(raw), 6) + 1):
             candidate = raw if trim == 0 else raw[:-trim]
             if not candidate:
@@ -332,7 +399,7 @@ class OpenAICompatibleGateway(ModelProvider):
                 return json.loads(f'"{candidate}"')
             except json.JSONDecodeError:
                 continue
-        return ""
+        return OpenAICompatibleGateway._best_effort_unescape(raw)
 
     def _parse_tool_calls(
         self,
@@ -346,6 +413,27 @@ class OpenAICompatibleGateway(ModelProvider):
             try:
                 arguments = json.loads(raw_arguments or "{}")
             except json.JSONDecodeError:
+                recovered = self._recover_tool_arguments(
+                    call_name=call_name,
+                    raw_arguments=raw_arguments or "",
+                )
+                if recovered is not None:
+                    logger.warning(
+                        "Recovered malformed tool arguments task=%s step=%s tool=%s keys=%s",
+                        task_id,
+                        step,
+                        call_name,
+                        sorted(recovered.keys()),
+                    )
+                    arguments = recovered
+                    tool_calls.append(
+                        ModelToolCall(
+                            call_id=call_id,
+                            name=call_name,
+                            arguments=arguments,
+                        )
+                    )
+                    continue
                 logger.warning(
                     "Invalid tool arguments JSON task=%s step=%s tool=%s raw=%s",
                     task_id,

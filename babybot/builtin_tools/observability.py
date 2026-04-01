@@ -32,17 +32,35 @@ def build_inspect_tools_tool(owner: Any) -> Any:
         query: str = "",
         group: str = "",
         active_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
     ) -> str:
         """Inspect available tools, grouped by tool group, active state, and schema summary."""
-        return owner._inspect_tools(query=query, group=group, active_only=active_only)
+        return owner._inspect_tools(
+            query=query,
+            group=group,
+            active_only=active_only,
+            limit=limit,
+            offset=offset,
+        )
 
     return inspect_tools
 
 
 def build_inspect_skills_tool(owner: Any) -> Any:
-    async def inspect_skills(query: str = "", active_only: bool = False) -> str:
+    async def inspect_skills(
+        query: str = "",
+        active_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> str:
         """Inspect discovered skills, their source, active state, tool group, and exposed tools."""
-        return owner._inspect_skills(query=query, active_only=active_only)
+        return owner._inspect_skills(
+            query=query,
+            active_only=active_only,
+            limit=limit,
+            offset=offset,
+        )
 
     return inspect_skills
 
