@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -434,6 +435,122 @@ def test_workspace_shell_command_returns_structured_output(tmp_path: Path) -> No
     assert payload["ok"] is True
     assert payload["exit_code"] == 0
     assert payload["stdout"] == "hello"
+
+
+def test_workspace_shell_command_uses_cwd_instead_of_cd_prefix(
+    monkeypatch, tmp_path: Path
+) -> None:
+    owner = SimpleNamespace(
+        _get_active_write_root=lambda: tmp_path,
+        _clean_env=lambda: {},
+        _coerce_timeout=lambda timeout, default=300.0: default,
+    )
+    suite = WorkspaceToolSuite(owner)
+    captured: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 321
+
+        async def communicate(self, input=None):  # type: ignore[no-untyped-def]
+            captured["input"] = input
+            return (b"ok", b"")
+
+    async def _fake_create(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "babybot.resource_workspace_tools.asyncio.create_subprocess_exec",
+        _fake_create,
+    )
+
+    raw = asyncio.run(suite.execute_shell_command("printf 'hello'"))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert captured["args"][:3] == ("/bin/sh", "-lc", "printf 'hello'")
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["input"] is None
+
+
+def test_workspace_python_code_uses_stdin_and_cwd(monkeypatch, tmp_path: Path) -> None:
+    owner = SimpleNamespace(
+        _get_active_write_root=lambda: tmp_path,
+        _get_user_python=lambda: "python3",
+        _clean_env=lambda: {},
+        _coerce_timeout=lambda timeout, default=300.0: default,
+    )
+    suite = WorkspaceToolSuite(owner)
+    captured: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+        pid = 654
+
+        async def communicate(self, input=None):  # type: ignore[no-untyped-def]
+            captured["input"] = input
+            return (b"done", b"")
+
+    async def _fake_create(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "babybot.resource_workspace_tools.asyncio.create_subprocess_exec",
+        _fake_create,
+    )
+
+    raw = asyncio.run(suite.execute_python_code("print('hello')"))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert captured["args"] == ("python3", "-")
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["input"] == b"print('hello')"
+
+
+def test_workspace_shell_timeout_kills_process_group(monkeypatch, tmp_path: Path) -> None:
+    owner = SimpleNamespace(
+        _get_active_write_root=lambda: tmp_path,
+        _clean_env=lambda: {},
+        _coerce_timeout=lambda timeout, default=300.0: 0.01,
+    )
+    suite = WorkspaceToolSuite(owner)
+    killed: list[tuple[int, int]] = []
+
+    class _FakeProc:
+        returncode = None
+        pid = 987
+
+        async def communicate(self, input=None):  # type: ignore[no-untyped-def]
+            del input
+            await asyncio.sleep(1)
+            return (b"", b"")
+
+    async def _fake_create(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "babybot.resource_workspace_tools.asyncio.create_subprocess_exec",
+        _fake_create,
+    )
+    monkeypatch.setattr(
+        "babybot.resource_workspace_tools.os.killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    raw = asyncio.run(suite.execute_shell_command("sleep 10"))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert payload["timed_out"] is True
+    assert killed == [(987, signal.SIGKILL)]
 
 
 def test_workspace_edit_text_file_replaces_target_text(tmp_path: Path) -> None:

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
-import shlex
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,22 @@ class WorkspaceToolSuite:
     def __init__(self, owner: Any) -> None:
         self._owner = owner
 
+    async def _kill_process_tree(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            return
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
     async def execute_python_code(
         self,
         code: str,
@@ -93,14 +110,16 @@ class WorkspaceToolSuite:
         ws = str(self._owner._get_active_write_root())
         proc = await asyncio.create_subprocess_exec(
             self._owner._get_user_python(),
-            "-c",
-            f"import os\nos.chdir({ws!r})\n{code}",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=ws,
             env=self._owner._clean_env(),
+            start_new_session=True,
         )
         timeout_s = self._owner._coerce_timeout(timeout, default=300.0)
-        communicate_coro = proc.communicate()
+        communicate_coro = proc.communicate(input=code.encode("utf-8"))
         try:
             if timeout_s and timeout_s > 0:
                 stdout, stderr = await asyncio.wait_for(
@@ -109,7 +128,7 @@ class WorkspaceToolSuite:
             else:
                 stdout, stderr = await communicate_coro
         except asyncio.TimeoutError:
-            proc.kill()
+            await self._kill_process_tree(proc)
             try:
                 await proc.communicate()
             except Exception:
@@ -170,13 +189,16 @@ class WorkspaceToolSuite:
                     "output": safety_error,
                 }
             )
-        ws = shlex.quote(str(self._owner._get_active_write_root()))
-        guarded = f"cd {ws} && {command}"
-        proc = await asyncio.create_subprocess_shell(
-            guarded,
+        ws = str(self._owner._get_active_write_root())
+        proc = await asyncio.create_subprocess_exec(
+            "/bin/sh",
+            "-lc",
+            command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=ws,
             env=self._owner._clean_env(),
+            start_new_session=True,
         )
         timeout_s = self._owner._coerce_timeout(timeout, default=300.0)
         communicate_coro = proc.communicate()
@@ -188,7 +210,7 @@ class WorkspaceToolSuite:
             else:
                 stdout, stderr = await communicate_coro
         except asyncio.TimeoutError:
-            proc.kill()
+            await self._kill_process_tree(proc)
             try:
                 await proc.communicate()
             except Exception:
