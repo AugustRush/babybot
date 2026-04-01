@@ -230,11 +230,25 @@ class LoopGuard:
                 )
             return True
         if normalized.endswith("execute_python_code"):
-            return False
+            if isinstance(arguments, dict):
+                return cls._is_read_only_python_code(
+                    str(arguments.get("code", "") or "")
+                )
+            return True
         return cls.is_exploration_tool(tool_name)
+
     _READ_ONLY_SHELL_PATTERNS = (
         r"^\s*(ls|pwd|whoami|which|type|cat|head|tail|grep|rg|find|tree|wc|stat|echo)\b",
         r"^\s*git\s+(status|log|show|diff|branch)\b",
+    )
+    _READ_ONLY_PYTHON_PATTERNS = (
+        ".read_text(",
+        ".read_bytes(",
+        "print(",
+        "json.dumps(",
+        "os.listdir(",
+        "glob(",
+        "iterdir(",
     )
     _WRITE_SHELL_HINTS = (
         " >",
@@ -253,3 +267,26 @@ class LoopGuard:
         "chmod ",
         "chown ",
     )
+    _WRITE_PYTHON_HINTS = (
+        ".write_text(",
+        ".write_bytes(",
+        ".mkdir(",
+        ".unlink(",
+        ".rename(",
+        ".replace(",
+        "shutil.move(",
+        "shutil.copy(",
+    )
+
+    @classmethod
+    def _is_read_only_python_code(cls, code: str) -> bool:
+        lowered = str(code or "").strip().lower()
+        if not lowered:
+            return True
+        if ".write_text(" in lowered or ".write_bytes(" in lowered:
+            return False
+        if any(hint in lowered for hint in ("'w'", '"w"', "'a'", '"a"', "'x'", '"x"')):
+            return False
+        if any(hint in lowered for hint in cls._WRITE_PYTHON_HINTS):
+            return False
+        return any(pattern in lowered for pattern in cls._READ_ONLY_PYTHON_PATTERNS)

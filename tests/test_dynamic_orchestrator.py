@@ -209,6 +209,26 @@ def test_system_prompt_adds_multi_resource_guidance_for_skill_creation_with_url(
     assert "不要靠 create_worker 套娃补能力" in system_prompt
 
 
+def test_child_task_description_is_structured_for_execution_only() -> None:
+    gateway = DummyGateway([])
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    context = ExecutionContext(
+        state={"original_goal": "对比官方的skill文档进行查漏补缺 https://example.com/SKILL.md"}
+    )
+
+    description = orch._normalize_child_task_description(  # type: ignore[attr-defined]
+        description="对比官方 skill 文档并查漏补缺",
+        resource_ids=("skill.weather",),
+        context=context,
+    )
+
+    assert "你是执行型子任务" in description
+    assert "预期输出" in description
+    assert "禁止事项" in description
+    assert "不要直接向用户发送消息" in description
+
+
 def test_build_initial_messages_reuses_cached_resource_catalog() -> None:
     gateway = DummyGateway([])
     rm = DummyResourceManager()
@@ -462,7 +482,7 @@ def test_dependent_task_receives_upstream_output() -> None:
         ) -> tuple[str, list[str]]:
             del lease, agent_name, tape, tape_store, heartbeat, media_paths, skill_ids
             self.calls.append({"task_description": task_description})
-            if task_description == "任务A":
+            if "原始子任务：任务A" in task_description:
                 return "RESULT_A", []
             return f"result for: {task_description}", []
 
@@ -523,6 +543,7 @@ def test_dependent_task_receives_upstream_output() -> None:
     assert result.conclusion == "依赖任务完成"
     assert len(rm.calls) == 2
     assert "RESULT_A" in rm.calls[1]["task_description"]
+    assert "原始子任务：任务B" in rm.calls[1]["task_description"]
 
 
 def test_max_steps_fallback() -> None:
@@ -1383,7 +1404,7 @@ def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds()
     assert result.conclusion == "已返回当前阶段结果，并等待定时任务触发"
     assert "scheduled" in gw.dispatch_error_seen.lower()
     dispatched = [call["task_description"] for call in rm.calls]
-    assert "查询杭州天气" in dispatched
+    assert any("原始子任务：查询杭州天气" in item for item in dispatched)
     assert any("两分钟后发送一段画作描述" in item for item in dispatched)
     assert "根据那条两分钟后的描述立即生成图片" not in dispatched
 
@@ -1450,7 +1471,7 @@ def test_scheduler_dispatch_inherits_prior_live_task_results_and_original_goal()
     assert len(rm.calls) == 2
     scheduler_description = rm.calls[1]["task_description"]
     assert "--- 上游任务结果 ---" in scheduler_description
-    assert "result for: 查询杭州天气" in scheduler_description
+    assert "查询杭州天气" in scheduler_description
     assert "原始用户请求" in scheduler_description
     assert "以这个描述画一幅画发送给我" in scheduler_description
 

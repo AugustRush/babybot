@@ -67,6 +67,11 @@ def build_create_worker_tool(owner: Any) -> Any:
         max_depth = max(1, int(getattr(system_conf, "worker_max_depth", 3) or 3))
         depth_var = getattr(owner, "_get_current_worker_depth_var", None)
         current_depth = int(depth_var().get()) if callable(depth_var) else 0
+        if current_depth > 0:
+            return (
+                "Normal child workers cannot create nested workers. "
+                "Return the current task result to the main orchestrator instead."
+            )
         if current_depth >= max_depth:
             return (
                 f"Max worker depth reached ({current_depth}/{max_depth}). "
@@ -111,6 +116,13 @@ def build_dispatch_workers_tool(owner: Any) -> Any:
         normalized = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
         if not normalized:
             return "No valid tasks were provided."
+        depth_var = getattr(owner, "_get_current_worker_depth_var", None)
+        current_depth = int(depth_var().get()) if callable(depth_var) else 0
+        if current_depth > 0:
+            return (
+                "Normal child workers cannot dispatch nested workers. "
+                "Return the current task result to the main orchestrator instead."
+            )
         denial = _policy_denial_message(
             owner,
             task_description="\n".join(normalized),

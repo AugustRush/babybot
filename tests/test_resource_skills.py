@@ -19,6 +19,7 @@ from babybot.context import TapeStore
 from babybot.memory_store import HybridMemoryStore
 from babybot.orchestrator import OrchestratorAgent
 from babybot.resource import CallableTool, LoadedSkill, ResourceManager, ToolGroup
+from babybot.resource_subagent_runtime import ResourceSubagentRuntime
 from babybot.config import Config
 
 
@@ -135,6 +136,41 @@ def test_build_worker_prompt_contains_skill_catalog() -> None:
     assert "可用技能目录" in prompt
     assert "code-review: Review code quality" in prompt
     assert "data-analysis: Analyze datasets" in prompt
+
+
+def test_build_worker_prompt_enforces_execution_only_boundary() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {}
+    prompt = manager._build_worker_sys_prompt(
+        agent_name="Worker",
+        task_description="补齐 skill 文档缺口",
+        tools_text="view_text_file, write_text_file",
+        selected_skill_packs=[],
+    )
+
+    assert "不是任务编排器" in prompt
+    assert "不要直接向用户发送消息" in prompt
+    assert "缺少输入" in prompt
+
+
+def test_subagent_runtime_strips_channel_and_worker_control_capabilities() -> None:
+    owner = SimpleNamespace(groups={"channel_feishu": object(), "worker_control": object()})
+    runtime = ResourceSubagentRuntime(owner)
+
+    hardened = runtime.harden_execution_lease(
+        ToolLease(
+            include_groups=("basic", "code", "channel_feishu", "worker_control"),
+            include_tools=("send_text", "create_worker", "_workspace_view_text_file"),
+            exclude_tools=(),
+        )
+    )
+
+    assert "channel_feishu" not in hardened.include_groups
+    assert "worker_control" not in hardened.include_groups
+    assert "send_text" not in hardened.include_tools
+    assert "create_worker" not in hardened.include_tools
+    assert "send_text" in hardened.exclude_tools
+    assert "create_worker" in hardened.exclude_tools
 
 
 def test_format_skill_catalog_for_lease_filters_inaccessible_skills() -> None:
@@ -1152,7 +1188,9 @@ def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_
     assert isinstance(merged_lease, ToolLease)
     assert merged_lease.include_groups == ("basic", "skill_weather_query")
     assert merged_lease.include_tools == ("regular_tool", "weather_query__fetch_weather")
-    assert merged_lease.exclude_tools == ("create_worker", "dispatch_workers")
+    assert "create_worker" in merged_lease.exclude_tools
+    assert "dispatch_workers" in merged_lease.exclude_tools
+    assert "send_text" in merged_lease.exclude_tools
 
     executor_skill_packs = captured["skill_packs"]
     assert isinstance(executor_skill_packs, list)
@@ -1188,7 +1226,7 @@ def test_create_worker_tool_enforces_max_depth() -> None:
 
     result = asyncio.run(tool("nested task"))
 
-    assert "max worker depth" in result.lower()
+    assert "cannot create nested workers" in result.lower()
     assert owner.called is False
 
 
@@ -1218,7 +1256,7 @@ def test_dispatch_workers_tool_applies_timeout_to_hung_subtasks() -> None:
     assert payload["results"][0]["error"].lower().startswith("timeout")
 
 
-def test_run_subagent_task_includes_current_channel_scope_for_live_delivery(monkeypatch, tmp_path: Path) -> None:
+def test_run_subagent_task_keeps_channel_context_but_strips_channel_delivery_tools(monkeypatch, tmp_path: Path) -> None:
     from babybot.agent_kernel import ToolRegistry
     from babybot.channels.tools import ChannelToolContext
 
@@ -1288,9 +1326,10 @@ def test_run_subagent_task_includes_current_channel_scope_for_live_delivery(monk
     assert media == []
     stripped = captured["lease"]
     assert isinstance(stripped, ToolLease)
-    assert stripped.include_groups == ("basic", "code", "channel_feishu")
+    assert stripped.include_groups == ("basic", "code")
     assert stripped.include_tools == ("inspect_chat_context",)
-    assert stripped.exclude_tools == ()
+    assert "send_audio" in stripped.exclude_tools
+    assert "send_file" in stripped.exclude_tools
     assert captured["channel_context"] is parent_ctx
 
 
@@ -1336,7 +1375,7 @@ def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
     assert captured["skill_ids"] == ["auto-skill-creator"]
 
 
-def test_build_worker_prompt_allows_live_subagents_to_send_final_delivery() -> None:
+def test_build_worker_prompt_returns_results_to_main_agent_instead_of_direct_delivery() -> None:
     manager = object.__new__(ResourceManager)
     manager.skills = {}
     prompt = manager._build_worker_sys_prompt(
@@ -1346,8 +1385,8 @@ def test_build_worker_prompt_allows_live_subagents_to_send_final_delivery() -> N
         selected_skill_packs=[],
     )
 
-    assert "可直接发送最终内容" in prompt
-    assert "避免发送中间状态" in prompt
+    assert "不要直接向用户发送消息" in prompt
+    assert "返回给主 agent" in prompt
 
 
 def test_build_worker_prompt_guides_skill_edits_to_skill_md_and_verification() -> None:
@@ -1365,7 +1404,7 @@ def test_build_worker_prompt_guides_skill_edits_to_skill_md_and_verification() -
     assert "config.yaml" in prompt
     assert "先检查目标技能是否存在" in prompt
     assert "output" in prompt
-    assert "优先使用文件工具" in prompt
+    assert "优先使用明确目标的文件工具" in prompt
     assert "修改完成后必须 reload_skill" in prompt
 
 
