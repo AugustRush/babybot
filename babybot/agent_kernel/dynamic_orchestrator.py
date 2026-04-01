@@ -286,25 +286,28 @@ def _looks_like_repo_or_skill_maintenance(text: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
-def _policy_state_features(goal: str) -> dict[str, Any]:
-    text = str(goal or "").strip()
-    independent_subtasks = 1
-    for token in ("同时", "分别", "并行", "并且"):
-        independent_subtasks += text.count(token)
-    return {
-        "task_shape": "multi_step"
-        if any(token in text for token in ("然后", "再", "并且", "同时", "先"))
-        else "single_step",
-        "input_length": len(text),
-        "independent_subtasks": max(1, independent_subtasks),
-    }
-
-
 def _provider_policy_hints(resource_manager: "ResourceManager", goal: str) -> list[str]:
     provider = getattr(resource_manager, "_observability_provider", None)
     if provider is None:
         return []
-    features = _policy_state_features(goal)
+    text = str(goal or "").strip()
+    build_features = getattr(provider, "_build_policy_state_features", None)
+    features: dict[str, Any] = {
+        "task_shape": "multi_step"
+        if any(token in text for token in ("然后", "再", "并且", "同时", "先"))
+        else "single_step",
+        "input_length": len(text),
+    }
+    if callable(build_features):
+        _raw = build_features(goal)
+        result: dict[str, Any]
+        result = _raw if isinstance(_raw, dict) else {}
+        if result:
+            features.update(result)
+    independent_subtasks = 1
+    for token in ("同时", "分别", "并行", "并且"):
+        independent_subtasks += text.count(token)
+    features["independent_subtasks"] = max(1, independent_subtasks)
     hints: list[str] = []
     for method_name in ("choose_scheduling_policy", "choose_worker_policy"):
         chooser = getattr(provider, method_name, None)
@@ -312,11 +315,15 @@ def _provider_policy_hints(resource_manager: "ResourceManager", goal: str) -> li
             continue
         payload = chooser(features=features)
         if isinstance(payload, dict):
-            action_name = str(payload.get("action_name") or payload.get("name") or "").strip()
+            action_name = str(
+                payload.get("action_name") or payload.get("name") or ""
+            ).strip()
             hint = str(payload.get("hint") or "").strip()
         else:
             action_name = str(
-                getattr(payload, "action_name", "") or getattr(payload, "name", "") or ""
+                getattr(payload, "action_name", "")
+                or getattr(payload, "name", "")
+                or ""
             ).strip()
             hint = str(getattr(payload, "hint", "") or "").strip()
         if not hint:
@@ -463,7 +470,9 @@ class InProcessChildTaskRuntime:
     def pending_reply_blocking_task_ids(self) -> list[str]:
         blocking: list[str] = []
         for task_id in self.pending_task_ids():
-            resource_id = str(self._task_state.get(task_id, {}).get("resource_id", "") or "")
+            resource_id = str(
+                self._task_state.get(task_id, {}).get("resource_id", "") or ""
+            )
             if resource_id == "group.scheduler":
                 continue
             blocking.append(task_id)
@@ -511,7 +520,9 @@ class InProcessChildTaskRuntime:
         resource_ids: tuple[str, ...],
         description: str,
     ) -> tuple[tuple[str, ...], str]:
-        normalized_ids = tuple(sorted({rid.strip() for rid in resource_ids if rid.strip()}))
+        normalized_ids = tuple(
+            sorted({rid.strip() for rid in resource_ids if rid.strip()})
+        )
         return normalized_ids, cls._normalize_dispatch_description(description)
 
     def _duplicate_dispatch_reason(
@@ -530,7 +541,10 @@ class InProcessChildTaskRuntime:
                 state_resource_id = str(state.get("resource_id", "") or "").strip()
                 state_ids = (state_resource_id,) if state_resource_id else ()
             state_description = str(state.get("description", "") or "")
-            if self._dispatch_signature(state_ids, state_description) != target_signature:
+            if (
+                self._dispatch_signature(state_ids, state_description)
+                != target_signature
+            ):
                 continue
             state_status = str(state.get("status", "") or "").strip().lower()
             if (
@@ -544,9 +558,13 @@ class InProcessChildTaskRuntime:
             metadata = dict(result.metadata or {})
             metadata_resource_ids = metadata.get("resource_ids")
             if isinstance(metadata_resource_ids, (list, tuple)):
-                metadata_ids = tuple(str(item).strip() for item in metadata_resource_ids)
+                metadata_ids = tuple(
+                    str(item).strip() for item in metadata_resource_ids
+                )
             else:
-                metadata_resource_id = str(metadata.get("resource_id", "") or "").strip()
+                metadata_resource_id = str(
+                    metadata.get("resource_id", "") or ""
+                ).strip()
                 metadata_ids = (metadata_resource_id,) if metadata_resource_id else ()
             metadata_description = str(metadata.get("description", "") or "")
             if (
@@ -1219,18 +1237,18 @@ class DynamicOrchestrator:
             flow_id=flow_id,
             resource_manager=self._rm,
             bridge=self._executor,
-                child_task_bus=self._child_task_bus,
-                task_heartbeat_registry=self._task_heartbeat_registry,
-                max_parallel=4,
-                max_tasks=self.MAX_TASKS,
-                default_timeout_s=self._default_task_timeout_s,
-                stale_after_s=self._task_stale_after_s,
-                plan_step_id=(
-                    context.state.get("execution_plan").steps[0].step_id
-                    if getattr(context.state.get("execution_plan"), "steps", None)
-                    else ""
-                ),
-            )
+            child_task_bus=self._child_task_bus,
+            task_heartbeat_registry=self._task_heartbeat_registry,
+            max_parallel=4,
+            max_tasks=self.MAX_TASKS,
+            default_timeout_s=self._default_task_timeout_s,
+            stale_after_s=self._task_stale_after_s,
+            plan_step_id=(
+                context.state.get("execution_plan").steps[0].step_id
+                if getattr(context.state.get("execution_plan"), "steps", None)
+                else ""
+            ),
+        )
         runtime_event_callback = context.state.get("runtime_event_callback")
         forwarder_task: asyncio.Task[None] | None = None
         if runtime_event_callback is not None:
@@ -1253,7 +1271,9 @@ class DynamicOrchestrator:
                     return FinalResult(conclusion=response.text)
 
                 reply_call_count = sum(
-                    1 for tool_call in response.tool_calls if tool_call.name == "reply_to_user"
+                    1
+                    for tool_call in response.tool_calls
+                    if tool_call.name == "reply_to_user"
                 )
                 if reply_call_count and len(response.tool_calls) > 1:
                     response = ModelResponse(
@@ -1378,7 +1398,8 @@ class DynamicOrchestrator:
             system_parts.append(f"\n{history}")
         if execution_constraints:
             system_parts.append(
-                "\n执行约束：\n" + format_execution_constraints_for_prompt(execution_constraints)
+                "\n执行约束：\n"
+                + format_execution_constraints_for_prompt(execution_constraints)
             )
         if deduped_policy_hints:
             system_parts.append("\n策略建议：\n- " + "\n- ".join(deduped_policy_hints))
@@ -1429,8 +1450,12 @@ class DynamicOrchestrator:
             "- 不再需要额外派生任务或向用户追问即可交回主 agent。",
         ]
         if maintenance_like:
-            expected_output_lines.insert(1, "- 若存在差异，列出差异项、证据和建议动作。")
-            done_when_lines.insert(1, "- 已确认明确的目标文件；若无法确认，立即停止并返回缺口。")
+            expected_output_lines.insert(
+                1, "- 若存在差异，列出差异项、证据和建议动作。"
+            )
+            done_when_lines.insert(
+                1, "- 已确认明确的目标文件；若无法确认，立即停止并返回缺口。"
+            )
 
         lines = [
             "[执行型子任务]",
@@ -1671,13 +1696,17 @@ class DynamicOrchestrator:
 
         logger.info(
             "Team dispatch: topic=%r agents=%d max_rounds=%d",
-            topic[:80], len(agents), max_rounds,
+            topic[:80],
+            len(agents),
+            max_rounds,
         )
 
         heartbeat = context.state.get("heartbeat")
         send_intermediate = context.state.get("send_intermediate_message")
         stream_callback = context.state.get("stream_callback")
-        reset_stream = getattr(stream_callback, "reset", None) if stream_callback else None
+        reset_stream = (
+            getattr(stream_callback, "reset", None) if stream_callback else None
+        )
         team_streaming = stream_callback is not None and reset_stream is not None
         runtime_event_callback = context.state.get("runtime_event_callback")
         plan_step_id = ""
@@ -1759,7 +1788,9 @@ class DynamicOrchestrator:
         skills = getattr(self._rm, "skills", {})
         for agent in agents:
             agent_copy = dict(agent)
-            skill_id = agent_copy.pop("skill_id", None) or agent_copy.pop("profile_id", None)
+            skill_id = agent_copy.pop("skill_id", None) or agent_copy.pop(
+                "profile_id", None
+            )
             if skill_id:
                 skill = skills.get(skill_id) or skills.get(skill_id.strip().lower())
                 if skill is not None:
@@ -1776,7 +1807,10 @@ class DynamicOrchestrator:
                     agent_copy["executor"] = functools.partial(resource_executor, rid)
             enriched_agents.append(agent_copy)
 
-        if team_policy.max_agents is not None and len(enriched_agents) > team_policy.max_agents:
+        if (
+            team_policy.max_agents is not None
+            and len(enriched_agents) > team_policy.max_agents
+        ):
             enriched_agents = enriched_agents[: team_policy.max_agents]
         if len(enriched_agents) < 2:
             return "error: dispatch_team requires at least 2 agents after applying constraints"
@@ -1784,7 +1818,8 @@ class DynamicOrchestrator:
         for ea in enriched_agents:
             logger.info(
                 "Team agent resolved: id=%s role=%s skill=%s resource=%s",
-                ea.get("id"), ea.get("role", ""),
+                ea.get("id"),
+                ea.get("role", ""),
                 ea.get("skill_id", ea.get("profile_id", "")),
                 ea.get("resource_id", ""),
             )
@@ -1847,7 +1882,9 @@ class DynamicOrchestrator:
 
         logger.info(
             "Team debate finished: topic=%r rounds=%d transcript_len=%d",
-            result.topic[:80], result.rounds, len(result.transcript),
+            result.topic[:80],
+            result.rounds,
+            len(result.transcript),
         )
 
         if team_streaming:

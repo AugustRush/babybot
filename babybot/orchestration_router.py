@@ -284,14 +284,18 @@ def build_routing_snapshot(
     if tape is not None and hasattr(tape, "last_anchor"):
         anchor = tape.last_anchor()
         if anchor is not None:
-            state = anchor.payload.get("state") if isinstance(anchor.payload, dict) else {}
+            state = (
+                anchor.payload.get("state") if isinstance(anchor.payload, dict) else {}
+            )
             anchor_summary = str((state or {}).get("summary", "") or "").strip()
     hot_context: tuple[str, ...] = ()
     warm_context: tuple[str, ...] = ()
     cold_context: tuple[str, ...] = ()
     if chat_key and memory_store is not None:
         try:
-            view = build_context_view(memory_store=memory_store, chat_id=chat_key, query=goal)
+            view = build_context_view(
+                memory_store=memory_store, chat_id=chat_key, query=goal
+            )
         except Exception:
             logger.exception("Failed to build routing context view")
         else:
@@ -302,7 +306,9 @@ def build_routing_snapshot(
     runtime_progress = ""
     if runtime_job is not None:
         runtime_state = str(getattr(runtime_job, "state", "") or "").strip()
-        runtime_progress = str(getattr(runtime_job, "progress_message", "") or "").strip()
+        runtime_progress = str(
+            getattr(runtime_job, "progress_message", "") or ""
+        ).strip()
     return RoutingContextSnapshot(
         chat_key=str(chat_key or "").strip(),
         goal=str(goal or "").strip(),
@@ -324,10 +330,16 @@ def route_mode_to_contract_mode(route_mode: str) -> str:
 
 
 def route_mode_to_step_kind(route_mode: str) -> str:
-    return "debate" if str(route_mode or "").strip().lower() == "debate" else "tool_workflow"
+    return (
+        "debate"
+        if str(route_mode or "").strip().lower() == "debate"
+        else "tool_workflow"
+    )
 
 
-def match_rule_based_routing(snapshot: RoutingContextSnapshot) -> RoutingDecision | None:
+def match_rule_based_routing(
+    snapshot: RoutingContextSnapshot,
+) -> RoutingDecision | None:
     goal = str(snapshot.goal or "").strip()
     if not goal:
         return None
@@ -412,29 +424,15 @@ async def route_task(
         f"上下文快照：{json.dumps(snapshot.to_prompt_payload(), ensure_ascii=False)}"
     )
     try:
-        try:
-            structured = await asyncio.wait_for(
-                complete_structured(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    model_cls=RoutingDecision,
-                    heartbeat=heartbeat,
-                    model_name=str(model_name or "").strip() or None,
-                    timeout=max(0.5, float(timeout or 0.0)),
-                    expected_timeout=True,
-                ),
-                timeout=max(0.5, float(timeout or 0.0) + 0.2),
-            )
-        except TypeError:
-            structured = await asyncio.wait_for(
-                complete_structured(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    model_cls=RoutingDecision,
-                    heartbeat=heartbeat,
-                ),
-                timeout=max(0.5, float(timeout or 0.0) + 0.2),
-            )
+        structured = await complete_structured(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model_cls=RoutingDecision,
+            heartbeat=heartbeat,
+            model_name=str(model_name or "").strip() or None,
+            timeout=max(0.5, float(timeout or 0.0)),
+            expected_timeout=True,
+        )
     except (asyncio.TimeoutError, TimeoutError):
         logger.info(
             "Routing decision timed out after %.2fs; falling back to default contract",

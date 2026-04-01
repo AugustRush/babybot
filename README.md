@@ -368,7 +368,7 @@ uv run gateway
 {
   "channels": {
     "feishu": {
-      "enabled": true,
+      "enabled": false,
       "app_id": "cli_xxx",
       "app_secret": "xxx",
       "encrypt_key": "",
@@ -380,7 +380,7 @@ uv run gateway
       "stream_reply": false
     },
     "weixin": {
-      "enabled": true,
+      "enabled": false,
       "base_url": "https://ilinkai.weixin.qq.com",
       "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
       "token": "",
@@ -432,6 +432,8 @@ uv run gateway
 {
   "system": {
     "timeout": 600,
+    "subtask_timeout": 60,
+    "skill_route_timeout": 3.0,
     "idle_timeout": 60,
     "max_concurrency": 8,
     "scheduled_max_concurrency": 2,
@@ -445,7 +447,16 @@ uv run gateway
     "context_history_tokens": 2000,
     "context_compact_threshold": 3000,
     "context_max_chats": 500,
-    "debug_runtime_feedback": false
+    "interactive_session_max_age_seconds": 7200,
+    "routing_enabled": true,
+    "routing_model_name": "",
+    "routing_timeout": 3.0,
+    "reflection_enabled": true,
+    "reflection_max_hints": 3,
+    "debug_runtime_feedback": false,
+    "policy_learning_enabled": true,
+    "policy_learning_min_samples": 0,
+    "policy_learning_explore_ratio": -1.0
   }
 }
 ```
@@ -453,6 +464,8 @@ uv run gateway
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `timeout` | 600 | 单任务硬超时（秒） |
+| `subtask_timeout` | 60 | 子任务（worker/subagent）硬超时（秒） |
+| `skill_route_timeout` | 3.0 | 技能路由判定超时（秒） |
 | `idle_timeout` | 60 | 空闲超时，无心跳则终止任务 |
 | `max_concurrency` | 8 | 全局最大并行消息数 |
 | `scheduled_max_concurrency` | 2 | 定时任务并行上限（与用户消息并发池隔离） |
@@ -466,7 +479,16 @@ uv run gateway
 | `context_history_tokens` | 2000 | 历史上下文 token 预算 |
 | `context_compact_threshold` | 3000 | 触发锚点压缩的 token 阈值 |
 | `context_max_chats` | 500 | 内存中 LRU 缓存的最大会话数 |
+| `interactive_session_max_age_seconds` | 7200 | 交互式 session（如 Claude 常驻进程）的最大存活时间（秒） |
+| `routing_enabled` | true | 是否启用轻量路由层（仅影响 DAG 编排路径） |
+| `routing_model_name` | `""` | 路由使用的模型名；为空时回退到当前会话同一模型 |
+| `routing_timeout` | 3.0 | 模型 router 超时（秒）；超时后立即回退默认合同 |
+| `reflection_enabled` | true | 是否启用历史反思回注 |
+| `reflection_max_hints` | 3 | 每次最多注入的历史反思条数 |
 | `debug_runtime_feedback` | false | 是否额外发送开发态调试卡片，展示编排 explain 摘要 |
+| `policy_learning_enabled` | true | 是否启用策略自动学习（可用作回滚开关） |
+| `policy_learning_min_samples` | 0 | 动作最小样本阈值；`0` 表示自动模式 |
+| `policy_learning_explore_ratio` | -1.0 | 探索预算；`-1.0` 表示自动模式 |
 
 ### MCP 服务
 
@@ -853,9 +875,15 @@ babybot/
 │   ├── heartbeat.py             # 心跳 / 超时监控
 │   ├── context.py               # Tape 长期记忆 + TapeStore
 │   ├── mcp_runtime.py           # MCP stdio/HTTP 客户端
+│   ├── sqlite_utils.py          # SQLite 通用工具（WAL、upsert 等）
 │   ├── cron.py                  # 定时任务调度
 │   ├── task_evaluator.py        # 任务评估与反思总结
 │   ├── interactive_sessions/    # 交互式 session 管理与 backend
+│   │   ├── manager.py           # InteractiveSessionManager
+│   │   ├── protocols.py         # InteractiveBackend protocol
+│   │   ├── types.py             # session 数据类型
+│   │   └── backends/
+│   │       └── claude.py        # ClaudeInteractiveBackend（常驻子进程）
 │   ├── agent_kernel/            # 轻量执行内核
 │   │   ├── executor.py          # SingleAgentExecutor
 │   │   ├── dynamic_orchestrator.py # DynamicOrchestrator（子任务编排 + team dispatch）
@@ -869,6 +897,7 @@ babybot/
 │   │   │   ├── __init__.py      # ExecutorRegistry
 │   │   │   └── claude_code.py   # ClaudeCodeExecutor
 │   │   ├── dag_ports.py         # ResourceBridgeExecutor
+│   │   ├── context.py           # ExecutionContext 实现
 │   │   ├── model.py             # ModelMessage / ModelRequest / ModelResponse
 │   │   ├── tools.py             # Tool / ToolRegistry / ToolLease
 │   │   ├── skills.py            # SkillPack 合并逻辑

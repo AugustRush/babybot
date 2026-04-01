@@ -289,28 +289,10 @@ class OrchestratorAgent:
         return features
 
     def _policy_selector(self) -> ConservativePolicySelector:
-        store = getattr(self, "_policy_store", None)
-        if store is None or not hasattr(store, "summarize_action_stats"):
-
-            class _NullPolicyStore:
-                @staticmethod
-                def summarize_action_stats(
-                    *,
-                    decision_kind: str | None = None,
-                    state_bucket: str | None = None,
-                ) -> dict[str, dict[str, float | int]]:
-                    del decision_kind, state_bucket
-                    return {}
-
-            store = _NullPolicyStore()
         return ConservativePolicySelector(
-            store,
-            min_samples=getattr(self.config.system, "policy_learning_min_samples", 8),
-            explore_ratio=getattr(
-                self.config.system,
-                "policy_learning_explore_ratio",
-                0.05,
-            ),
+            self._policy_store,
+            min_samples=self.config.system.policy_learning_min_samples,
+            explore_ratio=self.config.system.policy_learning_explore_ratio,
         )
 
     def choose_scheduling_policy(self, *, features: dict[str, Any]) -> dict[str, Any]:
@@ -648,6 +630,68 @@ class OrchestratorAgent:
             decision_source="intent_cache",
         )
 
+    def _record_routing_telemetry(
+        self,
+        *,
+        chat_key: str,
+        flow_id: str,
+        route_mode: str,
+        resolved_router_model: str,
+        routing_latency_ms: float,
+        routing_decision: RoutingDecision | None,
+        router_skip_reason: str,
+        should_use_model_router: bool,
+        intent_bucket: str,
+        reflection_hints_payload: list[dict[str, Any]],
+        scheduling_overridden: bool,
+        worker_overridden: bool,
+        execution_style_guardrail_reduced: bool,
+        relaxed_reflection_route_payload: Any,
+        guardrail_softened_scheduling: bool,
+        guardrail_softened_worker: bool,
+    ) -> None:
+        if not chat_key or not hasattr(self._policy_store, "record_runtime_telemetry"):
+            return
+        self._policy_store.record_runtime_telemetry(
+            flow_id=flow_id,
+            chat_key=chat_key,
+            route_mode=route_mode,
+            router_model=resolved_router_model,
+            router_latency_ms=routing_latency_ms,
+            router_fallback=routing_decision is None,
+            router_source=(
+                routing_decision.decision_source
+                if routing_decision is not None
+                else (
+                    f"skipped:{router_skip_reason}"
+                    if self._routing_enabled() and not should_use_model_router
+                    else "fallback"
+                )
+            ),
+            execution_style=(
+                str(routing_decision.execution_style or "")
+                if routing_decision is not None
+                else ""
+            ),
+            intent_bucket=intent_bucket,
+            reflection_hint_count=len(reflection_hints_payload),
+            reflection_override_count=int(scheduling_overridden)
+            + int(worker_overridden),
+            execution_style_reflection_count=int(
+                routing_decision is not None
+                and routing_decision.decision_source == "reflection"
+            ),
+            parallelism_reflection_count=int(scheduling_overridden),
+            worker_reflection_count=int(worker_overridden),
+            execution_style_guardrail_reduce_count=int(
+                execution_style_guardrail_reduced
+                and relaxed_reflection_route_payload is not None
+                and routing_decision is None
+            ),
+            parallelism_guardrail_soften_count=int(guardrail_softened_scheduling),
+            worker_guardrail_soften_count=int(guardrail_softened_worker),
+        )
+
     async def _evaluate_task_run_async(
         self,
         *,
@@ -660,10 +704,9 @@ class OrchestratorAgent:
     ) -> None:
         if not self._reflection_enabled():
             return
-        store = getattr(self, "_policy_store", None)
-        if store is None or not hasattr(store, "record_reflection"):
+        if not hasattr(self._policy_store, "record_reflection"):
             return
-        TaskEvaluator(store).evaluate(
+        TaskEvaluator(self._policy_store).evaluate(
             TaskEvaluationInput(
                 chat_key=chat_key,
                 route_mode=route_mode,
@@ -863,9 +906,7 @@ class OrchestratorAgent:
             ),
         )
         runtime_job = (
-            self._runtime_job_store.latest_for_chat(chat_key)
-            if chat_key and getattr(self, "_runtime_job_store", None) is not None
-            else None
+            self._runtime_job_store.latest_for_chat(chat_key) if chat_key else None
         )
         routing_snapshot = build_routing_snapshot(
             chat_key=chat_key,
@@ -873,23 +914,17 @@ class OrchestratorAgent:
             tape=tape,
             memory_store=self.memory_store if tape else None,
             runtime_job=runtime_job,
-            recent_flow_ids=list(
-                getattr(self, "_recent_flows_by_chat", {}).get(chat_key, [])
-            ),
+            recent_flow_ids=list(self._recent_flows_by_chat.get(chat_key, [])),
             execution_constraints=execution_constraints,
         )
         routing_decision = None
         configured_router_model = str(
-            getattr(self.config.system, "routing_model_name", "") or ""
+            self.config.system.routing_model_name or ""
         ).strip()
-        fallback_router_model = str(
-            getattr(getattr(self.config, "model", None), "model_name", "") or ""
-        ).strip()
+        fallback_router_model = str(self.config.model.model_name or "").strip()
         resolved_router_model = configured_router_model or fallback_router_model
-        routing_timeout = float(
-            getattr(self.config.system, "routing_timeout", 2.0) or 2.0
-        )
-        runtime_telemetry_store = getattr(self, "_policy_store", None)
+        routing_timeout = float(self.config.system.routing_timeout or 2.0)
+        runtime_telemetry_store = self._policy_store
         intent_bucket = build_routing_intent_bucket(
             user_input,
             has_media=bool(media_paths),
@@ -900,9 +935,7 @@ class OrchestratorAgent:
             "parallelism": {"injection_level": "normal", "soften_default": False},
             "worker": {"injection_level": "normal", "soften_default": False},
         }
-        if runtime_telemetry_store is not None and hasattr(
-            runtime_telemetry_store, "recommend_reflection_guardrails"
-        ):
+        if hasattr(runtime_telemetry_store, "recommend_reflection_guardrails"):
             reflection_guardrails = (
                 runtime_telemetry_store.recommend_reflection_guardrails(
                     chat_key=chat_key or None
@@ -911,7 +944,6 @@ class OrchestratorAgent:
         if (
             self._reflection_enabled()
             and chat_key
-            and runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "recommend_route_from_reflections")
         ):
             execution_style_guardrail_reduced = (
@@ -947,7 +979,6 @@ class OrchestratorAgent:
         if (
             routing_decision is None
             and chat_key
-            and runtime_telemetry_store is not None
             and hasattr(runtime_telemetry_store, "recommend_route_from_intent_bucket")
             and intent_bucket.startswith("other|")
         ):
@@ -967,10 +998,8 @@ class OrchestratorAgent:
                 routing_snapshot,
                 intent_bucket=intent_bucket,
             )
-        if (
-            should_use_model_router
-            and runtime_telemetry_store is not None
-            and hasattr(runtime_telemetry_store, "recommend_router_timeout")
+        if should_use_model_router and hasattr(
+            runtime_telemetry_store, "recommend_router_timeout"
         ):
             recommendation = runtime_telemetry_store.recommend_router_timeout(
                 base_timeout=routing_timeout,
@@ -1017,15 +1046,13 @@ class OrchestratorAgent:
             else ("debate" if task_contract.mode == "debate" else "tool_workflow")
         )
         reflection_hints_payload: list[dict[str, Any]] = []
-        if (
-            self._reflection_enabled()
-            and getattr(self, "_policy_store", None) is not None
-            and hasattr(self._policy_store, "list_reflection_hints")
+        if self._reflection_enabled() and hasattr(
+            self._policy_store, "list_reflection_hints"
         ):
             reflection_hints_payload = self._policy_store.list_reflection_hints(
                 route_mode=route_mode,
                 state_features=scheduling_features,
-                limit=int(getattr(self.config.system, "reflection_max_hints", 3) or 3),
+                limit=int(self.config.system.reflection_max_hints or 3),
             )
         scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
         worker_policy = self.choose_worker_policy(features=scheduling_features)
@@ -1041,9 +1068,9 @@ class OrchestratorAgent:
                 softened_action="bounded_parallel",
                 hint="guardrail 放宽默认调度：bounded_parallel",
             )
-            guardrail_softened_scheduling = (
-                softened_scheduling_policy is not scheduling_policy
-            )
+            guardrail_softened_scheduling = softened_scheduling_policy.get(
+                "action_name"
+            ) != scheduling_policy.get("action_name")
             scheduling_policy = softened_scheduling_policy
             softened_worker_policy = self._maybe_soften_policy_from_guardrail(
                 worker_policy,
@@ -1054,7 +1081,9 @@ class OrchestratorAgent:
                 softened_action="allow_worker",
                 hint="guardrail 放宽默认 worker：allow_worker",
             )
-            guardrail_softened_worker = softened_worker_policy is not worker_policy
+            guardrail_softened_worker = softened_worker_policy.get(
+                "action_name"
+            ) != worker_policy.get("action_name")
             worker_policy = softened_worker_policy
         scheduling_base_action = str(scheduling_policy.get("action_name", "") or "")
         worker_base_action = str(worker_policy.get("action_name", "") or "")
@@ -1099,50 +1128,24 @@ class OrchestratorAgent:
         worker_overridden = (
             str(worker_policy.get("action_name", "") or "") != worker_base_action
         )
-        if (
-            chat_key
-            and runtime_telemetry_store is not None
-            and hasattr(runtime_telemetry_store, "record_runtime_telemetry")
-        ):
-            runtime_telemetry_store.record_runtime_telemetry(
-                flow_id=flow_id,
-                chat_key=chat_key,
-                route_mode=route_mode,
-                router_model=resolved_router_model,
-                router_latency_ms=routing_latency_ms,
-                router_fallback=routing_decision is None,
-                router_source=(
-                    routing_decision.decision_source
-                    if routing_decision is not None
-                    else (
-                        f"skipped:{router_skip_reason}"
-                        if self._routing_enabled() and not should_use_model_router
-                        else "fallback"
-                    )
-                ),
-                execution_style=(
-                    str(routing_decision.execution_style or "")
-                    if routing_decision is not None
-                    else ""
-                ),
-                intent_bucket=intent_bucket,
-                reflection_hint_count=len(reflection_hints_payload),
-                reflection_override_count=int(scheduling_overridden)
-                + int(worker_overridden),
-                execution_style_reflection_count=int(
-                    routing_decision is not None
-                    and routing_decision.decision_source == "reflection"
-                ),
-                parallelism_reflection_count=int(scheduling_overridden),
-                worker_reflection_count=int(worker_overridden),
-                execution_style_guardrail_reduce_count=int(
-                    execution_style_guardrail_reduced
-                    and relaxed_reflection_route_payload is not None
-                    and routing_decision is None
-                ),
-                parallelism_guardrail_soften_count=int(guardrail_softened_scheduling),
-                worker_guardrail_soften_count=int(guardrail_softened_worker),
-            )
+        self._record_routing_telemetry(
+            chat_key=chat_key,
+            flow_id=flow_id,
+            route_mode=route_mode,
+            resolved_router_model=resolved_router_model,
+            routing_latency_ms=routing_latency_ms,
+            routing_decision=routing_decision,
+            router_skip_reason=router_skip_reason,
+            should_use_model_router=should_use_model_router,
+            intent_bucket=intent_bucket,
+            reflection_hints_payload=reflection_hints_payload,
+            scheduling_overridden=scheduling_overridden,
+            worker_overridden=worker_overridden,
+            execution_style_guardrail_reduced=execution_style_guardrail_reduced,
+            relaxed_reflection_route_payload=relaxed_reflection_route_payload,
+            guardrail_softened_scheduling=guardrail_softened_scheduling,
+            guardrail_softened_worker=guardrail_softened_worker,
+        )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
         policy_hints.extend(self._routing_policy_hints(routing_decision))
@@ -1582,8 +1585,8 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
         job_metadata_override: dict[str, Any] | None = None,
     ) -> Any | None:
-        runtime_job_store = getattr(self, "_runtime_job_store", None)
-        if not chat_key or runtime_job_store is None:
+        runtime_job_store = self._runtime_job_store
+        if not chat_key:
             return None
         runtime_metadata = dict(job_metadata_override or {})
         runtime_metadata.setdefault("media_paths", list(media_paths or []))
@@ -1599,6 +1602,18 @@ class OrchestratorAgent:
         )
         return runtime_job
 
+    @staticmethod
+    async def _invoke_callback(
+        callback: Callable[[Any], Awaitable[None] | None] | None,
+        payload: Any,
+    ) -> None:
+        """Invoke an optional callback that may return a coroutine or None."""
+        if callback is None:
+            return
+        maybe = callback(payload)
+        if inspect.isawaitable(maybe):
+            await maybe
+
     def _build_runtime_event_recorder(
         self,
         *,
@@ -1607,7 +1622,7 @@ class OrchestratorAgent:
         runtime_job: Any | None,
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None,
     ) -> Callable[[Any], Awaitable[None] | None] | None:
-        runtime_job_store = getattr(self, "_runtime_job_store", None)
+        runtime_job_store = self._runtime_job_store
         if runtime_job is None and (tape is None or not chat_key):
             return runtime_event_callback
 
@@ -1650,10 +1665,7 @@ class OrchestratorAgent:
                 self.tape_store.save_entry(chat_key, entry)
                 if hasattr(self, "memory_store"):
                     self.memory_store.observe_runtime_event(chat_key, payload)
-            if runtime_event_callback is not None:
-                maybe = runtime_event_callback(payload)
-                if inspect.isawaitable(maybe):
-                    await maybe
+            await self._invoke_callback(runtime_event_callback, payload)
 
         return _record_runtime_event
 
@@ -1716,7 +1728,6 @@ class OrchestratorAgent:
             user_input=user_input,
             media_paths=media_paths,
         )
-        runtime_job_store = getattr(self, "_runtime_job_store", None)
         runtime_job = self._create_runtime_job(
             chat_key=chat_key,
             user_input=user_input,
@@ -1732,8 +1743,8 @@ class OrchestratorAgent:
 
         try:
             logger.info("Starting _answer_with_dag")
-            if runtime_job_store is not None and runtime_job is not None:
-                runtime_job_store.transition(
+            if runtime_job is not None:
+                self._runtime_job_store.transition(
                     runtime_job.job_id,
                     "running",
                     progress_message="编排执行中",
@@ -1751,8 +1762,8 @@ class OrchestratorAgent:
                 heartbeat.beat()
 
             self._record_assistant_reply(chat_key=chat_key, tape=tape, text=text)
-            if runtime_job_store is not None and runtime_job is not None:
-                runtime_job_store.transition(
+            if runtime_job is not None:
+                self._runtime_job_store.transition(
                     runtime_job.job_id,
                     "completed",
                     progress_message="执行完成",
@@ -1761,8 +1772,8 @@ class OrchestratorAgent:
 
             return TaskResponse(text=text, media_paths=collected_media)
         except Exception as exc:
-            if runtime_job_store is not None and runtime_job is not None:
-                runtime_job_store.transition(
+            if runtime_job is not None:
+                self._runtime_job_store.transition(
                     runtime_job.job_id,
                     "failed",
                     progress_message="执行失败",
@@ -1953,30 +1964,21 @@ class OrchestratorAgent:
         chat_key: str,
         target: str,
     ) -> tuple[Any, str]:
-        store = getattr(self, "_runtime_job_store", None)
-        if store is None:
-            return None, "当前未启用作业存储。"
         normalized_target = str(target or "latest").strip() or "latest"
         job = (
-            store.latest_for_chat(chat_key)
+            self._runtime_job_store.latest_for_chat(chat_key)
             if normalized_target == "latest"
-            else store.get(normalized_target)
+            else self._runtime_job_store.get(normalized_target)
         )
         if job is None:
             return None, "未找到对应作业。"
         return job, ""
 
     def _runtime_maintenance_report(self) -> str:
-        store = getattr(self, "_runtime_job_store", None)
-        if store is None:
-            return "当前未启用作业存储。"
-        report = store.run_maintenance(retention_seconds=0)
-        interactive_manager = getattr(self, "_interactive_sessions", None)
-        stale_sessions = (
-            int(interactive_manager.cleanup()) if interactive_manager is not None else 0
-        )
-        recent_flows = getattr(self, "_recent_flows_by_chat", {}) or {}
-        known_flow_ids = store.known_flow_ids()
+        report = self._runtime_job_store.run_maintenance(retention_seconds=0)
+        stale_sessions = int(self._interactive_sessions.cleanup())
+        recent_flows = self._recent_flows_by_chat
+        known_flow_ids = self._runtime_job_store.known_flow_ids()
         unmatched_recent_flows = sorted(
             {
                 str(flow_id).strip()
@@ -2007,20 +2009,16 @@ class OrchestratorAgent:
         target: str,
     ) -> tuple[str, str]:
         normalized_target = str(target or "").strip()
-        store = getattr(self, "_runtime_job_store", None)
-        recent_latest = getattr(self, "_recent_flow_ids_by_chat", {}) or {}
-        recent_history = getattr(self, "_recent_flows_by_chat", {}) or {}
+        store = self._runtime_job_store
+        recent_latest = self._recent_flow_ids_by_chat
+        recent_history = self._recent_flows_by_chat
         history = [
             str(item).strip()
             for item in recent_history.get(chat_key, []) or []
             if str(item).strip()
         ]
-        if (
-            normalized_target
-            and normalized_target not in {"latest"}
-            and store is not None
-        ):
-            target_job = store.get(normalized_target)
+        if normalized_target and normalized_target not in {"latest"}:
+            target_job = self._runtime_job_store.get(normalized_target)
             if target_job is not None:
                 flow_id = str(target_job.metadata.get("flow_id", "") or "").strip()
                 if flow_id:
@@ -2105,14 +2103,12 @@ class OrchestratorAgent:
                 return TaskResponse(text="该作业已完成，无需恢复。")
             if job.state == "running":
                 return TaskResponse(text="该作业仍在运行，请先使用 @job status 查询。")
-            store = getattr(self, "_runtime_job_store", None)
-            if store is not None:
-                store.transition(
-                    job.job_id,
-                    "repairing",
-                    progress_message="准备恢复执行",
-                    metadata={"resume_requested": True},
-                )
+            self._runtime_job_store.transition(
+                job.job_id,
+                "repairing",
+                progress_message="准备恢复执行",
+                metadata={"resume_requested": True},
+            )
             resume_metadata = dict(job.metadata)
             resume_metadata["resumed_from"] = job.job_id
             return await self.process_task(
@@ -2196,21 +2192,19 @@ class OrchestratorAgent:
             media_paths=tuple(media_paths or ()),
             contract_mode=task_contract.mode,
         )
-        if runtime_event_callback is not None:
-            maybe = runtime_event_callback(
-                {
-                    "event": "running",
-                    "task_id": "interactive_session",
-                    "flow_id": f"interactive:{chat_key}",
-                    "payload": {
-                        "stage": "interactive_session",
-                        "state": "running",
-                        "message": "交互会话处理中",
-                    },
-                }
-            )
-            if inspect.isawaitable(maybe):
-                await maybe
+        await self._invoke_callback(
+            runtime_event_callback,
+            {
+                "event": "running",
+                "task_id": "interactive_session",
+                "flow_id": f"interactive:{chat_key}",
+                "payload": {
+                    "stage": "interactive_session",
+                    "state": "running",
+                    "message": "交互会话处理中",
+                },
+            },
+        )
         try:
             if heartbeat is not None:
                 async with heartbeat.keep_alive():
@@ -2236,84 +2230,57 @@ class OrchestratorAgent:
             return None
         if reply.expired:
             return None
-        tape = (
-            self.tape_store.get_or_create(chat_key)
-            if chat_key and self.tape_store
-            else None
+        tape = self._prepare_tape(
+            chat_key=chat_key,
+            user_input=user_input,
+            media_paths=media_paths,
         )
         if tape is not None:
-            pending_entries = []
-            if tape.last_anchor() is None:
-                pending_entries.append(
-                    tape.append("anchor", {"name": "session/start", "state": {}})
-                )
-            content_for_tape = user_input
-            if media_paths:
-                content_for_tape = f"{user_input}\n[附带 {len(media_paths)} 张图片]"
-            pending_entries.append(
-                tape.append("message", {"role": "user", "content": content_for_tape})
+            assistant_entry = tape.append(
+                "message", {"role": "assistant", "content": reply.text}
             )
-            pending_entries.append(
-                tape.append("message", {"role": "assistant", "content": reply.text})
-            )
-            self.tape_store.save_entries(chat_key, pending_entries)
-            if hasattr(self, "memory_store") and self.memory_store is not None:
-                self.memory_store.observe_user_message(chat_key, user_input)
-        if runtime_event_callback is not None:
-            maybe = runtime_event_callback(
-                {
-                    "event": "completed",
-                    "task_id": "interactive_session",
-                    "flow_id": f"interactive:{chat_key}",
-                    "payload": {
-                        "stage": "interactive_session",
-                        "state": "completed",
-                        "message": "交互会话完成",
-                    },
-                }
-            )
-            if inspect.isawaitable(maybe):
-                await maybe
+            self.tape_store.save_entries(chat_key, [assistant_entry])
+        await self._invoke_callback(
+            runtime_event_callback,
+            {
+                "event": "completed",
+                "task_id": "interactive_session",
+                "flow_id": f"interactive:{chat_key}",
+                "payload": {
+                    "stage": "interactive_session",
+                    "state": "completed",
+                    "message": "交互会话完成",
+                },
+            },
+        )
         return TaskResponse(
             text=reply.text,
             media_paths=list(reply.media_paths or []),
         )
 
     def reset(self) -> None:
-        manager = getattr(self, "_interactive_sessions", None)
-        if manager is not None:
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(manager.stop_all(reason="reset"))
-            else:
-                self._spawn_background_task(
-                    manager.stop_all(reason="reset"),
-                    label="interactive-reset",
-                )
-        if self.resource_manager is not None:
-            self.resource_manager.reset()
-        if self.tape_store is not None:
-            self.tape_store.clear()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._interactive_sessions.stop_all(reason="reset"))
+        else:
+            self._spawn_background_task(
+                self._interactive_sessions.stop_all(reason="reset"),
+                label="interactive-reset",
+            )
+        self.resource_manager.reset()
+        self.tape_store.clear()
         self._initialized = False
 
     def get_status(self) -> dict[str, Any]:
-        resource_manager = getattr(self, "resource_manager", None)
-        interactive_manager = getattr(self, "_interactive_sessions", None)
-        policy_store = getattr(self, "_policy_store", None)
         status = {
             "resource_manager": "initialized",
-            "available_tools": len(resource_manager.get_available_tools())
-            if resource_manager is not None
-            else 0,
-            "resources": resource_manager.search_resources()
-            if resource_manager is not None
-            else [],
+            "available_tools": len(self.resource_manager.get_available_tools()),
+            "resources": self.resource_manager.search_resources(),
         }
-        if interactive_manager is not None:
-            status["interactive_sessions"] = interactive_manager.summary()
+        status["interactive_sessions"] = self._interactive_sessions.summary()
         telemetry_summary_fn = getattr(
-            policy_store, "summarize_runtime_telemetry", None
+            self._policy_store, "summarize_runtime_telemetry", None
         )
         if callable(telemetry_summary_fn):
             try:
