@@ -11,27 +11,41 @@ logger = logging.getLogger(__name__)
 
 
 class ResourceSubagentRuntime:
+    _FORBIDDEN_CHILD_GROUPS = frozenset({"worker_control"})
+    _FORBIDDEN_CHILD_TOOLS = frozenset(
+        {
+            "create_worker",
+            "dispatch_workers",
+            "send_text",
+            "send_image",
+            "send_file",
+            "send_audio",
+            "send_card",
+            "add_reaction",
+        }
+    )
+
     def __init__(self, owner: Any) -> None:
         self._owner = owner
 
-    def extend_lease_with_current_channel(
-        self,
-        lease: ToolLease,
-        channel_context: Any = None,
-    ) -> ToolLease:
-        channel_name = str(getattr(channel_context, "channel_name", "") or "").strip()
-        if not channel_name:
-            return lease
-        group_name = f"channel_{channel_name}"
-        if group_name not in self._owner.groups:
-            return lease
-        include_groups = list(lease.include_groups)
-        if group_name not in include_groups:
-            include_groups.append(group_name)
+    @classmethod
+    def harden_execution_lease(cls, lease: ToolLease) -> ToolLease:
+        include_groups = [
+            group
+            for group in lease.include_groups
+            if group not in cls._FORBIDDEN_CHILD_GROUPS
+            and not str(group).startswith("channel_")
+        ]
+        include_tools = [
+            tool
+            for tool in lease.include_tools
+            if tool not in cls._FORBIDDEN_CHILD_TOOLS
+        ]
+        exclude_tools = sorted(set(lease.exclude_tools) | cls._FORBIDDEN_CHILD_TOOLS)
         return ToolLease(
             include_groups=tuple(include_groups),
-            include_tools=lease.include_tools,
-            exclude_tools=lease.exclude_tools,
+            include_tools=tuple(include_tools),
+            exclude_tools=tuple(exclude_tools),
         )
 
     @staticmethod
@@ -129,10 +143,7 @@ class ResourceSubagentRuntime:
                     skill_ids=skill_ids,
                 )
                 merged_lease = self.merge_skill_leases(merged_lease, skill_packs)
-                merged_lease = self.extend_lease_with_current_channel(
-                    merged_lease,
-                    channel_context=channel_context,
-                )
+                merged_lease = self.harden_execution_lease(merged_lease)
                 scope_token = self._owner._get_current_task_lease_var().set(
                     merged_lease
                 )

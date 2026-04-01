@@ -19,6 +19,7 @@ from babybot.context import TapeStore
 from babybot.memory_store import HybridMemoryStore
 from babybot.orchestrator import OrchestratorAgent
 from babybot.resource import CallableTool, LoadedSkill, ResourceManager, ToolGroup
+from babybot.resource_subagent_runtime import ResourceSubagentRuntime
 from babybot.config import Config
 
 
@@ -137,6 +138,41 @@ def test_build_worker_prompt_contains_skill_catalog() -> None:
     assert "data-analysis: Analyze datasets" in prompt
 
 
+def test_build_worker_prompt_enforces_execution_only_boundary() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {}
+    prompt = manager._build_worker_sys_prompt(
+        agent_name="Worker",
+        task_description="补齐 skill 文档缺口",
+        tools_text="view_text_file, write_text_file",
+        selected_skill_packs=[],
+    )
+
+    assert "不是任务编排器" in prompt
+    assert "不要直接向用户发送消息" in prompt
+    assert "缺少输入" in prompt
+
+
+def test_subagent_runtime_strips_channel_and_worker_control_capabilities() -> None:
+    owner = SimpleNamespace(groups={"channel_feishu": object(), "worker_control": object()})
+    runtime = ResourceSubagentRuntime(owner)
+
+    hardened = runtime.harden_execution_lease(
+        ToolLease(
+            include_groups=("basic", "code", "channel_feishu", "worker_control"),
+            include_tools=("send_text", "create_worker", "_workspace_view_text_file"),
+            exclude_tools=(),
+        )
+    )
+
+    assert "channel_feishu" not in hardened.include_groups
+    assert "worker_control" not in hardened.include_groups
+    assert "send_text" not in hardened.include_tools
+    assert "create_worker" not in hardened.include_tools
+    assert "send_text" in hardened.exclude_tools
+    assert "create_worker" in hardened.exclude_tools
+
+
 def test_format_skill_catalog_for_lease_filters_inaccessible_skills() -> None:
     manager = object.__new__(ResourceManager)
     manager.skills = {
@@ -221,6 +257,22 @@ def test_register_skill_tools_for_auto_skill_creator_exposes_only_agent_facing_t
         "auto_skill_creator__init_skill",
         "auto_skill_creator__validate_skill",
     )
+
+
+def test_agent_admin_skill_exists_and_guides_builtin_admin_workflows() -> None:
+    skill_md = Path("skills/agent-admin/SKILL.md").resolve()
+
+    assert skill_md.exists()
+
+    meta, body = ResourceManager._parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+
+    assert meta["name"] == "agent-admin"
+    assert set(meta["include_groups"]) >= {"admin", "basic"}
+    assert "## Example Requests" in body
+    assert "list_admin_skills" in body
+    assert "set_assistant_profile" in body
+    assert "delete_skill" in body
+    assert "reload_skill" in body
 
 
 def test_discovered_generated_skill_uses_example_requests_for_keywords(tmp_path: Path) -> None:
@@ -1136,7 +1188,9 @@ def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_
     assert isinstance(merged_lease, ToolLease)
     assert merged_lease.include_groups == ("basic", "skill_weather_query")
     assert merged_lease.include_tools == ("regular_tool", "weather_query__fetch_weather")
-    assert merged_lease.exclude_tools == ("create_worker", "dispatch_workers")
+    assert "create_worker" in merged_lease.exclude_tools
+    assert "dispatch_workers" in merged_lease.exclude_tools
+    assert "send_text" in merged_lease.exclude_tools
 
     executor_skill_packs = captured["skill_packs"]
     assert isinstance(executor_skill_packs, list)
@@ -1172,7 +1226,7 @@ def test_create_worker_tool_enforces_max_depth() -> None:
 
     result = asyncio.run(tool("nested task"))
 
-    assert "max worker depth" in result.lower()
+    assert "cannot create nested workers" in result.lower()
     assert owner.called is False
 
 
@@ -1202,7 +1256,7 @@ def test_dispatch_workers_tool_applies_timeout_to_hung_subtasks() -> None:
     assert payload["results"][0]["error"].lower().startswith("timeout")
 
 
-def test_run_subagent_task_includes_current_channel_scope_for_live_delivery(monkeypatch, tmp_path: Path) -> None:
+def test_run_subagent_task_keeps_channel_context_but_strips_channel_delivery_tools(monkeypatch, tmp_path: Path) -> None:
     from babybot.agent_kernel import ToolRegistry
     from babybot.channels.tools import ChannelToolContext
 
@@ -1272,9 +1326,10 @@ def test_run_subagent_task_includes_current_channel_scope_for_live_delivery(monk
     assert media == []
     stripped = captured["lease"]
     assert isinstance(stripped, ToolLease)
-    assert stripped.include_groups == ("basic", "code", "channel_feishu")
+    assert stripped.include_groups == ("basic", "code")
     assert stripped.include_tools == ("inspect_chat_context",)
-    assert stripped.exclude_tools == ()
+    assert "send_audio" in stripped.exclude_tools
+    assert "send_file" in stripped.exclude_tools
     assert captured["channel_context"] is parent_ctx
 
 
@@ -1320,7 +1375,7 @@ def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
     assert captured["skill_ids"] == ["auto-skill-creator"]
 
 
-def test_build_worker_prompt_allows_live_subagents_to_send_final_delivery() -> None:
+def test_build_worker_prompt_returns_results_to_main_agent_instead_of_direct_delivery() -> None:
     manager = object.__new__(ResourceManager)
     manager.skills = {}
     prompt = manager._build_worker_sys_prompt(
@@ -1330,8 +1385,8 @@ def test_build_worker_prompt_allows_live_subagents_to_send_final_delivery() -> N
         selected_skill_packs=[],
     )
 
-    assert "可直接发送最终内容" in prompt
-    assert "避免发送中间状态" in prompt
+    assert "不要直接向用户发送消息" in prompt
+    assert "返回给主 agent" in prompt
 
 
 def test_build_worker_prompt_guides_skill_edits_to_skill_md_and_verification() -> None:
@@ -1349,7 +1404,7 @@ def test_build_worker_prompt_guides_skill_edits_to_skill_md_and_verification() -
     assert "config.yaml" in prompt
     assert "先检查目标技能是否存在" in prompt
     assert "output" in prompt
-    assert "优先使用文件工具" in prompt
+    assert "优先使用明确目标的文件工具" in prompt
     assert "修改完成后必须 reload_skill" in prompt
 
 
@@ -2223,6 +2278,147 @@ def test_inspect_skills_and_load_errors_tools_proxy_to_manager() -> None:
     assert "broken" in errors_text
     assert "/tmp/broken.py" in errors_text
     assert tools_text == "ok-tools"
+
+
+def test_enable_and_disable_skill_update_active_state() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "demo": LoadedSkill(
+            name="demo",
+            description="Demo skill",
+            directory="/tmp/demo",
+            active=True,
+            source="auto",
+            tool_group="skill_demo",
+            tools=("demo__run",),
+        )
+    }
+
+    disabled = manager.disable_skill("demo")
+    enabled = manager.enable_skill("demo")
+
+    assert "disabled" in disabled.lower()
+    assert "enabled" in enabled.lower()
+    assert manager.skills["demo"].active is True
+
+
+def test_list_admin_skills_includes_active_state_and_tools() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "demo": LoadedSkill(
+            name="demo",
+            description="Demo skill",
+            directory="/tmp/demo",
+            active=False,
+            source="auto",
+            tool_group="skill_demo",
+            tools=("demo__run",),
+        )
+    }
+
+    text = manager.list_admin_skills(query="dem")
+
+    assert "skill=demo" in text
+    assert "active=False" in text
+    assert "demo__run" in text
+
+
+def test_reload_skill_preserves_existing_active_state(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "workspace_dir": str(tmp_path),
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = ResourceManager(Config(str(config_path)))
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+
+    manager.reload_skill(str(skill_dir))
+    manager.disable_skill("demo")
+    result = manager.reload_skill(str(skill_dir))
+
+    assert "reloaded successfully" in result
+    assert manager.skills["demo"].active is False
+
+
+def test_delete_skill_removes_workspace_skill_files_and_registry_entries(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    workspace_dir = tmp_path / "workspace"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "workspace_dir": str(workspace_dir),
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = ResourceManager(Config(str(config_path)))
+    skill_dir = workspace_dir / "skills" / "demo"
+    scripts = skill_dir / "scripts"
+    scripts.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+    (scripts / "helper.py").write_text(
+        'def greet() -> str:\n    """Say hello."""\n    return "hi"\n',
+        encoding="utf-8",
+    )
+
+    manager.reload_skill(str(skill_dir))
+
+    result = manager.delete_skill("skill.demo")
+
+    assert "deleted" in result.lower()
+    assert "demo" not in manager.skills
+    assert skill_dir.exists() is False
+    assert "skill_demo" not in manager.groups
+    assert manager.registry.get("demo__greet") is None
+
+
+def test_delete_skill_rejects_builtin_skill_directories(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    workspace_dir = tmp_path / "workspace"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "workspace_dir": str(workspace_dir),
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = ResourceManager(Config(str(config_path)))
+    builtin_dir = tmp_path / "builtin-skills"
+    builtin_dir.mkdir()
+    manager.config.builtin_skills_dir = builtin_dir
+    skill_dir = builtin_dir / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Builtin demo skill\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+
+    manager.reload_skill(str(skill_dir))
+
+    result = manager.delete_skill("demo")
+
+    assert "workspace" in result.lower()
+    assert skill_dir.exists() is True
+    assert "demo" in manager.skills
 
 
 

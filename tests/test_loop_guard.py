@@ -188,6 +188,61 @@ def test_exploration_streak_does_not_block_shell_write_commands() -> None:
         assert not verdict.blocked
 
 
+def test_exploration_streak_counts_read_only_python_code() -> None:
+    guard = LoopGuard(
+        LoopGuardConfig(
+            max_identical_calls=20,
+            per_tool_call_budget=20,
+            ping_pong_window=20,
+            max_exploration_streak=3,
+        )
+    )
+
+    verdict = LoopVerdict()
+    verdict = guard.check_call(
+        "_workspace_execute_shell_command",
+        {"command": "rg -n skill workspace"},
+    )
+    assert not verdict.blocked
+
+    verdict = guard.check_call(
+        "_workspace_execute_python_code",
+        {"code": "from pathlib import Path\nprint(Path('demo.md').read_text())"},
+    )
+    assert not verdict.blocked
+
+    verdict = guard.check_call(
+        "_workspace_execute_python_code",
+        {"code": "import os\nprint(os.listdir('.'))"},
+    )
+
+    assert verdict.blocked
+    assert "exploration" in verdict.reason.lower()
+
+
+def test_exploration_streak_does_not_block_python_write_code() -> None:
+    guard = LoopGuard(
+        LoopGuardConfig(
+            max_identical_calls=20,
+            per_tool_call_budget=20,
+            ping_pong_window=20,
+            max_exploration_streak=3,
+        )
+    )
+
+    for idx in range(3):
+        verdict = guard.check_call(
+            "_workspace_execute_python_code",
+            {
+                "code": (
+                    "from pathlib import Path\n"
+                    f"Path('/tmp/demo_{idx}.txt').write_text('x', encoding='utf-8')"
+                )
+            },
+        )
+        assert not verdict.blocked
+
+
 # ---------------------------------------------------------------------------
 # Compress messages tests
 # ---------------------------------------------------------------------------

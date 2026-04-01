@@ -33,6 +33,24 @@ def test_hybrid_memory_store_loads_assistant_profile_markdown(tmp_path) -> None:
     assert "技术助手" in profile_text
 
 
+def test_hybrid_memory_store_saves_assistant_profile_and_invalidates_cache(tmp_path) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+
+    store.ensure_bootstrap()
+    original = store.load_assistant_profile()
+    assert original
+
+    store.save_assistant_profile("# Assistant Profile\n\n## Identity\n- 你是测试助手。\n")
+
+    updated = store.load_assistant_profile()
+    assert "测试助手" in updated
+    assert updated != original
+    assert store.assistant_profile_path.read_text(encoding="utf-8").endswith("\n")
+
+
 def test_hybrid_memory_store_enables_wal_and_busy_timeout(tmp_path) -> None:
     store = HybridMemoryStore(
         db_path=tmp_path / "context.db",

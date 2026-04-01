@@ -265,6 +265,27 @@ def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(resource_ids))
 
 
+def _looks_like_repo_or_skill_maintenance(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    markers = (
+        "查漏补缺",
+        "补齐",
+        "对比",
+        "比较",
+        "同步",
+        "skill.md",
+        "skill 文档",
+        "github",
+        "仓库",
+        "repo",
+        "文档",
+        "技能",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def _policy_state_features(goal: str) -> dict[str, Any]:
     text = str(goal or "").strip()
     independent_subtasks = 1
@@ -1380,6 +1401,56 @@ class DynamicOrchestrator:
             self._resource_catalog_cache_value = _build_resource_catalog(briefs)
         return self._resource_catalog_cache_value
 
+    def _normalize_child_task_description(
+        self,
+        *,
+        description: str,
+        resource_ids: tuple[str, ...],
+        context: ExecutionContext,
+    ) -> str:
+        raw_description = str(description or "").strip()
+        if not raw_description:
+            return raw_description
+        if "[执行型子任务]" in raw_description:
+            return raw_description
+
+        original_goal = str(context.state.get("original_goal", "") or "").strip()
+        resource_summary = ", ".join(resource_ids) if resource_ids else "-"
+        maintenance_like = _looks_like_repo_or_skill_maintenance(
+            f"{raw_description}\n{original_goal}"
+        )
+
+        expected_output_lines = [
+            "- 返回当前子任务的执行结果摘要。",
+            "- 如无法继续，明确说明缺少的输入、目标路径或阻塞原因。",
+        ]
+        done_when_lines = [
+            "- 已完成当前子任务说明中的单一目标，或已明确指出无法继续的原因。",
+            "- 不再需要额外派生任务或向用户追问即可交回主 agent。",
+        ]
+        if maintenance_like:
+            expected_output_lines.insert(1, "- 若存在差异，列出差异项、证据和建议动作。")
+            done_when_lines.insert(1, "- 已确认明确的目标文件；若无法确认，立即停止并返回缺口。")
+
+        lines = [
+            "[执行型子任务]",
+            "你是执行型子任务，不是任务编排器，也不是最终回复器。",
+            f"原始子任务：{raw_description}",
+            "[输入]",
+            f"- parent_goal: {original_goal or '-'}",
+            f"- resource_ids: {resource_summary}",
+            "[预期输出]",
+            *expected_output_lines,
+            "[完成条件]",
+            *done_when_lines,
+            "[禁止事项]",
+            "- 不要创建或派生新的 worker。",
+            "- 不要进入 team、讨论、评审或新的编排流程。",
+            "- 不要直接向用户发送消息。",
+            "- 不要在无明确目标时持续进行大范围扫描或无边界探索。",
+        ]
+        return "\n".join(lines)
+
     @staticmethod
     def _prune_stale_wait_history(messages: list[ModelMessage]) -> list[ModelMessage]:
         wait_call_ids: list[str] = []
@@ -1498,6 +1569,12 @@ class DynamicOrchestrator:
         if name == "dispatch_task":
             dispatch_args = dict(args)
             resource_ids = _dispatch_resource_ids(dispatch_args)
+            if "group.scheduler" not in resource_ids:
+                dispatch_args["description"] = self._normalize_child_task_description(
+                    description=str(dispatch_args.get("description", "") or ""),
+                    resource_ids=resource_ids,
+                    context=context,
+                )
             deps = list(dispatch_args.get("deps", []) or [])
             active_in_flight = len(runtime.in_flight)
             scheduling_action = (
