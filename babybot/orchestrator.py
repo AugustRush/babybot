@@ -875,6 +875,10 @@ class OrchestratorAgent:
             "task_heartbeat_registry": getattr(self, "_task_heartbeat_registry", None),
             "task_stale_after_s": float(self.config.system.idle_timeout),
             "max_steps": getattr(self.config.system, "orchestrator_max_steps", 30),
+            "default_task_timeout_s": float(
+                getattr(self.config.system, "subtask_timeout", 0) or 0
+            )
+            or None,
         }
         for key, value in optional_kwargs.items():
             if key not in parameters or value is None:

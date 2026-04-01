@@ -214,7 +214,9 @@ def test_child_task_description_is_structured_for_execution_only() -> None:
     rm = DummyResourceManager()
     orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
     context = ExecutionContext(
-        state={"original_goal": "对比官方的skill文档进行查漏补缺 https://example.com/SKILL.md"}
+        state={
+            "original_goal": "对比官方的skill文档进行查漏补缺 https://example.com/SKILL.md"
+        }
     )
 
     description = orch._normalize_child_task_description(  # type: ignore[attr-defined]
@@ -240,9 +242,10 @@ def test_build_initial_messages_reuses_cached_resource_catalog() -> None:
     assert rm.brief_calls == 2
     assert "skill.weather" in first[0].content
     assert "- skill.weather" in second[0].content
-    assert first[0].content.split("- skill.weather", 1)[1] == second[0].content.split(
-        "- skill.weather", 1
-    )[1]
+    assert (
+        first[0].content.split("- skill.weather", 1)[1]
+        == second[0].content.split("- skill.weather", 1)[1]
+    )
 
 
 def test_single_task() -> None:
@@ -935,8 +938,9 @@ def test_runtime_blocks_repeated_dispatch_after_dead_letter() -> None:
     first_task_id, second_result = asyncio.run(_run())
 
     assert first_task_id.startswith("task_0_")
-    assert second_result.startswith(
-        "error: similar task already dead-lettered in this flow"
+    assert (
+        second_result.startswith("error: task task_0_")
+        and "permanently failed (dead-lettered)" in second_result
     )
 
 
@@ -990,7 +994,9 @@ def test_orchestrator_reply_blocked_by_live_work_still_cleans_up_on_fallback() -
     )
     orch._bridge = _Bridge()  # type: ignore[assignment]
 
-    result = asyncio.run(orch.run("先回复我", ExecutionContext(session_id="cancel-cleanup")))
+    result = asyncio.run(
+        orch.run("先回复我", ExecutionContext(session_id="cancel-cleanup"))
+    )
 
     assert "编排步数已达上限" in result.conclusion
     assert started.is_set() is True
@@ -1065,7 +1071,9 @@ def test_orchestrator_rejects_reply_when_live_tasks_are_still_running() -> None:
     )
     orch._bridge = _Bridge()  # type: ignore[assignment]
 
-    result = asyncio.run(orch.run("先别抢答", ExecutionContext(session_id="reply-guard")))
+    result = asyncio.run(
+        orch.run("先别抢答", ExecutionContext(session_id="reply-guard"))
+    )
 
     assert result.conclusion == "任务都完成了"
 
@@ -1737,7 +1745,9 @@ def test_team_dispatch_emits_runtime_feedback_events() -> None:
     )
 
     assert result.conclusion == "Debate finished."
-    assert any((event.get("payload") or {}).get("stage") == "debate" for event in seen_events)
+    assert any(
+        (event.get("payload") or {}).get("stage") == "debate" for event in seen_events
+    )
 
 
 def test_team_dispatch_enforces_user_round_cap_from_context() -> None:
@@ -2033,6 +2043,7 @@ def test_team_dispatch_with_skill_id() -> None:
     result = asyncio.run(orch.run("Debate TDD", ExecutionContext()))
     assert result.conclusion == "Debate concluded."
 
+
 # ---- heartbeat + streaming during dispatch_team tests ----
 
 
@@ -2042,7 +2053,11 @@ def test_team_dispatch_beats_heartbeat_and_streams() -> None:
         "topic": "Tabs vs Spaces",
         "agents": [
             {"id": "tabs", "role": "tabs-advocate", "description": "Tabs are better"},
-            {"id": "spaces", "role": "spaces-advocate", "description": "Spaces are better"},
+            {
+                "id": "spaces",
+                "role": "spaces-advocate",
+                "description": "Spaces are better",
+            },
         ],
         "max_rounds": 1,
     }

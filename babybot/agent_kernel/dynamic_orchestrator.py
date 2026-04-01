@@ -478,6 +478,31 @@ class InProcessChildTaskRuntime:
             blocking.append(task_id)
         return blocking
 
+    def all_tasks_dead_lettered_with_no_success(self) -> tuple[bool, list[str]]:
+        """Return (True, dead_letter_ids) if every dispatched task dead-lettered and
+        none succeeded, so the model cannot fabricate a reply from real results."""
+        if not self._results:
+            return False, []
+        succeeded = [tid for tid, r in self._results.items() if r.status == "succeeded"]
+        if succeeded:
+            return False, []
+        dead = [
+            tid
+            for tid, r in self._results.items()
+            if r.status == "failed" and r.metadata.get("dead_lettered") is True
+        ]
+        if not dead:
+            return False, []
+        # Only trigger if *all* non-scheduler tasks failed (dead_lettered)
+        non_scheduler_results = [
+            tid
+            for tid, r in self._results.items()
+            if str(r.metadata.get("resource_id", "") or "") != "group.scheduler"
+        ]
+        if non_scheduler_results and all(tid in dead for tid in non_scheduler_results):
+            return True, dead
+        return False, []
+
     def _update_task_state(self, task_id: str, **payload: Any) -> None:
         current = self._task_state.setdefault(task_id, {})
         current.update(payload)
@@ -573,9 +598,12 @@ class InProcessChildTaskRuntime:
             ):
                 continue
             if result.status == "failed" and metadata.get("dead_lettered") is True:
+                last_error = str(result.error or "").strip()
+                reason = f" ({last_error})" if last_error else ""
                 return (
-                    "error: similar task already dead-lettered in this flow; "
-                    "revise description/resource_ids or summarize the failure"
+                    f"error: task {task_id} permanently failed (dead-lettered){reason}; "
+                    "do NOT retry with a similar description — "
+                    "summarize partial results or inform the user of the failure"
                 )
         return None
 
@@ -1264,7 +1292,8 @@ class DynamicOrchestrator:
                     heartbeat.beat()
 
                 messages = self._prune_stale_wait_history(messages)
-                response = await self._call_model(messages, context)
+                logger.debug("DynamicOrchestrator: step=%d calling model", step)
+                response = await self._call_model(messages, context, step=step)
 
                 # Model responded with plain text (no tool calls)
                 if not response.tool_calls:
@@ -1531,6 +1560,8 @@ class DynamicOrchestrator:
         self,
         messages: list[ModelMessage],
         context: ExecutionContext,
+        *,
+        step: int = 0,
     ) -> ModelResponse:
         heartbeat = context.state.get("heartbeat")
         stream_callback = context.state.get("stream_callback")
@@ -1547,10 +1578,19 @@ class DynamicOrchestrator:
             if v is not None
         }
         ctx = ExecutionContext(state=state)
+        logger.info("DynamicOrchestrator: step=%d LLM call start", step)
         if heartbeat is not None:
             async with heartbeat.keep_alive():
-                return await self._gateway.generate(request, ctx)
-        return await self._gateway.generate(request, ctx)
+                response = await self._gateway.generate(request, ctx)
+        else:
+            response = await self._gateway.generate(request, ctx)
+        logger.info(
+            "DynamicOrchestrator: step=%d LLM call done finish_reason=%s tool_calls=%d",
+            step,
+            response.finish_reason,
+            len(response.tool_calls),
+        )
+        return response
 
     @staticmethod
     def _tool_schemas_for_context(
@@ -1664,6 +1704,21 @@ class DynamicOrchestrator:
                 return (
                     "error: reply_to_user called before child tasks finished; "
                     f"pending tasks: {', '.join(pending)}"
+                )
+            all_dead, dead_ids = runtime.all_tasks_dead_lettered_with_no_success()
+            if all_dead:
+                # Log a warning — the model may be about to fabricate results.
+                # We still allow reply_to_user so the model can honestly report failure,
+                # but we inject a reminder in the tool result to reinforce honesty.
+                errors = "; ".join(
+                    str(runtime.results[tid].error or "unknown error")[:120]
+                    for tid in dead_ids
+                )
+                logger.warning(
+                    "reply_to_user after all tasks dead-lettered (%s); "
+                    "model must report failure honestly. errors: %s",
+                    ", ".join(dead_ids),
+                    errors,
                 )
             return args.get("text", "")
         if name == "dispatch_team":
