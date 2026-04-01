@@ -104,6 +104,21 @@ class _DummyOwner:
     def reload_skill(self, skill_path: str) -> str:
         return f"reloaded {skill_path}"
 
+    def get_assistant_profile(self) -> str:
+        return "profile text"
+
+    def set_assistant_profile(self, content: str, mode: str = "replace") -> str:
+        return f"profile:{mode}:{content}"
+
+    def list_admin_skills(self, query: str = "", active_only: bool = False) -> str:
+        return f"admin-skills:{query}:{active_only}"
+
+    def enable_skill(self, skill_name: str) -> str:
+        return f"enabled {skill_name}"
+
+    def disable_skill(self, skill_name: str) -> str:
+        return f"disabled {skill_name}"
+
 
 def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> None:
     items = list(iter_builtin_tool_registrations(_DummyOwner()))
@@ -129,6 +144,11 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("code", "_workspace_write_text_file"),
         ("code", "_workspace_edit_text_file"),
         ("code", "_workspace_insert_text_file"),
+        ("admin", "get_assistant_profile"),
+        ("admin", "set_assistant_profile"),
+        ("admin", "list_admin_skills"),
+        ("admin", "enable_skill"),
+        ("admin", "disable_skill"),
         ("basic", "reload_skill"),
     ]
 

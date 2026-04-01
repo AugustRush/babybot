@@ -741,6 +741,22 @@ class ResourceManager:
     def _upsert_skill(self, skill: LoadedSkill) -> None:
         self.skills[skill.name.strip().lower()] = skill
 
+    def _resolve_skill_record(self, skill_name: str) -> LoadedSkill | None:
+        normalized = (skill_name or "").strip().lower()
+        if not normalized:
+            return None
+        direct = self.skills.get(normalized)
+        if direct is not None:
+            return direct
+        for skill in self.skills.values():
+            if normalized in {
+                skill.name.strip().lower(),
+                self._skill_resource_id(skill).strip().lower(),
+                Path(skill.directory).name.strip().lower(),
+            }:
+                return skill
+        return None
+
     def _resolve_skill_directory_input(self, skill_path: str) -> Path:
         raw = (skill_path or "").strip()
         if not raw:
@@ -807,6 +823,7 @@ class ResourceManager:
 
         # Remove previous version if present.
         old = self.skills.get(key)
+        old_active = old.active if old is not None else True
         if old and old.tool_group:
             removed = self.registry.unregister_group(old.tool_group)
             self.groups.pop(old.tool_group, None)
@@ -840,7 +857,7 @@ class ResourceManager:
                 keywords=keywords,
                 phrases=phrases,
                 source="hot-reload",
-                active=True,
+                active=old_active,
                 lease=ToolLease(
                     include_groups=tuple(
                         dict.fromkeys(
@@ -868,6 +885,71 @@ class ResourceManager:
         if tool_names:
             parts.append(f"Registered tools: {', '.join(tool_names)}")
         return " ".join(parts)
+
+    def get_assistant_profile(self) -> str:
+        memory_store = getattr(self, "memory_store", None)
+        if memory_store is None:
+            return "暂无 assistant profile：memory_store 未初始化。"
+        load_profile = getattr(memory_store, "load_assistant_profile", None)
+        if not callable(load_profile):
+            return "暂无 assistant profile：memory_store 不支持读取。"
+        text = str(load_profile() or "").strip()
+        return text or "assistant profile 为空。"
+
+    def set_assistant_profile(self, content: str, mode: str = "replace") -> str:
+        memory_store = getattr(self, "memory_store", None)
+        if memory_store is None:
+            return "无法修改 assistant profile：memory_store 未初始化。"
+        save_profile = getattr(memory_store, "save_assistant_profile", None)
+        if not callable(save_profile):
+            return "无法修改 assistant profile：memory_store 不支持写入。"
+        normalized_mode = str(mode or "replace").strip().lower()
+        if normalized_mode not in {"replace", "append"}:
+            return "Unsupported mode. Use replace or append."
+        incoming = str(content or "").strip()
+        if normalized_mode == "append":
+            current = self.get_assistant_profile()
+            base = (
+                ""
+                if current.startswith("暂无 assistant profile")
+                or current == "assistant profile 为空。"
+                else current
+            )
+            incoming = f"{base}\n\n{incoming}".strip() if base else incoming
+        save_profile(incoming)
+        return "Assistant profile updated successfully."
+
+    def list_admin_skills(
+        self,
+        query: str = "",
+        active_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> str:
+        return self._inspect_skills(
+            query=query,
+            active_only=active_only,
+            limit=limit,
+            offset=offset,
+        )
+
+    def enable_skill(self, skill_name: str) -> str:
+        skill = self._resolve_skill_record(skill_name)
+        if skill is None:
+            return f"Skill not found: {skill_name}"
+        if skill.active:
+            return f"Skill '{skill.name}' is already enabled."
+        skill.active = True
+        return f"Skill '{skill.name}' enabled."
+
+    def disable_skill(self, skill_name: str) -> str:
+        skill = self._resolve_skill_record(skill_name)
+        if skill is None:
+            return f"Skill not found: {skill_name}"
+        if not skill.active:
+            return f"Skill '{skill.name}' is already disabled."
+        skill.active = False
+        return f"Skill '{skill.name}' disabled."
 
     def _register_skill_tools(
         self,
@@ -1014,6 +1096,12 @@ class ResourceManager:
                 "Code execution and file operations",
                 active=True,
                 notes="Use these tools for coding and filesystem tasks.",
+            ),
+            "admin": ToolGroup(
+                "admin",
+                "Admin tools for assistant profile and skill state management",
+                active=False,
+                notes="Enable only when explicitly editing BabyBot profile or skill state.",
             ),
             "search": ToolGroup("search", "Search tools", active=False),
             "analysis": ToolGroup("analysis", "Analysis tools", active=False),

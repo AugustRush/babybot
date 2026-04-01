@@ -223,6 +223,21 @@ def test_register_skill_tools_for_auto_skill_creator_exposes_only_agent_facing_t
     )
 
 
+def test_agent_admin_skill_exists_and_guides_builtin_admin_workflows() -> None:
+    skill_md = Path("skills/agent-admin/SKILL.md").resolve()
+
+    assert skill_md.exists()
+
+    meta, body = ResourceManager._parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+
+    assert meta["name"] == "agent-admin"
+    assert set(meta["include_groups"]) >= {"admin", "basic"}
+    assert "## Example Requests" in body
+    assert "list_admin_skills" in body
+    assert "set_assistant_profile" in body
+    assert "reload_skill" in body
+
+
 def test_discovered_generated_skill_uses_example_requests_for_keywords(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "workspace"
     workspace_skills_dir = workspace_dir / "skills"
@@ -2223,6 +2238,77 @@ def test_inspect_skills_and_load_errors_tools_proxy_to_manager() -> None:
     assert "broken" in errors_text
     assert "/tmp/broken.py" in errors_text
     assert tools_text == "ok-tools"
+
+
+def test_enable_and_disable_skill_update_active_state() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "demo": LoadedSkill(
+            name="demo",
+            description="Demo skill",
+            directory="/tmp/demo",
+            active=True,
+            source="auto",
+            tool_group="skill_demo",
+            tools=("demo__run",),
+        )
+    }
+
+    disabled = manager.disable_skill("demo")
+    enabled = manager.enable_skill("demo")
+
+    assert "disabled" in disabled.lower()
+    assert "enabled" in enabled.lower()
+    assert manager.skills["demo"].active is True
+
+
+def test_list_admin_skills_includes_active_state_and_tools() -> None:
+    manager = object.__new__(ResourceManager)
+    manager.skills = {
+        "demo": LoadedSkill(
+            name="demo",
+            description="Demo skill",
+            directory="/tmp/demo",
+            active=False,
+            source="auto",
+            tool_group="skill_demo",
+            tools=("demo__run",),
+        )
+    }
+
+    text = manager.list_admin_skills(query="dem")
+
+    assert "skill=demo" in text
+    assert "active=False" in text
+    assert "demo__run" in text
+
+
+def test_reload_skill_preserves_existing_active_state(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"api_key": "test"},
+                "workspace_dir": str(tmp_path),
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = ResourceManager(Config(str(config_path)))
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+
+    manager.reload_skill(str(skill_dir))
+    manager.disable_skill("demo")
+    result = manager.reload_skill(str(skill_dir))
+
+    assert "reloaded successfully" in result
+    assert manager.skills["demo"].active is False
 
 
 

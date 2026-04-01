@@ -114,6 +114,15 @@ class HybridMemoryStore:
         self._assistant_profile_cache = (mtime_ns, text)
         return text
 
+    def save_assistant_profile(self, content: str) -> str:
+        self.ensure_bootstrap()
+        normalized = str(content or "").strip()
+        path = self.assistant_profile_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(normalized + "\n", encoding="utf-8")
+        self._assistant_profile_cache = None
+        return normalized
+
     def _ensure_db(self) -> sqlite3.Connection:
         if self._db is None:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
