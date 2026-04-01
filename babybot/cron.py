@@ -114,9 +114,7 @@ class ScheduledTaskDef:
             elif "once_at" in schedule:
                 run_at = str(schedule["once_at"])
             else:
-                raise ValueError(
-                    "Schedule object must include 'interval' or 'run_at'"
-                )
+                raise ValueError("Schedule object must include 'interval' or 'run_at'")
 
         target = d.get("target", {})
         task = cls(
@@ -268,22 +266,24 @@ class CronScheduler:
         result = []
         for name, task in self._tasks.items():
             nf = self._next_fire.get(name)
-            result.append({
-                "name": name,
-                "prompt": task.prompt,
-                "enabled": task.enabled,
-                "channel": task.channel,
-                "chat_id": task.chat_id,
-                "schedule_type": (
-                    "run_at"
-                    if task.run_at is not None
-                    else "interval"
-                    if task.interval is not None
-                    else "cron"
-                ),
-                "running": name in self._running_tasks,
-                "next_fire_in": round(nf - now, 1) if nf is not None else None,
-            })
+            result.append(
+                {
+                    "name": name,
+                    "prompt": task.prompt,
+                    "enabled": task.enabled,
+                    "channel": task.channel,
+                    "chat_id": task.chat_id,
+                    "schedule_type": (
+                        "run_at"
+                        if task.run_at is not None
+                        else "interval"
+                        if task.interval is not None
+                        else "cron"
+                    ),
+                    "running": name in self._running_tasks,
+                    "next_fire_in": round(nf - now, 1) if nf is not None else None,
+                }
+            )
         return result
 
     # ── Internal ──────────────────────────────────────────────────────
@@ -375,39 +375,33 @@ class CronScheduler:
         from .channels.base import InboundMessage
 
         logger.info("Dispatching scheduled task via MessageBus: %s", task.name)
+        # Build the message once; reused in both the normal and fallback paths.
+        message = InboundMessage(
+            channel=task.channel,
+            sender_id=f"scheduled:{task.name}",
+            chat_id=task.chat_id,
+            content=task.prompt,
+            metadata={
+                "scheduled_task": True,
+                "scheduled_task_name": task.name,
+            },
+        )
         try:
-            message = InboundMessage(
-                channel=task.channel,
-                sender_id=f"scheduled:{task.name}",
-                chat_id=task.chat_id,
-                content=task.prompt,
-                metadata={
-                    "scheduled_task": True,
-                    "scheduled_task_name": task.name,
-                },
-            )
             response = await self._message_bus.enqueue_and_wait(message)
             if task.run_at is not None:
-                # Check if response indicates an error before marking complete
-                response_text = getattr(response, "text", "") or ""
-                if response_text.startswith("处理任务时出错"):
-                    raise RuntimeError(f"One-shot task returned error: {response_text}")
-                self._one_shot_attempts.pop(task.name, None)
-                self._mark_one_shot_completed(task.name)
+                # Use the structured is_error flag; fall back to text inspection for
+                # older TaskResponse objects that may not have the attribute.
+                response_is_error = getattr(response, "is_error", False)
+                if not response_is_error:
+                    self._one_shot_attempts.pop(task.name, None)
+                    self._mark_one_shot_completed(task.name)
+                else:
+                    raise RuntimeError(
+                        f"One-shot task returned error: {getattr(response, 'text', '')}"
+                    )
         except AttributeError:
             # Backward compatibility for tests/mocks without enqueue_and_wait.
-            await self._message_bus.enqueue(
-                InboundMessage(
-                    channel=task.channel,
-                    sender_id=f"scheduled:{task.name}",
-                    chat_id=task.chat_id,
-                    content=task.prompt,
-                    metadata={
-                        "scheduled_task": True,
-                        "scheduled_task_name": task.name,
-                    },
-                )
-            )
+            await self._message_bus.enqueue(message)
             if task.run_at is not None:
                 self._one_shot_attempts.pop(task.name, None)
                 self._mark_one_shot_completed(task.name)
@@ -422,7 +416,8 @@ class CronScheduler:
                 if attempts >= 3:
                     logger.warning(
                         "One-shot task '%s' exceeded max retries (%d), disabling.",
-                        task.name, attempts,
+                        task.name,
+                        attempts,
                     )
                     self._one_shot_attempts.pop(task.name, None)
                     task.enabled = False
@@ -454,7 +449,11 @@ class ScheduledTaskManager:
         if cron is not None:
             return f"cron:{cron.strip()}"
         if interval_seconds is not None:
-            value = int(interval_seconds) if float(interval_seconds).is_integer() else interval_seconds
+            value = (
+                int(interval_seconds)
+                if float(interval_seconds).is_integer()
+                else interval_seconds
+            )
             return f"interval:{value}"
         raise ValueError("Scheduled task must define cron, interval_seconds or run_at")
 
@@ -477,7 +476,9 @@ class ScheduledTaskManager:
     ) -> str:
         """Generate a stable task name from task intent and routing."""
         if delay_seconds is not None:
-            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(
+                seconds=delay_seconds
+            )
             run_at = target.isoformat(timespec="seconds")
         if run_at is not None:
             schedule = f"run_at:{ScheduledTaskDef._parse_run_at(run_at).isoformat(timespec='minutes')}"
@@ -570,7 +571,9 @@ class ScheduledTaskManager:
         if delay_seconds is not None:
             if run_at is not None:
                 raise ValueError("Cannot specify both delay_seconds and run_at")
-            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(
+                seconds=delay_seconds
+            )
             run_at = target.isoformat(timespec="seconds")
         defs = self._load_defs()
         resolved_name = (name or "").strip() or self.suggest_task_name(
@@ -643,7 +646,9 @@ class ScheduledTaskManager:
         if delay_seconds is not None:
             if run_at is not None:
                 raise ValueError("Cannot specify both delay_seconds and run_at")
-            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(
+                seconds=delay_seconds
+            )
             run_at = target.isoformat(timespec="seconds")
         defs = self._load_defs()
         for index, task in enumerate(defs):
@@ -719,7 +724,9 @@ class ScheduledTaskManager:
         if delay_seconds is not None:
             if run_at is not None:
                 raise ValueError("Cannot specify both delay_seconds and run_at")
-            target = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay_seconds)
+            target = datetime.datetime.now().astimezone() + datetime.timedelta(
+                seconds=delay_seconds
+            )
             run_at = target.isoformat(timespec="seconds")
         if name and any(task.name == name for task in self._load_defs()):
             payload = self.update_task(

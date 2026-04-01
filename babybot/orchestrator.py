@@ -80,6 +80,7 @@ class TaskResponse:
 
     text: str = ""
     media_paths: list[str] = field(default_factory=list)
+    is_error: bool = False
 
 
 class OrchestratorAgent:
@@ -119,7 +120,9 @@ class OrchestratorAgent:
         self._initialized = False
         self._recent_flow_ids_by_chat: OrderedDict[str, str] = OrderedDict()
         self._recent_flows_by_chat: OrderedDict[str, list[str]] = OrderedDict()
-        self._recent_policy_decisions_by_flow: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+        self._recent_policy_decisions_by_flow: OrderedDict[
+            str, list[dict[str, Any]]
+        ] = OrderedDict()
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def _build_interactive_session_manager(self) -> InteractiveSessionManager:
@@ -133,27 +136,21 @@ class OrchestratorAgent:
         )
 
     def _remember_flow_id(self, chat_key: str, flow_id: str) -> None:
-        recent = getattr(self, "_recent_flow_ids_by_chat", None)
-        if not isinstance(recent, OrderedDict):
-            recent = OrderedDict(recent or {})
-            self._recent_flow_ids_by_chat = recent
         self._recent_flow_ids_by_chat.pop(chat_key, None)
         self._recent_flow_ids_by_chat[chat_key] = flow_id
         while len(self._recent_flow_ids_by_chat) > self._FLOW_CACHE_LIMIT:
             self._recent_flow_ids_by_chat.popitem(last=False)
-        recent_flows = getattr(self, "_recent_flows_by_chat", None)
-        if not isinstance(recent_flows, OrderedDict):
-            recent_flows = OrderedDict(recent_flows or {})
-            self._recent_flows_by_chat = recent_flows
-        history = [item for item in recent_flows.get(chat_key, []) if item != flow_id]
+        history = [
+            item
+            for item in self._recent_flows_by_chat.get(chat_key, [])
+            if item != flow_id
+        ]
         history.insert(0, flow_id)
-        recent_flows[chat_key] = history[:5]
-        while len(recent_flows) > self._FLOW_CACHE_LIMIT:
-            recent_flows.popitem(last=False)
+        self._recent_flows_by_chat[chat_key] = history[:5]
+        while len(self._recent_flows_by_chat) > self._FLOW_CACHE_LIMIT:
+            self._recent_flows_by_chat.popitem(last=False)
 
     def _get_handoff_lock(self, chat_key: str) -> asyncio.Lock:
-        if not isinstance(self._handoff_locks, OrderedDict):
-            self._handoff_locks = OrderedDict(self._handoff_locks)
         lock = self._handoff_locks.pop(chat_key, None)
         if lock is None:
             lock = asyncio.Lock()
@@ -169,10 +166,6 @@ class OrchestratorAgent:
     ) -> None:
         if not flow_id:
             return
-        recent = getattr(self, "_recent_policy_decisions_by_flow", None)
-        if not isinstance(recent, OrderedDict):
-            recent = OrderedDict(recent or {})
-            self._recent_policy_decisions_by_flow = recent
         decisions: list[dict[str, Any]] = []
         for event in events:
             if event.get("event") != "policy_decision":
@@ -185,10 +178,10 @@ class OrchestratorAgent:
                     "explain": str(event.get("explain", "") or "").strip(),
                 }
             )
-        recent.pop(flow_id, None)
-        recent[flow_id] = decisions
-        while len(recent) > self._FLOW_CACHE_LIMIT:
-            recent.popitem(last=False)
+        self._recent_policy_decisions_by_flow.pop(flow_id, None)
+        self._recent_policy_decisions_by_flow[flow_id] = decisions
+        while len(self._recent_policy_decisions_by_flow) > self._FLOW_CACHE_LIMIT:
+            self._recent_policy_decisions_by_flow.popitem(last=False)
 
     def _spawn_background_task(
         self,
@@ -197,14 +190,10 @@ class OrchestratorAgent:
         label: str,
     ) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
-        background_tasks = getattr(self, "_background_tasks", None)
-        if background_tasks is None:
-            background_tasks = set()
-            self._background_tasks = background_tasks
-        background_tasks.add(task)
+        self._background_tasks.add(task)
 
         def _on_done(done: asyncio.Task[Any]) -> None:
-            getattr(self, "_background_tasks", set()).discard(done)
+            self._background_tasks.discard(done)
             try:
                 done.result()
             except asyncio.CancelledError:
@@ -216,16 +205,13 @@ class OrchestratorAgent:
         return task
 
     def _policy_learning_enabled(self) -> bool:
-        system = getattr(getattr(self, "config", None), "system", None)
-        return bool(getattr(system, "policy_learning_enabled", False))
+        return bool(self.config.system.policy_learning_enabled)
 
     def _routing_enabled(self) -> bool:
-        system = getattr(getattr(self, "config", None), "system", None)
-        return bool(getattr(system, "routing_enabled", True))
+        return bool(self.config.system.routing_enabled)
 
     def _reflection_enabled(self) -> bool:
-        system = getattr(getattr(self, "config", None), "system", None)
-        return bool(getattr(system, "reflection_enabled", True))
+        return bool(self.config.system.reflection_enabled)
 
     @staticmethod
     def _build_policy_state_features(
@@ -297,12 +283,15 @@ class OrchestratorAgent:
             user_input,
             media_paths=media_paths,
         )
-        features["independent_subtasks"] = self._estimate_independent_subtasks(user_input)
+        features["independent_subtasks"] = self._estimate_independent_subtasks(
+            user_input
+        )
         return features
 
     def _policy_selector(self) -> ConservativePolicySelector:
         store = getattr(self, "_policy_store", None)
         if store is None or not hasattr(store, "summarize_action_stats"):
+
             class _NullPolicyStore:
                 @staticmethod
                 def summarize_action_stats(
@@ -463,12 +452,12 @@ class OrchestratorAgent:
             ),
             self._debug_policy_line(
                 "scheduling",
-                str(scheduling_policy.get('action_name', '') or '').strip(),
+                str(scheduling_policy.get("action_name", "") or "").strip(),
                 explain=str(scheduling_policy.get("explain", "") or ""),
             ),
             self._debug_policy_line(
                 "worker",
-                str(worker_policy.get('action_name', '') or '').strip(),
+                str(worker_policy.get("action_name", "") or "").strip(),
                 explain=str(worker_policy.get("explain", "") or ""),
             ),
         ]
@@ -536,7 +525,10 @@ class OrchestratorAgent:
         if not preferred_action:
             return payload
         explain = str(payload.get("explain", "") or "")
-        if "insufficient_samples" not in explain and payload.get("state_bucket") != "global_default":
+        if (
+            "insufficient_samples" not in explain
+            and payload.get("state_bucket") != "global_default"
+        ):
             return payload
         return {
             "action_name": preferred_action,
@@ -560,7 +552,10 @@ class OrchestratorAgent:
         explain = str(payload.get("explain", "") or "")
         if action_name != current_default_action:
             return payload
-        if "insufficient_samples" not in explain and payload.get("state_bucket") != "global_default":
+        if (
+            "insufficient_samples" not in explain
+            and payload.get("state_bucket") != "global_default"
+        ):
             return payload
         return {
             "action_name": softened_action,
@@ -581,7 +576,8 @@ class OrchestratorAgent:
             return None
         execution_style = (
             recommended_action
-            if recommended_action in {
+            if recommended_action
+            in {
                 "direct_execute",
                 "analyze_first",
                 "retrieve_first",
@@ -595,9 +591,7 @@ class OrchestratorAgent:
             else "serial"
         )
         worker_hint = (
-            "allow"
-            if recommended_action in {"allow", "allow_worker"}
-            else "deny"
+            "allow" if recommended_action in {"allow", "allow_worker"} else "deny"
         )
         samples = int(payload.get("samples", 0) or 0)
         effective_samples = float(payload.get("effective_samples", 0.0) or 0.0)
@@ -637,7 +631,8 @@ class OrchestratorAgent:
         }:
             execution_style = "analyze_first"
         subtasks = int(
-            self._build_scheduling_state_features(goal).get("independent_subtasks", 1) or 1
+            self._build_scheduling_state_features(goal).get("independent_subtasks", 1)
+            or 1
         )
         return RoutingDecision(
             route_mode=route_mode,
@@ -674,10 +669,14 @@ class OrchestratorAgent:
                 route_mode=route_mode,
                 state_features=state_features,
                 execution_style=(
-                    routing_decision.execution_style if routing_decision is not None else ""
+                    routing_decision.execution_style
+                    if routing_decision is not None
+                    else ""
                 ),
                 parallelism_hint=(
-                    routing_decision.parallelism_hint if routing_decision is not None else ""
+                    routing_decision.parallelism_hint
+                    if routing_decision is not None
+                    else ""
                 ),
                 worker_hint=(
                     routing_decision.worker_hint if routing_decision is not None else ""
@@ -711,7 +710,9 @@ class OrchestratorAgent:
             ):
                 stalled_count += 1
             tool_call_count += max(0, int(metadata.get("tool_call_count", 0) or 0))
-            tool_failure_count += max(0, int(metadata.get("tool_failure_count", 0) or 0))
+            tool_failure_count += max(
+                0, int(metadata.get("tool_failure_count", 0) or 0)
+            )
             loop_guard_block_count += max(
                 0, int(metadata.get("loop_guard_block_count", 0) or 0)
             )
@@ -738,11 +739,15 @@ class OrchestratorAgent:
         result: Any | None = None,
     ) -> float:
         reward = 1.0 if final_status == "succeeded" else -1.0
-        event_retry_count = sum(1 for event in events if event.get("event") == "retrying")
+        event_retry_count = sum(
+            1 for event in events if event.get("event") == "retrying"
+        )
         event_dead_letter_count = sum(
             1 for event in events if event.get("event") == "dead_lettered"
         )
-        event_stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        event_stalled_count = sum(
+            1 for event in events if event.get("event") == "stalled"
+        )
         result_details = cls._task_result_outcome_details(result)
         retry_count = max(event_retry_count, int(result_details["retry_count"]))
         dead_letter_count = max(
@@ -766,11 +771,15 @@ class OrchestratorAgent:
         error: str | None = None,
         execution_elapsed_ms: float | None = None,
     ) -> dict[str, Any]:
-        event_retry_count = sum(1 for event in events if event.get("event") == "retrying")
+        event_retry_count = sum(
+            1 for event in events if event.get("event") == "retrying"
+        )
         event_dead_letter_count = sum(
             1 for event in events if event.get("event") == "dead_lettered"
         )
-        event_stalled_count = sum(1 for event in events if event.get("event") == "stalled")
+        event_stalled_count = sum(
+            1 for event in events if event.get("event") == "stalled"
+        )
         result_details = cls._task_result_outcome_details(result)
         payload = {
             "retry_count": max(event_retry_count, int(result_details["retry_count"])),
@@ -790,7 +799,9 @@ class OrchestratorAgent:
             "max_step_exhausted_count": int(result_details["max_step_exhausted_count"]),
         }
         if execution_elapsed_ms is not None:
-            payload["execution_elapsed_ms"] = round(max(0.0, float(execution_elapsed_ms)), 2)
+            payload["execution_elapsed_ms"] = round(
+                max(0.0, float(execution_elapsed_ms)), 2
+            )
         if error:
             payload["error"] = error
         return payload
@@ -862,7 +873,9 @@ class OrchestratorAgent:
             tape=tape,
             memory_store=self.memory_store if tape else None,
             runtime_job=runtime_job,
-            recent_flow_ids=list(getattr(self, "_recent_flows_by_chat", {}).get(chat_key, [])),
+            recent_flow_ids=list(
+                getattr(self, "_recent_flows_by_chat", {}).get(chat_key, [])
+            ),
             execution_constraints=execution_constraints,
         )
         routing_decision = None
@@ -873,7 +886,9 @@ class OrchestratorAgent:
             getattr(getattr(self.config, "model", None), "model_name", "") or ""
         ).strip()
         resolved_router_model = configured_router_model or fallback_router_model
-        routing_timeout = float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0)
+        routing_timeout = float(
+            getattr(self.config.system, "routing_timeout", 2.0) or 2.0
+        )
         runtime_telemetry_store = getattr(self, "_policy_store", None)
         intent_bucket = build_routing_intent_bucket(
             user_input,
@@ -885,12 +900,13 @@ class OrchestratorAgent:
             "parallelism": {"injection_level": "normal", "soften_default": False},
             "worker": {"injection_level": "normal", "soften_default": False},
         }
-        if (
-            runtime_telemetry_store is not None
-            and hasattr(runtime_telemetry_store, "recommend_reflection_guardrails")
+        if runtime_telemetry_store is not None and hasattr(
+            runtime_telemetry_store, "recommend_reflection_guardrails"
         ):
-            reflection_guardrails = runtime_telemetry_store.recommend_reflection_guardrails(
-                chat_key=chat_key or None
+            reflection_guardrails = (
+                runtime_telemetry_store.recommend_reflection_guardrails(
+                    chat_key=chat_key or None
+                )
             )
         if (
             self._reflection_enabled()
@@ -915,10 +931,12 @@ class OrchestratorAgent:
             )
             reflection_route_payload = relaxed_reflection_route_payload
             if execution_style_guardrail_reduced:
-                reflection_route_payload = runtime_telemetry_store.recommend_route_from_reflections(
-                    chat_key=chat_key,
-                    state_features=scheduling_features,
-                    min_confidence=0.72,
+                reflection_route_payload = (
+                    runtime_telemetry_store.recommend_route_from_reflections(
+                        chat_key=chat_key,
+                        state_features=scheduling_features,
+                        min_confidence=0.72,
+                    )
                 )
             routing_decision = self._routing_decision_from_reflection(
                 reflection_route_payload
@@ -960,7 +978,8 @@ class OrchestratorAgent:
                 router_model=resolved_router_model,
             )
             routing_timeout = float(
-                recommendation.get("timeout_seconds", routing_timeout) or routing_timeout
+                recommendation.get("timeout_seconds", routing_timeout)
+                or routing_timeout
             )
         routing_started = time.perf_counter()
         if should_use_model_router:
@@ -982,7 +1001,9 @@ class OrchestratorAgent:
                 else None
             ),
             allow_clarification_override=(
-                True if routing_decision is not None and routing_decision.need_clarification else None
+                True
+                if routing_decision is not None and routing_decision.need_clarification
+                else None
             ),
             metadata_overrides=(
                 {"routing_decision": routing_decision.model_dump()}
@@ -1020,7 +1041,9 @@ class OrchestratorAgent:
                 softened_action="bounded_parallel",
                 hint="guardrail 放宽默认调度：bounded_parallel",
             )
-            guardrail_softened_scheduling = softened_scheduling_policy is not scheduling_policy
+            guardrail_softened_scheduling = (
+                softened_scheduling_policy is not scheduling_policy
+            )
             scheduling_policy = softened_scheduling_policy
             softened_worker_policy = self._maybe_soften_policy_from_guardrail(
                 worker_policy,
@@ -1041,7 +1064,9 @@ class OrchestratorAgent:
                 (
                     reflection_hints_payload
                     if str(
-                        reflection_guardrails.get("parallelism", {}).get("injection_level", "normal")
+                        reflection_guardrails.get("parallelism", {}).get(
+                            "injection_level", "normal"
+                        )
                     )
                     != "reduced"
                     else []
@@ -1056,7 +1081,9 @@ class OrchestratorAgent:
                 (
                     reflection_hints_payload
                     if str(
-                        reflection_guardrails.get("worker", {}).get("injection_level", "normal")
+                        reflection_guardrails.get("worker", {}).get(
+                            "injection_level", "normal"
+                        )
                     )
                     != "reduced"
                     else []
@@ -1065,31 +1092,13 @@ class OrchestratorAgent:
             ),
             hint_prefix="历史反思建议 worker 动作：",
         )
-        reflection_override_count = 0
-        execution_style_reflection_count = 0
-        parallelism_reflection_count = 0
-        worker_reflection_count = 0
-        execution_style_guardrail_reduce_count = 0
-        parallelism_guardrail_soften_count = 0
-        worker_guardrail_soften_count = 0
-        if routing_decision is not None and routing_decision.decision_source == "reflection":
-            execution_style_reflection_count = 1
-        if (
-            execution_style_guardrail_reduced
-            and relaxed_reflection_route_payload is not None
-            and routing_decision is None
-        ):
-            execution_style_guardrail_reduce_count = 1
-        if str(scheduling_policy.get("action_name", "") or "") != scheduling_base_action:
-            reflection_override_count += 1
-            parallelism_reflection_count = 1
-        if str(worker_policy.get("action_name", "") or "") != worker_base_action:
-            reflection_override_count += 1
-            worker_reflection_count = 1
-        if guardrail_softened_scheduling:
-            parallelism_guardrail_soften_count = 1
-        if guardrail_softened_worker:
-            worker_guardrail_soften_count = 1
+        scheduling_overridden = (
+            str(scheduling_policy.get("action_name", "") or "")
+            != scheduling_base_action
+        )
+        worker_overridden = (
+            str(worker_policy.get("action_name", "") or "") != worker_base_action
+        )
         if (
             chat_key
             and runtime_telemetry_store is not None
@@ -1118,13 +1127,21 @@ class OrchestratorAgent:
                 ),
                 intent_bucket=intent_bucket,
                 reflection_hint_count=len(reflection_hints_payload),
-                reflection_override_count=reflection_override_count,
-                execution_style_reflection_count=execution_style_reflection_count,
-                parallelism_reflection_count=parallelism_reflection_count,
-                worker_reflection_count=worker_reflection_count,
-                execution_style_guardrail_reduce_count=execution_style_guardrail_reduce_count,
-                parallelism_guardrail_soften_count=parallelism_guardrail_soften_count,
-                worker_guardrail_soften_count=worker_guardrail_soften_count,
+                reflection_override_count=int(scheduling_overridden)
+                + int(worker_overridden),
+                execution_style_reflection_count=int(
+                    routing_decision is not None
+                    and routing_decision.decision_source == "reflection"
+                ),
+                parallelism_reflection_count=int(scheduling_overridden),
+                worker_reflection_count=int(worker_overridden),
+                execution_style_guardrail_reduce_count=int(
+                    execution_style_guardrail_reduced
+                    and relaxed_reflection_route_payload is not None
+                    and routing_decision is None
+                ),
+                parallelism_guardrail_soften_count=int(guardrail_softened_scheduling),
+                worker_guardrail_soften_count=int(guardrail_softened_worker),
             )
         execution_plan = build_execution_plan(task_contract)
         policy_hints = [decomposition_hint]
@@ -1220,7 +1237,9 @@ class OrchestratorAgent:
                     orchestrator.run(goal=task_contract.goal, context=context),
                 )
             else:
-                result = await orchestrator.run(goal=task_contract.goal, context=context)
+                result = await orchestrator.run(
+                    goal=task_contract.goal, context=context
+                )
         except Exception as exc:
             self._persist_policy_events(
                 flow_id=flow_id,
@@ -1399,7 +1418,10 @@ class OrchestratorAgent:
             ranked = sorted(
                 stats.items(),
                 key=lambda item: (
-                    float(item[1].get("effective_samples", item[1].get("samples", 0.0)) or 0.0),
+                    float(
+                        item[1].get("effective_samples", item[1].get("samples", 0.0))
+                        or 0.0
+                    ),
                     float(item[1].get("mean_reward", 0.0) or 0.0),
                 ),
                 reverse=True,
@@ -1421,12 +1443,15 @@ class OrchestratorAgent:
                     + f"max_step_exhausted_rate={float(payload.get('max_step_exhausted_rate', 0.0) or 0.0):.2f} "
                     + f"feedback_score={float(payload.get('feedback_score', 0.0) or 0.0):.2f}"
                 )
-        telemetry_summary_fn = getattr(self._policy_store, "summarize_runtime_telemetry", None)
+        telemetry_summary_fn = getattr(
+            self._policy_store, "summarize_runtime_telemetry", None
+        )
         if callable(telemetry_summary_fn):
             try:
                 telemetry = telemetry_summary_fn(chat_key=chat_key or None)
             except TypeError:
                 telemetry = telemetry_summary_fn()
+
             def _format_skip_breakdown(payload: dict[str, object]) -> str:
                 breakdown = payload.get("skip_breakdown")
                 if not isinstance(breakdown, dict) or not breakdown:
@@ -1441,83 +1466,70 @@ class OrchestratorAgent:
                 ):
                     items.append(f"{reason}:{count}")
                 return ",".join(items)
+
             overall = telemetry.get("overall") if isinstance(telemetry, dict) else None
             by_route_mode = (
-                telemetry.get("by_route_mode", {}) if isinstance(telemetry, dict) else {}
+                telemetry.get("by_route_mode", {})
+                if isinstance(telemetry, dict)
+                else {}
             )
-            if isinstance(overall, dict) and int(overall.get("runs", 0) or 0) > 0:
-                overall_skip_breakdown = _format_skip_breakdown(overall)
-                parts.append("[Routing Telemetry]")
-                parts.append(
-                    "- "
-                    + f"runs={int(overall.get('runs', 0) or 0)} "
-                    + f"avg_router_latency_ms={float(overall.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
-                    + f"avg_execution_elapsed_ms={float(overall.get('avg_execution_elapsed_ms', 0.0) or 0.0):.2f} "
-                    + f"avg_task_result_count={float(overall.get('avg_task_result_count', 0.0) or 0.0):.2f} "
-                    + f"avg_executor_step_count={float(overall.get('avg_executor_step_count', 0.0) or 0.0):.2f} "
-                    + f"avg_tool_call_count={float(overall.get('avg_tool_call_count', 0.0) or 0.0):.2f} "
-                    + f"fallback_rate={float(overall.get('fallback_rate', 0.0) or 0.0):.2f} "
-                    + f"skipped_rate={float(overall.get('skipped_rate', 0.0) or 0.0):.2f} "
-                    + f"model_route_rate={float(overall.get('model_route_rate', 0.0) or 0.0):.2f} "
-                    + f"rule_hit_rate={float(overall.get('rule_hit_rate', 0.0) or 0.0):.2f} "
-                    + f"reflection_route_rate={float(overall.get('reflection_route_rate', 0.0) or 0.0):.2f} "
-                    + f"reflection_match_rate={float(overall.get('reflection_match_rate', 0.0) or 0.0):.2f} "
-                    + f"reflection_override_rate={float(overall.get('reflection_override_rate', 0.0) or 0.0):.2f} "
-                    + f"tool_failure_rate={float(overall.get('tool_failure_rate', 0.0) or 0.0):.2f} "
-                    + f"loop_guard_block_rate={float(overall.get('loop_guard_block_rate', 0.0) or 0.0):.2f} "
-                    + f"max_step_exhausted_rate={float(overall.get('max_step_exhausted_rate', 0.0) or 0.0):.2f} "
-                    + f"dead_letter_rate={float(overall.get('dead_letter_rate', 0.0) or 0.0):.2f} "
-                    + f"stalled_rate={float(overall.get('stalled_rate', 0.0) or 0.0):.2f} "
-                    + f"execution_style_reflection_rate={float(overall.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
-                    + f"parallelism_reflection_rate={float(overall.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
-                    + f"worker_reflection_rate={float(overall.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
-                    + f"execution_style_guardrail_reduce_rate={float(overall.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
-                    + f"parallelism_guardrail_soften_rate={float(overall.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
-                    + f"worker_guardrail_soften_rate={float(overall.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
-                    + f"mean_reward={float(overall.get('mean_reward', 0.0) or 0.0):.2f}"
-                    + (
-                        f" skip_breakdown={overall_skip_breakdown}"
-                        if overall_skip_breakdown
-                        else ""
+
+            # Fields shared by both overall and per-route-mode rows.
+            _TELEMETRY_FLOAT_FIELDS = (
+                "avg_router_latency_ms",
+                "avg_execution_elapsed_ms",
+                "avg_task_result_count",
+                "avg_executor_step_count",
+                "avg_tool_call_count",
+                "fallback_rate",
+                "skipped_rate",
+                "model_route_rate",
+                "rule_hit_rate",
+                "reflection_route_rate",
+                "reflection_match_rate",
+                "reflection_override_rate",
+                "tool_failure_rate",
+                "loop_guard_block_rate",
+                "max_step_exhausted_rate",
+                "dead_letter_rate",
+                "stalled_rate",
+                "execution_style_reflection_rate",
+                "parallelism_reflection_rate",
+                "worker_reflection_rate",
+                "execution_style_guardrail_reduce_rate",
+                "parallelism_guardrail_soften_rate",
+                "worker_guardrail_soften_rate",
+                "mean_reward",
+            )
+
+            def _format_telemetry_row(
+                payload: dict[str, Any],
+                *,
+                prefix: str = "",
+            ) -> str:
+                tokens: list[str] = []
+                if prefix:
+                    tokens.append(prefix)
+                tokens.append(f"runs={int(payload.get('runs', 0) or 0)}")
+                for field_name in _TELEMETRY_FLOAT_FIELDS:
+                    tokens.append(
+                        f"{field_name}={float(payload.get(field_name, 0.0) or 0.0):.2f}"
                     )
-                )
+                skip_bd = _format_skip_breakdown(payload)
+                if skip_bd:
+                    tokens.append(f"skip_breakdown={skip_bd}")
+                return "- " + " ".join(tokens)
+
+            if isinstance(overall, dict) and int(overall.get("runs", 0) or 0) > 0:
+                parts.append("[Routing Telemetry]")
+                parts.append(_format_telemetry_row(overall))
                 if isinstance(by_route_mode, dict):
                     for route_mode, payload in sorted(by_route_mode.items()):
                         if not isinstance(payload, dict):
                             continue
-                        route_skip_breakdown = _format_skip_breakdown(payload)
                         parts.append(
-                            "- "
-                            + f"route_mode={route_mode} "
-                            + f"runs={int(payload.get('runs', 0) or 0)} "
-                            + f"avg_router_latency_ms={float(payload.get('avg_router_latency_ms', 0.0) or 0.0):.2f} "
-                            + f"avg_execution_elapsed_ms={float(payload.get('avg_execution_elapsed_ms', 0.0) or 0.0):.2f} "
-                            + f"avg_task_result_count={float(payload.get('avg_task_result_count', 0.0) or 0.0):.2f} "
-                            + f"avg_executor_step_count={float(payload.get('avg_executor_step_count', 0.0) or 0.0):.2f} "
-                            + f"avg_tool_call_count={float(payload.get('avg_tool_call_count', 0.0) or 0.0):.2f} "
-                            + f"fallback_rate={float(payload.get('fallback_rate', 0.0) or 0.0):.2f} "
-                            + f"skipped_rate={float(payload.get('skipped_rate', 0.0) or 0.0):.2f} "
-                            + f"model_route_rate={float(payload.get('model_route_rate', 0.0) or 0.0):.2f} "
-                            + f"rule_hit_rate={float(payload.get('rule_hit_rate', 0.0) or 0.0):.2f} "
-                            + f"reflection_route_rate={float(payload.get('reflection_route_rate', 0.0) or 0.0):.2f} "
-                            + f"reflection_match_rate={float(payload.get('reflection_match_rate', 0.0) or 0.0):.2f} "
-                            + f"reflection_override_rate={float(payload.get('reflection_override_rate', 0.0) or 0.0):.2f} "
-                            + f"tool_failure_rate={float(payload.get('tool_failure_rate', 0.0) or 0.0):.2f} "
-                            + f"loop_guard_block_rate={float(payload.get('loop_guard_block_rate', 0.0) or 0.0):.2f} "
-                            + f"max_step_exhausted_rate={float(payload.get('max_step_exhausted_rate', 0.0) or 0.0):.2f} "
-                            + f"dead_letter_rate={float(payload.get('dead_letter_rate', 0.0) or 0.0):.2f} "
-                            + f"stalled_rate={float(payload.get('stalled_rate', 0.0) or 0.0):.2f} "
-                            + f"execution_style_reflection_rate={float(payload.get('execution_style_reflection_rate', 0.0) or 0.0):.2f} "
-                            + f"parallelism_reflection_rate={float(payload.get('parallelism_reflection_rate', 0.0) or 0.0):.2f} "
-                            + f"worker_reflection_rate={float(payload.get('worker_reflection_rate', 0.0) or 0.0):.2f} "
-                            + f"execution_style_guardrail_reduce_rate={float(payload.get('execution_style_guardrail_reduce_rate', 0.0) or 0.0):.2f} "
-                            + f"parallelism_guardrail_soften_rate={float(payload.get('parallelism_guardrail_soften_rate', 0.0) or 0.0):.2f} "
-                            + f"worker_guardrail_soften_rate={float(payload.get('worker_guardrail_soften_rate', 0.0) or 0.0):.2f} "
-                            + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f}"
-                            + (
-                                f" skip_breakdown={route_skip_breakdown}"
-                                if route_skip_breakdown
-                                else ""
+                            _format_telemetry_row(
+                                payload, prefix=f"route_mode={route_mode}"
                             )
                         )
         return "\n".join(parts)
@@ -1654,9 +1666,7 @@ class OrchestratorAgent:
     ) -> None:
         if not tape or not chat_key:
             return
-        asst_entry = tape.append(
-            "message", {"role": "assistant", "content": text}
-        )
+        asst_entry = tape.append("message", {"role": "assistant", "content": text})
         self.tape_store.save_entry(chat_key, asst_entry)
         self._spawn_background_task(
             self._maybe_handoff(tape, chat_key),
@@ -1688,9 +1698,7 @@ class OrchestratorAgent:
         if chat_key and getattr(self, "_interactive_sessions", None) is not None:
             control = self._parse_interactive_session_command(user_input)
             if control is not None:
-                return await self._handle_interactive_session_command(
-                    chat_key, control
-                )
+                return await self._handle_interactive_session_command(chat_key, control)
             if self._interactive_sessions.has_active_session(chat_key):
                 reply = await self._handle_interactive_session_message(
                     chat_key,
@@ -1761,7 +1769,7 @@ class OrchestratorAgent:
                     error=str(exc),
                 )
             logger.exception("Error processing task")
-            return TaskResponse(text=f"处理任务时出错：{exc}")
+            return TaskResponse(text=f"处理任务时出错：{exc}", is_error=True)
 
     async def _maybe_handoff(self, tape: Tape, chat_key: str) -> None:
         """Check if entries since last anchor exceed threshold; if so, create a new anchor."""
@@ -1987,7 +1995,9 @@ class OrchestratorAgent:
         if unmatched_recent_flows:
             lines.append(f"flows={', '.join(unmatched_recent_flows[:10])}")
         if orphaned_job_ids:
-            lines.append(f"jobs={', '.join(str(item) for item in orphaned_job_ids[:10])}")
+            lines.append(
+                f"jobs={', '.join(str(item) for item in orphaned_job_ids[:10])}"
+            )
         return "\n".join(lines)
 
     def _resolve_policy_feedback_flow_id(
@@ -2005,7 +2015,11 @@ class OrchestratorAgent:
             for item in recent_history.get(chat_key, []) or []
             if str(item).strip()
         ]
-        if normalized_target and normalized_target not in {"latest"} and store is not None:
+        if (
+            normalized_target
+            and normalized_target not in {"latest"}
+            and store is not None
+        ):
             target_job = store.get(normalized_target)
             if target_job is not None:
                 flow_id = str(target_job.metadata.get("flow_id", "") or "").strip()
@@ -2043,11 +2057,15 @@ class OrchestratorAgent:
                 )
             )
         if control.get("action", "") != "feedback":
-            return TaskResponse(text="支持的命令：@policy feedback <flow_id|latest> good|bad <reason> / @policy inspect [decision_kind|flow_id]")
+            return TaskResponse(
+                text="支持的命令：@policy feedback <flow_id|latest> good|bad <reason> / @policy inspect [decision_kind|flow_id]"
+            )
         rating = str(control.get("rating", "") or "").strip().lower()
         reason = str(control.get("reason", "") or "").strip()
         if rating not in {"good", "bad"} or not reason:
-            return TaskResponse(text="用法：@policy feedback <flow_id|latest> good|bad <reason>")
+            return TaskResponse(
+                text="用法：@policy feedback <flow_id|latest> good|bad <reason>"
+            )
         if not chat_key:
             return TaskResponse(text="缺少 chat_key，无法记录策略反馈。")
         flow_id, error = self._resolve_policy_feedback_flow_id(
@@ -2074,7 +2092,9 @@ class OrchestratorAgent:
         if action == "cleanup":
             return TaskResponse(text=self._runtime_maintenance_report())
         if action not in {"status", "resume"}:
-            return TaskResponse(text="支持的命令：@job status <job_id|latest> / @job resume <job_id|latest> / @job cleanup")
+            return TaskResponse(
+                text="支持的命令：@job status <job_id|latest> / @job resume <job_id|latest> / @job cleanup"
+            )
         job, error = self._resolve_job_target(chat_key=chat_key, target=target)
         if error:
             return TaskResponse(text=error)
@@ -2216,7 +2236,11 @@ class OrchestratorAgent:
             return None
         if reply.expired:
             return None
-        tape = self.tape_store.get_or_create(chat_key) if chat_key and self.tape_store else None
+        tape = (
+            self.tape_store.get_or_create(chat_key)
+            if chat_key and self.tape_store
+            else None
+        )
         if tape is not None:
             pending_entries = []
             if tape.last_anchor() is None:
@@ -2288,7 +2312,9 @@ class OrchestratorAgent:
         }
         if interactive_manager is not None:
             status["interactive_sessions"] = interactive_manager.summary()
-        telemetry_summary_fn = getattr(policy_store, "summarize_runtime_telemetry", None)
+        telemetry_summary_fn = getattr(
+            policy_store, "summarize_runtime_telemetry", None
+        )
         if callable(telemetry_summary_fn):
             try:
                 telemetry = telemetry_summary_fn()

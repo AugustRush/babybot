@@ -27,6 +27,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _event_to_payload(event: Any) -> dict[str, Any]:
+    """Normalise a runtime/interactive event object into a plain dict.
+
+    Handles three shapes:
+    - dataclass instance  → dataclasses.asdict()
+    - plain dict          → shallow copy
+    - arbitrary object    → extract known attributes
+    """
+    if dataclasses.is_dataclass(event) and not isinstance(event, type):
+        # event is a dataclass *instance*; asdict() is safe here.
+        return dataclasses.asdict(event)  # type: ignore[arg-type]
+    if isinstance(event, dict):
+        return dict(event)
+    return {
+        "event": getattr(event, "event", ""),
+        "task_id": getattr(event, "task_id", ""),
+        "flow_id": getattr(event, "flow_id", ""),
+        "payload": dict(getattr(event, "payload", {}) or {}),
+    }
+
+
 def _runtime_event_job_id(events: list[dict[str, Any]]) -> str:
     for event in reversed(events):
         job_id = str(event.get("job_id", "") or "").strip()
@@ -391,10 +412,9 @@ class MessageBus:
                     "sender_id": msg.sender_id,
                     "metadata": msg.metadata,
                 }
-                if (
-                    bool(getattr(self._config.system, "debug_runtime_feedback", False))
-                    and text.strip().startswith("调试：")
-                ):
+                if bool(
+                    getattr(self._config.system, "debug_runtime_feedback", False)
+                ) and text.strip().startswith("调试："):
                     send_kwargs["message_format"] = "post"
                 await channel.send_response(
                     msg.chat_id,
@@ -415,22 +435,14 @@ class MessageBus:
             "media_paths": msg.media_paths,
         }
         runtime_events: list[dict[str, Any]] = []
-        last_runtime_progress_key: tuple[str, str, str, str, str, str, str] | None = None
+        last_runtime_progress_key: tuple[str, str, str, str, str, str, str] | None = (
+            None
+        )
         last_runtime_progress_text_by_scope: dict[tuple[str, str, str, str], str] = {}
 
         async def _runtime_event_callback(event: Any) -> None:
             nonlocal stream_detached, last_runtime_progress_key
-            if dataclasses.is_dataclass(event):
-                payload = dataclasses.asdict(event)
-            elif isinstance(event, dict):
-                payload = dict(event)
-            else:
-                payload = {
-                    "event": getattr(event, "event", ""),
-                    "task_id": getattr(event, "task_id", ""),
-                    "flow_id": getattr(event, "flow_id", ""),
-                    "payload": dict(getattr(event, "payload", {}) or {}),
-                }
+            payload = _event_to_payload(event)
             runtime_events.append(payload)
             if isinstance(msg.metadata, dict):
                 msg.metadata["_runtime_events"] = list(runtime_events)
@@ -488,16 +500,7 @@ class MessageBus:
 
         async def _interactive_output_callback(event: Any) -> None:
             nonlocal interactive_last_sent_text, interactive_sent_partial
-            if dataclasses.is_dataclass(event):
-                payload = dataclasses.asdict(event)
-            elif isinstance(event, dict):
-                payload = dict(event)
-            else:
-                payload = {
-                    "event": getattr(event, "event", ""),
-                    "text": getattr(event, "text", ""),
-                    "delta": getattr(event, "delta", ""),
-                }
+            payload = _event_to_payload(event)
             event_name = str(payload.get("event", "") or "").strip().lower()
             text = str(payload.get("text", "") or "").strip()
             if not text or channel is None:
@@ -533,16 +536,16 @@ class MessageBus:
         if stream_enabled:
             if self._supports_stream_callback is None:
                 self._ensure_process_task_signature_cached()
-                self._supports_stream_callback = (
-                    "stream_callback" in (self._process_task_parameters or set())
+                self._supports_stream_callback = "stream_callback" in (
+                    self._process_task_parameters or set()
                 )
             if self._supports_stream_callback:
                 _stream_callback.reset = _reset_stream  # type: ignore[attr-defined]
                 process_kwargs["stream_callback"] = _stream_callback
         if self._supports_runtime_event_callback is None:
             self._ensure_process_task_signature_cached()
-            self._supports_runtime_event_callback = (
-                "runtime_event_callback" in (self._process_task_parameters or set())
+            self._supports_runtime_event_callback = "runtime_event_callback" in (
+                self._process_task_parameters or set()
             )
         if self._supports_runtime_event_callback:
             process_kwargs["runtime_event_callback"] = _runtime_event_callback
@@ -557,9 +560,8 @@ class MessageBus:
         if channel is not None:
             if self._supports_intermediate_message is None:
                 self._ensure_process_task_signature_cached()
-                self._supports_intermediate_message = (
-                    "send_intermediate_message"
-                    in (self._process_task_parameters or set())
+                self._supports_intermediate_message = "send_intermediate_message" in (
+                    self._process_task_parameters or set()
                 )
             if self._supports_intermediate_message:
                 process_kwargs["send_intermediate_message"] = _send_intermediate_message

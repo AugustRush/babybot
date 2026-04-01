@@ -425,11 +425,18 @@ class ResourceManager:
                 default=None,
             )
         )
-        self._current_tool_context: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
-            "current_tool_context",
-            default=None,
+        self._current_tool_context: contextvars.ContextVar[Any | None] = (
+            contextvars.ContextVar(
+                "current_tool_context",
+                default=None,
+            )
         )
-        self._python_probe_cache: dict[tuple[str, tuple[str, ...], str], str | None] = {}
+        self._current_worker_depth: contextvars.ContextVar[int] = (
+            contextvars.ContextVar("current_worker_depth", default=0)
+        )
+        self._python_probe_cache: dict[
+            tuple[str, tuple[str, ...], str], str | None
+        ] = {}
         self._observability_provider: Any = None
         self._skill_load_errors: list[dict[str, str]] = []
         self.catalog = ResourceCatalog(self)
@@ -456,67 +463,39 @@ class ResourceManager:
         return None
 
     def _catalog_view(self) -> ResourceCatalog:
-        catalog = getattr(self, "catalog", None)
-        if catalog is None:
-            catalog = ResourceCatalog(self)
-            self.catalog = catalog
-        return catalog
+        return self.catalog
 
     def _runtime_view(self) -> WorkerRuntime:
-        runtime = getattr(self, "runtime", None)
-        if runtime is None:
-            runtime = WorkerRuntime(self)
-            self.runtime = runtime
-        return runtime
+        return self.runtime
+
+    def _lazy(self, attr: str, factory: Any) -> Any:
+        """Return a lazily-initialised instance attribute, creating it on first access."""
+        obj = getattr(self, attr, None)
+        if obj is None:
+            obj = factory()
+            setattr(self, attr, obj)
+        return obj
 
     def _python_runner_view(self) -> ExternalPythonRunner:
-        runner = getattr(self, "_python_runner", None)
-        if runner is None:
-            runner = ExternalPythonRunner(self.config)
-            self._python_runner = runner
-        return runner
+        return self._lazy("_python_runner", lambda: ExternalPythonRunner(self.config))
 
     def _workspace_tools_view(self) -> WorkspaceToolSuite:
-        tools = getattr(self, "_workspace_tools", None)
-        if tools is None:
-            tools = WorkspaceToolSuite(self)
-            self._workspace_tools = tools
-        return tools
+        return self._lazy("_workspace_tools", lambda: WorkspaceToolSuite(self))
 
     def _skill_loader_view(self) -> SkillLoader:
-        loader = getattr(self, "_skill_loader", None)
-        if loader is None:
-            loader = SkillLoader(self)
-            self._skill_loader = loader
-        return loader
+        return self._lazy("_skill_loader", lambda: SkillLoader(self))
 
     def _resource_scope_view(self) -> ResourceScopeHelper:
-        helper = getattr(self, "_resource_scope", None)
-        if helper is None:
-            helper = ResourceScopeHelper(self)
-            self._resource_scope = helper
-        return helper
+        return self._lazy("_resource_scope", lambda: ResourceScopeHelper(self))
 
     def _tool_loader_view(self) -> ResourceToolLoader:
-        helper = getattr(self, "_tool_loader", None)
-        if helper is None:
-            helper = ResourceToolLoader(self)
-            self._tool_loader = helper
-        return helper
+        return self._lazy("_tool_loader", lambda: ResourceToolLoader(self))
 
     def _subagent_runtime_view(self) -> ResourceSubagentRuntime:
-        helper = getattr(self, "_subagent_runtime", None)
-        if helper is None:
-            helper = ResourceSubagentRuntime(self)
-            self._subagent_runtime = helper
-        return helper
+        return self._lazy("_subagent_runtime", lambda: ResourceSubagentRuntime(self))
 
     def _skill_runtime_view(self) -> ResourceSkillRuntime:
-        helper = getattr(self, "_skill_runtime", None)
-        if helper is None:
-            helper = ResourceSkillRuntime(self)
-            self._skill_runtime = helper
-        return helper
+        return self._lazy("_skill_runtime", lambda: ResourceSkillRuntime(self))
 
     @staticmethod
     def _callable_tool_cls() -> type[CallableTool]:
@@ -776,7 +755,9 @@ class ResourceManager:
             candidates.append(raw_path)
         else:
             candidates.append(Path(self.config.resolve_workspace_path(raw)))
-            candidates.append((self.config.workspace_skills_dir / raw_path).expanduser())
+            candidates.append(
+                (self.config.workspace_skills_dir / raw_path).expanduser()
+            )
             candidates.append((self.config.builtin_skills_dir / raw_path).expanduser())
             candidates.append(raw_path)
 
@@ -828,12 +809,16 @@ class ResourceManager:
             removed = self.registry.unregister_group(old.tool_group)
             self.groups.pop(old.tool_group, None)
             logger.info(
-                "Unregistered %d old tools for skill %s", len(removed), name,
+                "Unregistered %d old tools for skill %s",
+                len(removed),
+                name,
             )
 
         runtime = self._build_skill_runtime(meta)
         tool_group, tool_names = self._register_skill_tools(
-            name, skill_dir, runtime=runtime,
+            name,
+            skill_dir,
+            runtime=runtime,
         )
 
         meta_include_groups = loader._parse_frontmatter_list(meta.get("include_groups"))
@@ -861,7 +846,10 @@ class ResourceManager:
                 lease=ToolLease(
                     include_groups=tuple(
                         dict.fromkeys(
-                            [*meta_include_groups, *(([tool_group] if tool_group else []))]
+                            [
+                                *meta_include_groups,
+                                *([tool_group] if tool_group else []),
+                            ]
                         )
                     ),
                     include_tools=tuple(meta_include_tools),
@@ -1102,9 +1090,7 @@ class ResourceManager:
         return SkillLoader.parse_frontmatter(text)
 
     @classmethod
-    def _read_skill_document(
-        cls, skill_dir: Path
-    ) -> tuple[dict[str, str], str, str]:
+    def _read_skill_document(cls, skill_dir: Path) -> tuple[dict[str, str], str, str]:
         return SkillLoader.read_skill_document(skill_dir)
 
     def _setup_tool_groups(self, user_groups: dict[str, dict]) -> None:
@@ -1178,34 +1164,18 @@ class ResourceManager:
         return ResourceScopeHelper.lease_to_dict(lease)
 
     def _get_current_task_lease_var(self) -> contextvars.ContextVar[ToolLease | None]:
-        current = getattr(self, "_current_task_lease", None)
-        if current is None:
-            current = contextvars.ContextVar("current_task_lease", default=None)
-            self._current_task_lease = current
-        return current
+        return self._current_task_lease
 
     def _get_current_skill_ids_var(
         self,
     ) -> contextvars.ContextVar[tuple[str, ...] | None]:
-        current = getattr(self, "_current_skill_ids", None)
-        if current is None:
-            current = contextvars.ContextVar("current_skill_ids", default=None)
-            self._current_skill_ids = current
-        return current
+        return self._current_skill_ids
 
     def _get_current_worker_depth_var(self) -> contextvars.ContextVar[int]:
-        current = getattr(self, "_current_worker_depth", None)
-        if current is None:
-            current = contextvars.ContextVar("current_worker_depth", default=0)
-            self._current_worker_depth = current
-        return current
+        return self._current_worker_depth
 
     def _get_current_tool_context_var(self) -> contextvars.ContextVar[Any | None]:
-        current = getattr(self, "_current_tool_context", None)
-        if current is None:
-            current = contextvars.ContextVar("current_tool_context", default=None)
-            self._current_tool_context = current
-        return current
+        return self._current_tool_context
 
     def _get_current_task_heartbeat(self) -> Any:
         ctx = self._get_current_tool_context_var().get()
@@ -1214,7 +1184,9 @@ class ResourceManager:
             return state.get("heartbeat")
         return None
 
-    def _report_external_process_output(self, line: str, *, stream: str = "stdout") -> None:
+    def _report_external_process_output(
+        self, line: str, *, stream: str = "stdout"
+    ) -> None:
         heartbeat = self._get_current_task_heartbeat()
         if heartbeat is None:
             return
@@ -1348,7 +1320,11 @@ class ResourceManager:
         provider = getattr(self, "_observability_provider", None)
         resolved_chat_key = chat_key.strip() or self._default_chat_key()
         if provider is not None and hasattr(provider, "inspect_runtime_flow"):
-            return str(provider.inspect_runtime_flow(flow_id=flow_id.strip(), chat_key=resolved_chat_key))
+            return str(
+                provider.inspect_runtime_flow(
+                    flow_id=flow_id.strip(), chat_key=resolved_chat_key
+                )
+            )
         if not flow_id and not resolved_chat_key:
             return "暂无可观测的运行中 flow。"
         return f"flow={flow_id.strip()};chat={resolved_chat_key}"
@@ -1357,16 +1333,24 @@ class ResourceManager:
         provider = getattr(self, "_observability_provider", None)
         resolved_chat_key = chat_key.strip() or self._default_chat_key()
         if provider is not None and hasattr(provider, "inspect_chat_context"):
-            return str(provider.inspect_chat_context(chat_key=resolved_chat_key, query=query.strip()))
+            return str(
+                provider.inspect_chat_context(
+                    chat_key=resolved_chat_key, query=query.strip()
+                )
+            )
         if not resolved_chat_key:
             return "缺少 chat_key，且当前上下文没有可推断的会话。"
-        return self._fallback_inspect_chat_context(resolved_chat_key, query=query.strip())
+        return self._fallback_inspect_chat_context(
+            resolved_chat_key, query=query.strip()
+        )
 
     def _fallback_inspect_chat_context(self, chat_key: str, query: str = "") -> str:
         memory_store = getattr(self, "memory_store", None)
         if memory_store is None:
             return f"chat={chat_key}\n暂无 memory store。"
-        view = build_context_view(memory_store=memory_store, chat_id=chat_key, query=query)
+        view = build_context_view(
+            memory_store=memory_store, chat_id=chat_key, query=query
+        )
         records = memory_store.list_memories(chat_id=chat_key)
         parts = ["[Chat Context]", f"chat_key={chat_key}"]
         if query:
@@ -1405,8 +1389,12 @@ class ResourceManager:
         if schema_type == "array":
             item_summary = ResourceManager._schema_type_summary(schema.get("items", {}))
             return f"array[{item_summary}]"
-        if schema_type == "object" and isinstance(schema.get("additionalProperties"), dict):
-            nested = ResourceManager._schema_type_summary(schema["additionalProperties"])
+        if schema_type == "object" and isinstance(
+            schema.get("additionalProperties"), dict
+        ):
+            nested = ResourceManager._schema_type_summary(
+                schema["additionalProperties"]
+            )
             return f"object[{nested}]"
         if schema.get("enum"):
             values = ",".join(str(value) for value in schema["enum"][:4])
@@ -1757,7 +1745,9 @@ class ResourceManager:
         return ExternalPythonRunner.normalize_string_list(value)
 
     @classmethod
-    def _build_skill_runtime(cls, raw: dict[str, Any] | None = None) -> SkillRuntimeConfig:
+    def _build_skill_runtime(
+        cls, raw: dict[str, Any] | None = None
+    ) -> SkillRuntimeConfig:
         return ExternalPythonRunner.build_skill_runtime(raw)
 
     @staticmethod

@@ -33,7 +33,9 @@ class ExternalPythonRunner:
         return tuple(dict.fromkeys(items))
 
     @classmethod
-    def build_skill_runtime(cls, raw: dict[str, Any] | None = None) -> SkillRuntimeConfig:
+    def build_skill_runtime(
+        cls, raw: dict[str, Any] | None = None
+    ) -> SkillRuntimeConfig:
         payload = raw or {}
         return SkillRuntimeConfig(
             python_executable=str(payload.get("python_executable", "") or "").strip(),
@@ -302,7 +304,9 @@ class ExternalPythonRunner:
                 if value is None:
                     continue
                 argv_tail.extend([spec.flag, self.format_cli_argument(value)])
-            timeout_s = owner._coerce_timeout(kwargs.get("_babybot_timeout"), default=300.0)
+            timeout_s = owner._coerce_timeout(
+                kwargs.get("_babybot_timeout"), default=300.0
+            )
             attempts: list[str] = []
             for candidate in owner._get_python_candidates(runtime):
                 scoped_candidate = dict(candidate)
@@ -348,17 +352,14 @@ class ExternalPythonRunner:
                         returncode=proc.returncode,
                         payload_missing=True,
                     ):
-                        owner._mark_python_candidate_unhealthy(
-                            scoped_candidate, detail
-                        )
+                        owner._mark_python_candidate_unhealthy(scoped_candidate, detail)
                         attempts.append(f"{candidate['executable']}: {detail}")
                         continue
                     raise RuntimeError(detail)
                 return out_text or err_text
             if attempts:
                 raise RuntimeError(
-                    "No healthy Python runtime succeeded. "
-                    + " | ".join(attempts[-3:])
+                    "No healthy Python runtime succeeded. " + " | ".join(attempts[-3:])
                 )
             raise RuntimeError("No Python runtime candidate available")
 
@@ -417,7 +418,9 @@ class ExternalPythonRunner:
             "    print(MARK + json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))\n"
         )
         args_json = json.dumps(arguments or {}, ensure_ascii=False)
-        timeout_s = owner._coerce_timeout(arguments.get("_babybot_timeout"), default=300.0)
+        timeout_s = owner._coerce_timeout(
+            arguments.get("_babybot_timeout"), default=300.0
+        )
         attempts: list[str] = []
         last_tool_error = "Tool error: external execution failed."
         for candidate in owner._get_python_candidates(runtime):
@@ -450,19 +453,15 @@ class ExternalPythonRunner:
                 last_tool_error = f"Tool error: {detail}"
                 continue
 
+            effective_timeout = (
+                timeout_s if (timeout_s and timeout_s > 0) else 24 * 3600
+            )
             try:
-                if timeout_s and timeout_s > 0:
-                    stdout, stderr = await self._collect_process_output(
-                        proc,
-                        timeout_s=timeout_s,
-                        on_output=owner._report_external_process_output,
-                    )
-                else:
-                    stdout, stderr = await self._collect_process_output(
-                        proc,
-                        timeout_s=24 * 3600,
-                        on_output=owner._report_external_process_output,
-                    )
+                stdout, stderr = await self._collect_process_output(
+                    proc,
+                    timeout_s=effective_timeout,
+                    on_output=owner._report_external_process_output,
+                )
             except asyncio.TimeoutError:
                 proc.kill()
                 try:
@@ -470,8 +469,6 @@ class ExternalPythonRunner:
                 except Exception:
                     pass
                 return f"Tool error: execution timeout after {timeout_s}s."
-            except Exception:
-                raise
 
             out_text = (stdout or b"").decode("utf-8", errors="ignore")
             err_text = (stderr or b"").decode("utf-8", errors="ignore")
@@ -516,8 +513,7 @@ class ExternalPythonRunner:
             return result_normalizer(payload.get("result"))
 
         if attempts:
-            return (
-                "Tool error: no healthy Python runtime succeeded. "
-                + " | ".join(attempts[-3:])
+            return "Tool error: no healthy Python runtime succeeded. " + " | ".join(
+                attempts[-3:]
             )
         return last_tool_error
