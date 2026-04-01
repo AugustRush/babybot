@@ -308,8 +308,53 @@ def test_single_agent_executor_fails_fast_on_exploration_only_turns() -> None:
 
     assert result.status == "failed"
     assert "No progress" in result.error
-    assert tool.calls <= 3
-    assert model.calls <= 4
+    assert tool.calls >= 5
+    assert model.calls >= 6
+
+
+def test_single_agent_executor_allows_short_exploration_burst_before_finishing() -> None:
+    class ExploringThenFinishingModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del request, context
+            self.calls += 1
+            if self.calls <= 4:
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id=f"call-{self.calls}",
+                            name="_workspace_view_text_file",
+                            arguments={"file_path": f"skills/demo_{self.calls}.md"},
+                        ),
+                    ),
+                )
+            return ModelResponse(text="done")
+
+    registry = ToolRegistry()
+    tool = CountingViewTool()
+    registry.register(tool, group="code")
+    model = ExploringThenFinishingModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="explore several files then finish"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert result.output == "done"
+    assert tool.calls == 4
 
 
 def test_single_agent_executor_collects_usage_metadata() -> None:
