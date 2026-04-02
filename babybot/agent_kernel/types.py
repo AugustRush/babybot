@@ -42,8 +42,8 @@ class SystemPromptBuilder:
 
     Usage:
         builder = SystemPromptBuilder()
-        builder.add("identity", "你是 Worker。", priority=0)
-        builder.add("task", f"任务：{desc}", priority=10)
+        builder.add("identity", "You are a Worker agent.", priority=0)
+        builder.add("task", f"Task: {desc}", priority=10)
         builder.add("skills", catalog_text, priority=30)
         prompt_text = builder.build()
         sections = builder.sections  # for observability

@@ -460,7 +460,7 @@ class TeamRunner:
                             upstream_parts.append(dep_line)
                 if upstream_parts:
                     upstream_context = (
-                        "\n上游任务结果：\n" + "\n".join(upstream_parts) + "\n"
+                        "\nUpstream task results:\n" + "\n".join(upstream_parts) + "\n"
                     )
 
                 prompt_parts = [

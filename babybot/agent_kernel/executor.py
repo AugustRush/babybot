@@ -6,7 +6,7 @@ import json as _json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from .loop_guard import LoopGuard, LoopGuardConfig
 from .model import (
@@ -19,10 +19,50 @@ from .model import (
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import AgentEvent, ExecutionContext, TaskContract, TaskResult, ToolLease
-from ..context_views import build_context_view_messages
-from ..context import Entry, _estimate_token_count, _extract_keywords
+
+if TYPE_CHECKING:
+    from ..context import Entry
 
 logger = logging.getLogger(__name__)
+
+
+# ── Kernel-internal helpers (language-agnostic fallbacks) ────────────────────
+
+
+def _estimate_token_count(text: str) -> int:
+    """Cheap token-count estimate: ~3 characters per token."""
+    return max(1, len(str(text or "")) // 3)
+
+
+def _extract_keywords(text: str) -> list[str]:
+    """Very lightweight keyword extractor: unique words ≥ 3 chars."""
+    words = str(text or "").lower().split()
+    seen: set[str] = set()
+    result: list[str] = []
+    for w in words:
+        w = w.strip(".,!?;:\"'()[]{}，。！？；：")
+        if len(w) >= 3 and w not in seen:
+            seen.add(w)
+            result.append(w)
+    return result[:20]
+
+
+def _build_context_view_messages(
+    memory_store: Any,
+    chat_id: str,
+    query: str,
+) -> list[ModelMessage]:
+    """Delegate to application-layer context_views if available, else return []."""
+    try:
+        from ..context_views import build_context_view_messages  # type: ignore[import]
+
+        return build_context_view_messages(  # type: ignore[return-value]
+            memory_store=memory_store,
+            chat_id=chat_id,
+            query=query,
+        )
+    except Exception:
+        return []
 
 
 @dataclass
@@ -1082,17 +1122,19 @@ def _history_entry_text(entry: object) -> str:
         return f"{role}: {content}"
     if kind == "tool_result":
         name = str(payload.get("name", "") or "?")
-        status = "成功" if payload.get("ok") else "失败"
+        status = "ok" if payload.get("ok") else "failed"
         preview = str(payload.get("content_preview", "") or "").strip()
         artifacts = payload.get("artifacts") or []
         suffix = (
-            f"\n产物: {', '.join(str(item) for item in artifacts)}" if artifacts else ""
+            f"\nartifacts: {', '.join(str(item) for item in artifacts)}"
+            if artifacts
+            else ""
         )
-        return f"[工具结果][{status}] {name}: {preview}{suffix}".rstrip()
+        return f"[tool_result][{status}] {name}: {preview}{suffix}".rstrip()
     if kind == "tool_call":
         name = str(payload.get("name", "") or "?")
         arguments = payload.get("arguments", {})
-        return f"[工具调用] {name}: {_json.dumps(arguments, ensure_ascii=False)}"
+        return f"[tool_call] {name}: {_json.dumps(arguments, ensure_ascii=False)}"
     if kind == "event":
         event_name = str(payload.get("event", "") or "?")
         event_payload = payload.get("payload") or {}
@@ -1105,11 +1147,11 @@ def _history_entry_text(entry: object) -> str:
             if details_parts
             else _json.dumps(event_payload, ensure_ascii=False)
         )
-        return f"[运行事件] {event_name}: {details}"
+        return f"[event] {event_name}: {details}"
     if kind == "anchor":
         state = payload.get("state") or {}
         summary = state.get("summary", "") if isinstance(state, dict) else ""
-        return f"[历史摘要] {summary}".strip()
+        return f"[anchor_summary] {summary}".strip()
     return ""
 
 
@@ -1124,7 +1166,7 @@ def _build_history_messages(
 
     Three sections (all sharing token_budget):
     1. Anchor summary → system message
-    2. BM25 cross-anchor recall → [相关历史] system message
+    2. BM25 cross-anchor recall → [relevant_history] system message
     3. Recent entries since anchor → user/assistant messages
     """
     messages: list[ModelMessage] = []
@@ -1146,7 +1188,7 @@ def _build_history_messages(
                 if budget_remaining >= profile_cost:
                     messages.append(ModelMessage(role="system", content=profile_text))
                     budget_remaining -= profile_cost
-        memory_messages = build_context_view_messages(
+        memory_messages = _build_context_view_messages(
             memory_store=memory_store,
             chat_id=chat_id,
             query=query,
@@ -1163,30 +1205,32 @@ def _build_history_messages(
         state = anchor.payload.get("state", {})
         summary = state.get("summary", "") if isinstance(state, dict) else ""
         if summary:
-            parts = [f"[对话背景]\n{summary}"]
+            parts = [f"[conversation_context]\n{summary}"]
             entities = state.get("entities")
             if entities and isinstance(entities, list):
-                parts.append(f"关键实体: {', '.join(entities)}")
+                parts.append(f"key_entities: {', '.join(entities)}")
             intent = state.get("user_intent")
             if intent:
-                parts.append(f"用户意图: {intent}")
+                parts.append(f"user_intent: {intent}")
             pending = state.get("pending")
             if pending:
-                parts.append(f"待办: {pending}")
+                parts.append(f"pending: {pending}")
             next_steps = state.get("next_steps")
             if next_steps and isinstance(next_steps, list):
-                parts.append(f"下一步: {', '.join(str(item) for item in next_steps)}")
+                parts.append(
+                    f"next_steps: {', '.join(str(item) for item in next_steps)}"
+                )
             open_questions = state.get("open_questions")
             if open_questions and isinstance(open_questions, list):
                 parts.append(
-                    f"待确认: {', '.join(str(item) for item in open_questions)}"
+                    f"open_questions: {', '.join(str(item) for item in open_questions)}"
                 )
             decisions = state.get("decisions")
             if decisions and isinstance(decisions, list):
-                parts.append(f"已确认: {', '.join(str(item) for item in decisions)}")
+                parts.append(f"decisions: {', '.join(str(item) for item in decisions)}")
             artifacts = state.get("artifacts")
             if artifacts and isinstance(artifacts, list):
-                parts.append(f"产物: {', '.join(str(item) for item in artifacts)}")
+                parts.append(f"artifacts: {', '.join(str(item) for item in artifacts)}")
             anchor_text = "\n".join(parts)
             anchor_cost = len(anchor_text) // 3
             if budget_remaining >= anchor_cost:
@@ -1232,7 +1276,7 @@ def _build_history_messages(
                 messages.append(
                     ModelMessage(
                         role="system",
-                        content="[相关历史]\n" + "\n".join(recall_lines),
+                        content="[relevant_history]\n" + "\n".join(recall_lines),
                     )
                 )
                 budget_remaining -= recall_tokens
@@ -1260,7 +1304,7 @@ def _build_history_messages(
             messages.append(
                 ModelMessage(
                     role="system",
-                    content="[近期执行状态]\n" + "\n".join(state_lines),
+                    content="[recent_execution_state]\n" + "\n".join(state_lines),
                 )
             )
             budget_remaining -= state_tokens

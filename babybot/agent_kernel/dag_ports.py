@@ -14,7 +14,6 @@ from .types import (
     TaskResult,
     ToolLease,
 )
-from ..context_views import summarize_context_view
 
 if TYPE_CHECKING:
     from ..context import Tape
@@ -22,6 +21,27 @@ if TYPE_CHECKING:
     from ..resource import ResourceManager
 
 logger = logging.getLogger(__name__)
+
+
+def _summarize_context_view(
+    memory_store: Any,
+    chat_id: str,
+    query: str,
+) -> str:
+    """Delegate to application-layer summarize_context_view if available."""
+    try:
+        from ..context_views import summarize_context_view  # type: ignore[import]
+
+        return str(
+            summarize_context_view(  # type: ignore[return-value]
+                memory_store=memory_store,
+                chat_id=chat_id,
+                query=query,
+            )
+            or ""
+        )
+    except Exception:
+        return ""
 
 
 # ── Shared utilities ─────────────────────────────────────────────────────
@@ -49,7 +69,7 @@ def build_history_summary(
             assistant_profile = str(load_assistant_profile() or "").strip()
             if assistant_profile:
                 parts.append("[Assistant Profile]\n" + assistant_profile)
-        memory_summary = summarize_context_view(
+        memory_summary = _summarize_context_view(
             memory_store=memory_store,
             chat_id=chat_id,
             query=query,
@@ -63,13 +83,13 @@ def build_history_summary(
         state = anchor.payload.get("state") or {}
         summary = state.get("summary", "")
         if summary:
-            parts.append(f"对话摘要: {summary}")
+            parts.append(f"conversation_summary: {summary}")
         intent = state.get("user_intent", "")
         if intent:
-            parts.append(f"用户意图: {intent}")
+            parts.append(f"user_intent: {intent}")
         pending = state.get("pending", "")
         if pending:
-            parts.append(f"待办: {pending}")
+            parts.append(f"pending: {pending}")
 
     # 2. Recent conversation entries (not yet compacted)
     recent = tape.entries_since_anchor()
@@ -89,7 +109,7 @@ def build_history_summary(
         if recent_lines:
             # Keep at most the last 10 messages to bound prompt size
             trimmed = recent_lines[-10:]
-            parts.append("近期对话:\n" + "\n".join(trimmed))
+            parts.append("recent_conversation:\n" + "\n".join(trimmed))
 
     return "\n".join(parts)
 
@@ -131,12 +151,14 @@ class ResourceBridgeExecutor:
         if not lines:
             return ""
         return (
-            "\n\n你具备以下能力（用户询问时可介绍）：\n"
+            "\n\nYou have access to the following capabilities:\n"
             + "\n".join(lines)
-            + "\n当前对话不需要使用这些工具，直接回答即可。"
+            + "\nYou do not need to use these tools for this request; answer directly."
         )
 
-    async def execute(self, task: TaskContract, context: ExecutionContext) -> TaskResult:
+    async def execute(
+        self, task: TaskContract, context: ExecutionContext
+    ) -> TaskResult:
         # Fast path: direct answer (no tools)
         if task.metadata.get("direct_answer"):
             goal = task.description
@@ -148,26 +170,40 @@ class ResourceBridgeExecutor:
             memory_store = context.state.get("memory_store")
             history_budget = context.state.get("context_history_tokens", 2000)
 
-            base_prompt = "你是高效助手。简洁准确地回答用户问题。不虚构工具执行结果。如需外部信息必须明确指出。"
+            base_prompt = (
+                "You are a helpful assistant. Answer concisely and accurately. "
+                "Do not fabricate tool results. "
+                "If external information is needed, state so explicitly."
+            )
             capability_summary = self._build_capability_summary()
 
             messages: list[ModelMessage] = []
-            messages.append(ModelMessage(
-                role="system",
-                content=base_prompt + capability_summary,
-            ))
+            messages.append(
+                ModelMessage(
+                    role="system",
+                    content=base_prompt + capability_summary,
+                )
+            )
 
             # Reuse executor.py's 3-section context builder
             if tape is not None:
-                messages.extend(_build_history_messages(
-                    tape, history_budget, query=goal, tape_store=tape_store, memory_store=memory_store,
-                ))
+                messages.extend(
+                    _build_history_messages(
+                        tape,
+                        history_budget,
+                        query=goal,
+                        tape_store=tape_store,
+                        memory_store=memory_store,
+                    )
+                )
 
-            messages.append(ModelMessage(
-                role="user",
-                content=goal,
-                images=tuple(media_paths),
-            ))
+            messages.append(
+                ModelMessage(
+                    role="user",
+                    content=goal,
+                    images=tuple(media_paths),
+                )
+            )
 
             answer = await self._gateway.complete_messages(
                 messages,
@@ -221,7 +257,9 @@ class ResourceBridgeExecutor:
             "media_paths": media_paths,
             "skill_ids": list(skill_ids),
         }
-        if memory_store is not None and _supports_kwarg(run_subagent_task, "memory_store"):
+        if memory_store is not None and _supports_kwarg(
+            run_subagent_task, "memory_store"
+        ):
             kwargs["memory_store"] = memory_store
 
         try:
@@ -246,26 +284,23 @@ class ResourceBridgeExecutor:
 
     @staticmethod
     def _enrich_with_upstream(task: TaskContract, context: ExecutionContext) -> str:
-        """Append runtime context needed by downstream scheduler-style tasks."""
-        upstream = task.metadata.get("upstream_results") or context.state.get("upstream_results", {})
-        resource_id = str(task.metadata.get("resource_id", "") or "")
+        """Append runtime context needed by downstream tasks."""
+        upstream = task.metadata.get("upstream_results") or context.state.get(
+            "upstream_results", {}
+        )
         original_goal = str(context.state.get("original_goal", "") or "").strip()
         parts = [task.description]
         enriched = False
 
-        if (
-            resource_id == "group.scheduler"
-            and original_goal
-            and original_goal != task.description.strip()
-        ):
-            parts.append("\n\n--- 原始用户请求 ---")
+        if original_goal and original_goal != task.description.strip():
+            parts.append("\n\n--- original_request ---")
             parts.append(original_goal)
             enriched = True
 
         if not task.deps or not upstream:
             return "\n".join(parts) if enriched else task.description
 
-        parts.append("\n\n--- 上游任务结果 ---")
+        parts.append("\n\n--- upstream_results ---")
         for dep_id in task.deps:
             result = upstream.get(dep_id)
             if result:

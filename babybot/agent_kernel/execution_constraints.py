@@ -8,7 +8,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..orchestration_router import is_trivial_social_message
+
+def _is_trivial_social_message(text: str) -> bool:
+    """Lazy-delegate to application-layer router, with a safe fallback."""
+    try:
+        from ..orchestration_router import is_trivial_social_message  # type: ignore[import]
+
+        return bool(is_trivial_social_message(text))
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -316,7 +324,7 @@ def infer_execution_constraints_from_text(
         default_max_total_seconds=default_max_total_seconds
     )
     goal = str(text or "").strip()
-    if not goal or is_trivial_social_message(goal):
+    if not goal or _is_trivial_social_message(goal):
         return defaults
 
     hard_limits = _infer_hard_limits(goal)
@@ -436,18 +444,25 @@ def build_execution_constraint_hints(constraints: Any) -> list[str]:
     hints: list[str] = []
     if hard_limits.get("max_rounds") is not None:
         hints.append(
-            f"若选择多Agent讨论，最大讨论轮数不得超过 {int(hard_limits['max_rounds'])} 轮。"
+            f"If multi-agent discussion is chosen, the maximum number of rounds must not exceed {int(hard_limits['max_rounds'])}."
         )
     if hard_limits.get("max_total_seconds") is not None:
         hints.append(
-            f"整体执行预算约为 {int(float(hard_limits['max_total_seconds']))} 秒，预算不足时应优先总结已有结果。"
+            f"The overall execution budget is approximately {int(float(hard_limits['max_total_seconds']))} seconds; "
+            "when budget is low, prioritize summarizing existing results."
         )
     if soft_preferences.get("resolution_style") == "single_pass":
-        hints.append("用户偏好单轮收敛，避免默认扩展为多轮辩论。")
+        hints.append(
+            "User prefers single-pass resolution; avoid expanding into multi-round debate by default."
+        )
     elif soft_preferences.get("resolution_style") == "fast_consensus":
-        hints.append("用户偏好快速收敛，优先给出结论而不是展开冗长讨论。")
+        hints.append(
+            "User prefers fast convergence; lead with conclusions rather than lengthy discussion."
+        )
     elif soft_preferences.get("resolution_style") == "thorough":
-        hints.append("用户偏好充分讨论，可以在预算内适度展开论证。")
+        hints.append(
+            "User prefers thorough discussion; expand reasoning within the available budget."
+        )
     return hints
 
 
