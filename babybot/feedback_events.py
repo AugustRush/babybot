@@ -72,12 +72,12 @@ def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
     stage = str(payload.get("stage", "") or "").strip() or (
         "job" if job_id and not task_id else "task"
     )
-    message = str(
-        payload.get("message", "")
-        or payload.get("description", "")
-        or payload.get("status", "")
-        or ""
-    ).strip()
+    # Use only "message" or "status" — never "description", which may contain
+    # the full task system-prompt and must not be shown to end users.
+    message = str(payload.get("message", "") or payload.get("status", "") or "").strip()
+    # Truncate to avoid leaking unexpectedly long internal strings.
+    if len(message) > 200:
+        message = message[:200] + "…"
     error = str(payload.get("error", "") or "").strip()
     progress = payload.get("progress")
     if isinstance(progress, (int, float)):

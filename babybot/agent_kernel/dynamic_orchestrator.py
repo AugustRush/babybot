@@ -986,9 +986,8 @@ class InProcessChildTaskRuntime:
                                 event="succeeded",
                                 payload=self._event_payload(
                                     resource_id=primary_resource_id,
-                                    description=description,
+                                    message=f"任务 {task_id} 已完成",
                                     status=result.status,
-                                    output=result.output,
                                     error=result.error,
                                 ),
                             )
@@ -1055,7 +1054,7 @@ class InProcessChildTaskRuntime:
                             event="dead_lettered",
                             payload=self._event_payload(
                                 resource_id=primary_resource_id,
-                                description=description,
+                                message=f"任务 {task_id} 失败",
                                 status=final_result.status,
                                 error=final_result.error,
                                 attempts=final_result.attempts,
