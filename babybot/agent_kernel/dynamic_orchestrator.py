@@ -22,6 +22,7 @@ from .execution_constraints import (
     normalize_execution_constraints,
 )
 from .model import ModelMessage, ModelRequest, ModelResponse, ModelToolCall
+from .orchestrator_config import OrchestratorConfig
 from .types import ExecutionContext, FinalResult, TaskContract, TaskResult, ToolLease
 
 if TYPE_CHECKING:
@@ -41,34 +42,34 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "function": {
             "name": "dispatch_task",
             "description": (
-                "创建一个子Agent任务并立即返回 task_id（非阻塞）。"
-                "子Agent将使用指定资源执行任务。"
+                "Create a sub-agent task and immediately return a task_id (non-blocking). "
+                "The sub-agent will execute the task using the specified resource(s)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "resource_id": {
                         "type": "string",
-                        "description": "单个资源ID，必须来自可用资源列表",
+                        "description": "Single resource ID from the available-resources list.",
                     },
                     "resource_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "当一个子任务需要多种能力时，传入多个资源ID并合并使用",
+                        "description": "Multiple resource IDs when a sub-task needs combined capabilities.",
                     },
                     "description": {
                         "type": "string",
-                        "description": "子任务的完整描述",
+                        "description": "Full description of the sub-task.",
                     },
                     "deps": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "依赖的 task_id 列表，这些任务必须先完成",
+                        "description": "List of task_ids that must complete before this task starts.",
                         "default": [],
                     },
                     "timeout_s": {
                         "type": "number",
-                        "description": "子任务超时时间（秒）。未提供时使用运行时默认超时。",
+                        "description": "Sub-task timeout in seconds. Omit to use the runtime default.",
                     },
                 },
                 "required": ["description"],
@@ -80,8 +81,8 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "function": {
             "name": "wait_for_tasks",
             "description": (
-                "等待指定任务完成并返回 JSON 结果映射（阻塞直到全部完成）。"
-                "每个任务结果都包含 status/output/error，以及 reply_artifacts_ready 等字段。"
+                "Block until all specified tasks complete and return a JSON result map. "
+                "Each result contains status/output/error and reply_artifacts_ready."
             ),
             "parameters": {
                 "type": "object",
@@ -89,7 +90,7 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                     "task_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "要等待的 task_id 列表",
+                        "description": "List of task_ids to wait for.",
                     },
                 },
                 "required": ["task_ids"],
@@ -101,15 +102,15 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "function": {
             "name": "get_task_result",
             "description": (
-                "查询任务当前状态和结果（非阻塞，返回 JSON 对象）。"
-                "结果包含 status/output/error，以及 reply_artifacts_ready 等字段。"
+                "Query the current status and result of a task (non-blocking, returns JSON). "
+                "Result contains status/output/error and reply_artifacts_ready."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task_id": {
                         "type": "string",
-                        "description": "要查询的 task_id",
+                        "description": "The task_id to query.",
                     },
                 },
                 "required": ["task_id"],
@@ -121,16 +122,16 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "function": {
             "name": "reply_to_user",
             "description": (
-                "向用户发送最终回复。调用后编排循环结束。"
-                "此工具应作为最后一个工具调用单独使用，不与其他工具混用。"
-                "宿主会自动附带当前已收集的产物/附件到最终回复，无需再创建专门的发送子任务。"
+                "Send the final reply to the user. The orchestration loop ends after this call. "
+                "This tool must be called alone as the last action. "
+                "The runtime will automatically attach any collected artifacts to the reply."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "回复给用户的文本内容",
+                        "description": "The text content to send to the user.",
                     },
                 },
                 "required": ["text"],
@@ -142,17 +143,17 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "function": {
             "name": "dispatch_team",
             "description": (
-                "启动一组Agent进行协作。支持两种模式：\n"
-                "- debate（默认）：多轮辩论/评审/头脑风暴，Agent交替发言。\n"
-                "- cooperative：任务分工协作，Agent从共享任务列表中领取任务并行执行，"
-                "通过Mailbox广播结果给下游依赖。适用于可拆分为多个子任务的复杂工作。"
+                "Launch a group of agents for collaborative work. Supports two modes:\n"
+                "- debate (default): multi-round debate/review/brainstorm with agents taking turns.\n"
+                "- cooperative: parallel task execution where agents pick tasks from a shared list "
+                "and broadcast results to downstream dependents."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "topic": {
                         "type": "string",
-                        "description": "协作主题/高层目标描述",
+                        "description": "Collaboration topic / high-level goal.",
                     },
                     "agents": {
                         "type": "array",
@@ -164,29 +165,29 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                                 "description": {"type": "string"},
                                 "resource_id": {
                                     "type": "string",
-                                    "description": "可选：指定该Agent使用的资源ID",
+                                    "description": "Optional: resource ID for this agent.",
                                 },
                                 "skill_id": {
                                     "type": "string",
-                                    "description": "可选：引用预定义的 skill name，自动继承其 role/description/prompt",
+                                    "description": "Optional: skill name whose role/description/prompt will be inherited.",
                                 },
                             },
                             "required": ["id", "role", "description"],
                         },
-                        "description": "参与协作的Agent列表，至少2个",
+                        "description": "Agents participating in the collaboration (at least 2).",
                     },
                     "mode": {
                         "type": "string",
                         "enum": ["debate", "cooperative"],
                         "description": (
-                            "协作模式。debate=多轮辩论（默认），"
-                            "cooperative=任务分工（需配合 tasks 参数）"
+                            "Collaboration mode. debate=multi-round discussion (default), "
+                            "cooperative=parallel task execution (requires tasks parameter)."
                         ),
                         "default": "debate",
                     },
                     "max_rounds": {
                         "type": "integer",
-                        "description": "debate模式下的最大讨论轮数，默认5",
+                        "description": "Maximum discussion rounds in debate mode (default 5).",
                     },
                     "tasks": {
                         "type": "array",
@@ -195,24 +196,24 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                             "properties": {
                                 "task_id": {
                                     "type": "string",
-                                    "description": "任务唯一标识",
+                                    "description": "Unique task identifier.",
                                 },
                                 "description": {
                                     "type": "string",
-                                    "description": "任务描述",
+                                    "description": "Task description.",
                                 },
                                 "deps": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "description": "依赖的 task_id 列表",
+                                    "description": "List of task_ids this task depends on.",
                                     "default": [],
                                 },
                             },
                             "required": ["task_id", "description"],
                         },
                         "description": (
-                            "cooperative模式下的任务列表。每个任务可声明依赖(deps)，"
-                            "Agent会自动领取可执行的任务并广播结果。"
+                            "Task list for cooperative mode. Each task may declare deps; "
+                            "agents will automatically pick up available tasks and broadcast results."
                         ),
                     },
                 },
@@ -225,56 +226,36 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
 _ORCHESTRATION_TOOL_BY_NAME: dict[str, dict[str, Any]] = {
     tool["function"]["name"]: tool for tool in _ORCHESTRATION_TOOLS
 }
+# NOTE: _ORCHESTRATION_TOOL_BY_NAME is kept for backward compatibility with any
+# external callers. Internally DynamicOrchestrator uses self._orchestration_tools.
 
 
 # ── System prompt builder ────────────────────────────────────────────────
 
+# Minimal language-agnostic fallback used when no OrchestratorConfig is
+# injected.  Application-specific content belongs in OrchestratorConfig
+# (supplied by the application layer, e.g. orchestrator_prompts.py).
 _SYSTEM_PROMPT_ROLE = (
-    "你是任务编排Agent，负责在最少步骤内调度子Agent完成任务并回复用户。\n\n"
-    "核心规则：\n"
-    "1. 简单问题直接 reply_to_user；需要外部能力时才 dispatch_task。\n"
-    "2. 并行任务不要设 deps；有依赖的任务必须显式声明 deps。\n"
-    "3. reply_to_user 必须单独调用且作为收尾；不能与其他工具混用。\n"
-    "4. 禁止虚构结果；用户明确表达的执行限制与偏好必须优先遵守。\n"
-    "5. 多资源任务优先在一次 dispatch_task 中用 resource_ids 组合能力；查看网页/仓库后创建或更新技能时，不要靠 create_worker 套娃补能力。\n"
-    "6. 需要多Agent协作讨论、辩论、评审或头脑风暴时，使用 dispatch_team（debate模式）。\n"
-    "7. 需要多Agent并行分工执行可拆分的复杂任务时，使用 dispatch_team（cooperative模式，需提供tasks列表）。\n"
-    "8. 【发消息/通知用户/告知用户/发送报告】等动作无需子任务；reply_to_user 的内容即是发送给用户的消息，系统会自动投递到对应渠道。\n"
-    "\n\n执行阶段协议：\n"
-    "按以下四阶段有序推进，不允许跨阶段跳跃或在错误阶段执行动作：\n"
-    "  [Research]     — 信息收集：仅读取、搜索、获取外部数据，不做修改或写入。\n"
-    "  [Synthesis]    — 分析综合：基于 Research 阶段结果制定具体方案，不执行任何写入。\n"
-    "  [Implementation] — 执行：按 Synthesis 方案执行写入、调用、修改等动作。\n"
-    "  [Verification] — 验证：检查执行结果，与目标对比，发现问题则局部补救，完成后 reply_to_user。\n"
-    "- 简单任务（直接问答、无外部调用）可省略 Research/Synthesis/Verification，直接 reply_to_user。\n"
-    "- 每阶段的子任务描述中必须标注所在阶段，例如：[Research] 搜索相关文档。\n"
-    "\n\n任务结果协议：\n"
-    "- wait_for_tasks / get_task_result 返回 JSON，不是自由文本。\n"
-    "- 当结果中的 reply_artifacts_ready=true 时，表示子任务已经产出可随最终回复自动附带给用户的附件/媒体。\n"
-    "- 出现 reply_artifacts_ready=true 后，不要再创建专门的发送子任务；直接调用 reply_to_user 收尾。"
+    "You are an orchestration agent. "
+    "Dispatch sub-tasks to available resources and reply to the user when done."
 )
 
-_DEFERRED_TASK_PATTERNS = (
-    "两分钟后",
-    "一分钟后",
-    "稍后",
-    "待会",
-    "过会",
-    "定时",
-    "预约",
-    "提醒我",
-    "之后再",
-)
+# Empty by default — patterns are supplied via OrchestratorConfig.
+_DEFERRED_TASK_PATTERNS: tuple[str, ...] = ()
 
-_DEFERRED_TASK_GUIDANCE = (
-    "\n\n延时/未来任务规则：\n"
-    "7. 如果用户要求稍后、几分钟后、定时或未来某个时间执行动作，当前只应创建/更新定时任务，不要立刻执行未来动作。\n"
-    "8. 未来一次性任务的描述必须自包含，写入定时任务时要包含届时需要完成的完整步骤，不能依赖当前这次对话还保存在上下文中。\n"
-    "9. 定时任务若目标是【发送消息/推送通知/告知用户】，任务描述应写明需要回复的具体内容，届时直接 reply_to_user 即可，无需为发送行为创建子任务。"
-)
+_DEFERRED_TASK_GUIDANCE = ""
+
+# Default NLU token lists — empty by design (language-agnostic fallback).
+# Override via OrchestratorConfig.multi_step_tokens / parallel_tokens.
+_MULTI_STEP_TOKENS: tuple[str, ...] = ()
+_PARALLEL_TOKENS: tuple[str, ...] = ()
 
 
-def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
+def _build_resource_catalog(
+    briefs: list[dict[str, Any]],
+    config: OrchestratorConfig | None = None,
+) -> str:
+    cfg = config or OrchestratorConfig()
     lines: list[str] = []
     for b in briefs:
         if b.get("active"):
@@ -288,16 +269,31 @@ def _build_resource_catalog(briefs: list[dict[str, Any]]) -> str:
                 if resource_type in {"mcp", "skill"}
                 else ", ".join(b.get("tools_preview") or [])
             )
-            preview_text = f"; 示例工具: {preview}" if preview else ""
-            lines.append(f"- {rid}: {name} — {purpose} (工具数: {tc}{preview_text})")
+            preview_text = (
+                (cfg.resource_catalog_preview_prefix + preview) if preview else ""
+            )
+            lines.append(
+                cfg.resource_catalog_line.format(
+                    rid=rid,
+                    name=name,
+                    purpose=purpose,
+                    tc=tc,
+                    preview_text=preview_text,
+                )
+            )
     if not lines:
-        return "\n可用资源：无"
-    return "\n可用资源：\n" + "\n".join(lines)
+        return cfg.resource_catalog_empty
+    return cfg.resource_catalog_header + "\n".join(lines)
 
 
-def _needs_deferred_task_guidance(goal: str) -> bool:
+def _needs_deferred_task_guidance(
+    goal: str, config: OrchestratorConfig | None = None
+) -> bool:
     lowered = (goal or "").strip()
-    return any(pattern in lowered for pattern in _DEFERRED_TASK_PATTERNS)
+    patterns = (
+        config.deferred_task_patterns if config else None
+    ) or _DEFERRED_TASK_PATTERNS
+    return any(pattern in lowered for pattern in patterns)
 
 
 def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
@@ -313,36 +309,22 @@ def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(resource_ids))
 
 
-def _looks_like_repo_or_skill_maintenance(text: str) -> bool:
-    normalized = str(text or "").strip().lower()
-    if not normalized:
-        return False
-    markers = (
-        "查漏补缺",
-        "补齐",
-        "对比",
-        "比较",
-        "同步",
-        "skill.md",
-        "skill 文档",
-        "github",
-        "仓库",
-        "repo",
-        "文档",
-        "技能",
-    )
-    return any(marker in normalized for marker in markers)
-
-
-def _provider_policy_hints(resource_manager: "ResourceManager", goal: str) -> list[str]:
+def _provider_policy_hints(
+    resource_manager: "ResourceManager",
+    goal: str,
+    config: OrchestratorConfig | None = None,
+) -> list[str]:
     provider = getattr(resource_manager, "_observability_provider", None)
     if provider is None:
         return []
+    cfg = config or OrchestratorConfig()
     text = str(goal or "").strip()
     build_features = getattr(provider, "_build_policy_state_features", None)
+    multi_step_tokens = cfg.multi_step_tokens or _MULTI_STEP_TOKENS
+    parallel_tokens = cfg.parallel_tokens or _PARALLEL_TOKENS
     features: dict[str, Any] = {
         "task_shape": "multi_step"
-        if any(token in text for token in ("然后", "再", "并且", "同时", "先"))
+        if any(token in text for token in multi_step_tokens)
         else "single_step",
         "input_length": len(text),
     }
@@ -353,7 +335,7 @@ def _provider_policy_hints(resource_manager: "ResourceManager", goal: str) -> li
         if result:
             features.update(result)
     independent_subtasks = 1
-    for token in ("同时", "分别", "并行", "并且"):
+    for token in parallel_tokens:
         independent_subtasks += text.count(token)
     features["independent_subtasks"] = max(1, independent_subtasks)
     hints: list[str] = []
@@ -988,7 +970,7 @@ class InProcessChildTaskRuntime:
                                 event="succeeded",
                                 payload=self._event_payload(
                                     resource_id=primary_resource_id,
-                                    message=f"任务 {task_id} 已完成",
+                                    message=f"task {task_id} succeeded",
                                     status=result.status,
                                     error=result.error,
                                 ),
@@ -1056,7 +1038,7 @@ class InProcessChildTaskRuntime:
                             event="dead_lettered",
                             payload=self._event_payload(
                                 resource_id=primary_resource_id,
-                                message=f"任务 {task_id} 失败",
+                                message=f"task {task_id} failed",
                                 status=final_result.status,
                                 error=final_result.error,
                                 attempts=final_result.attempts,
@@ -1278,6 +1260,7 @@ class DynamicOrchestrator:
         max_steps: int | None = None,
         default_task_timeout_s: float | None = 300.0,
         executor_registry: "ExecutorPort | None" = None,
+        config: OrchestratorConfig | None = None,
     ) -> None:
         from ..heartbeat import TaskHeartbeatRegistry
 
@@ -1294,6 +1277,8 @@ class DynamicOrchestrator:
         self._default_task_timeout_s = default_task_timeout_s
         self._resource_catalog_cache_key: tuple[str, ...] | None = None
         self._resource_catalog_cache_value = ""
+        self._config = config or OrchestratorConfig()
+        self._orchestration_tools = self._build_orchestration_tools()
 
     @property
     def _executor(self) -> ExecutorPort:
@@ -1301,6 +1286,41 @@ class DynamicOrchestrator:
         if self._executor_registry is not None:
             return self._executor_registry
         return self._bridge
+
+    def _build_orchestration_tools(self) -> tuple[dict[str, Any], ...]:
+        """Merge config-supplied descriptions into the static tool schemas."""
+        cfg = self._config
+        td = cfg.tool_descriptions
+        pd = cfg.tool_param_descriptions
+
+        def _desc(tool_name: str, fallback: str) -> str:
+            return td.get(tool_name) or fallback
+
+        def _pdesc(tool_name: str, param: str, fallback: str) -> str:
+            return (pd.get(tool_name) or {}).get(param) or fallback
+
+        tools = list(_ORCHESTRATION_TOOLS)
+        result: list[dict[str, Any]] = []
+        for tool in tools:
+            fn = tool["function"]
+            name = fn["name"]
+            patched_fn: dict[str, Any] = dict(fn)
+            patched_fn["description"] = _desc(name, fn.get("description", ""))
+            # Patch parameter descriptions if provided
+            orig_params: dict[str, Any] = fn.get("parameters", {})
+            if pd.get(name):
+                patched_props = {}
+                for pname, pschema in orig_params.get("properties", {}).items():
+                    patched_prop = dict(pschema)
+                    override = _pdesc(name, pname, "")
+                    if override:
+                        patched_prop["description"] = override
+                    patched_props[pname] = patched_prop
+                patched_params = dict(orig_params)
+                patched_params["properties"] = patched_props
+                patched_fn["parameters"] = patched_params
+            result.append({"type": "function", "function": patched_fn})
+        return tuple(result)
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
@@ -1461,7 +1481,7 @@ class DynamicOrchestrator:
             for item in (context.state.get("policy_hints") or ())
             if str(item).strip()
         ]
-        policy_hints.extend(_provider_policy_hints(self._rm, goal))
+        policy_hints.extend(_provider_policy_hints(self._rm, goal, self._config))
         deduped_policy_hints: list[str] = []
         for hint in policy_hints:
             if hint and hint not in deduped_policy_hints:
@@ -1472,13 +1492,19 @@ class DynamicOrchestrator:
             deduped_policy_hints = deduped_policy_hints[:_MAX_POLICY_HINTS]
         context.state["policy_hints"] = tuple(deduped_policy_hints)
 
-        system_parts = [_SYSTEM_PROMPT_ROLE, self._resource_catalog_text(briefs)]
-        if _needs_deferred_task_guidance(goal):
-            system_parts.insert(1, _DEFERRED_TASK_GUIDANCE)
+        system_parts = [
+            self._config.system_prompt or _SYSTEM_PROMPT_ROLE,
+            self._resource_catalog_text(briefs),
+        ]
+        if _needs_deferred_task_guidance(goal, self._config):
+            system_parts.insert(
+                1, self._config.deferred_task_guidance or _DEFERRED_TASK_GUIDANCE
+            )
         if history:
             system_parts.append(f"\n{history}")
         if deduped_policy_hints:
-            system_parts.append("\n策略建议：\n- " + "\n- ".join(deduped_policy_hints))
+            header = self._config.policy_hints_header or "\nPolicy hints:\n- "
+            system_parts.append(header + "\n- ".join(deduped_policy_hints))
 
         # execution_constraints is dynamic and request-scoped — inject it as a
         # dedicated context block immediately before the user message so it is
@@ -1489,7 +1515,15 @@ class DynamicOrchestrator:
             constraints_text = format_execution_constraints_for_prompt(
                 execution_constraints
             )
-            user_context_prefix = f"[执行约束]\n{constraints_text}\n\n[用户请求]\n"
+            wrapper = self._config.execution_constraints_wrapper
+            if wrapper and "{constraints}" in wrapper and "{goal}" in wrapper:
+                user_context_prefix = wrapper.split("{goal}")[0].replace(
+                    "{constraints}", constraints_text
+                )
+            else:
+                user_context_prefix = (
+                    f"[Constraints]\n{constraints_text}\n\n[Request]\n"
+                )
 
         return [
             ModelMessage(role="system", content="\n".join(system_parts)),
@@ -1506,7 +1540,9 @@ class DynamicOrchestrator:
         )
         if cache_key != self._resource_catalog_cache_key:
             self._resource_catalog_cache_key = cache_key
-            self._resource_catalog_cache_value = _build_resource_catalog(briefs)
+            self._resource_catalog_cache_value = _build_resource_catalog(
+                briefs, self._config
+            )
         return self._resource_catalog_cache_value
 
     def _normalize_child_task_description(
@@ -1520,67 +1556,38 @@ class DynamicOrchestrator:
         raw_description = str(description or "").strip()
         if not raw_description:
             return raw_description
-        if "[执行型子任务]" in raw_description:
+
+        # If a sentinel is configured and already present, skip normalisation.
+        sentinel = self._config.child_task_sentinel
+        if sentinel and sentinel in raw_description:
+            return raw_description
+
+        # Delegate to injected builder if provided.
+        builder = self._config.build_child_task_prompt
+        if builder is None:
             return raw_description
 
         original_goal = str(context.state.get("original_goal", "") or "").strip()
-        resource_summary = ", ".join(resource_ids) if resource_ids else "-"
-        maintenance_like = _looks_like_repo_or_skill_maintenance(
-            f"{raw_description}\n{original_goal}"
-        )
 
-        # Build upstream results section — only include successful outputs from dep tasks.
-        upstream_lines: list[str] = []
+        # Build a plain upstream dict: tid -> output str (successful only)
+        upstream_outputs: dict[str, Any] = {}
         if upstream_results:
             for tid, result in upstream_results.items():
                 output_snippet = str(result.output or "").strip()
                 if output_snippet:
-                    # Truncate to 300 chars to avoid prompt bloat.
-                    truncated = output_snippet[:300] + (
-                        "…" if len(output_snippet) > 300 else ""
-                    )
-                    upstream_lines.append(f"  [{tid}]: {truncated}")
-        upstream_section: list[str] = []
-        if upstream_lines:
-            upstream_section = [
-                "- upstream_results (上游依赖任务的输出摘要):"
-            ] + upstream_lines
+                    upstream_outputs[tid] = output_snippet
 
-        expected_output_lines = [
-            "- 返回当前子任务的执行结果摘要。",
-            "- 如无法继续，明确说明缺少的输入、目标路径或阻塞原因。",
-        ]
-        done_when_lines = [
-            "- 已完成当前子任务说明中的单一目标，或已明确指出无法继续的原因。",
-            "- 不再需要额外派生任务或向用户追问即可交回主 agent。",
-        ]
-        if maintenance_like:
-            expected_output_lines.insert(
-                1, "- 若存在差异，列出差异项、证据和建议动作。"
+        try:
+            built = builder(
+                raw_description=raw_description,
+                original_goal=original_goal,
+                resource_ids=resource_ids,
+                upstream_results=upstream_outputs,
             )
-            done_when_lines.insert(
-                1, "- 已确认明确的目标文件；若无法确认，立即停止并返回缺口。"
-            )
-
-        lines = [
-            "[执行型子任务]",
-            "你是执行型子任务，不是任务编排器，也不是最终回复器。",
-            f"原始子任务：{raw_description}",
-            "[输入]",
-            f"- parent_goal: {original_goal or '-'}",
-            f"- resource_ids: {resource_summary}",
-            *upstream_section,
-            "[预期输出]",
-            *expected_output_lines,
-            "[完成条件]",
-            *done_when_lines,
-            "[禁止事项]",
-            "- 不要创建或派生新的 worker。",
-            "- 不要进入 team、讨论、评审或新的编排流程。",
-            "- 不要直接向用户发送消息。",
-            "- 不要在无明确目标时持续进行大范围扫描或无边界探索。",
-        ]
-        return "\n".join(lines)
+        except Exception:
+            logger.exception("build_child_task_prompt raised; using raw description")
+            return raw_description
+        return built if built else raw_description
 
     @staticmethod
     def _prune_stale_wait_history(messages: list[ModelMessage]) -> list[ModelMessage]:
@@ -1715,13 +1722,10 @@ class DynamicOrchestrator:
             task_contract = context.state.get("task_contract")
             allowed = tuple(getattr(task_contract, "allowed_tools", ()) or ())
         if not allowed:
-            return _ORCHESTRATION_TOOLS
-        filtered = tuple(
-            _ORCHESTRATION_TOOL_BY_NAME[name]
-            for name in allowed
-            if name in _ORCHESTRATION_TOOL_BY_NAME
-        )
-        return filtered or _ORCHESTRATION_TOOLS
+            return self._orchestration_tools
+        tool_by_name = {t["function"]["name"]: t for t in self._orchestration_tools}
+        filtered = tuple(tool_by_name[name] for name in allowed if name in tool_by_name)
+        return filtered or self._orchestration_tools
 
     async def _dispatch_tool(
         self,
@@ -1835,14 +1839,12 @@ class DynamicOrchestrator:
                     ", ".join(dead_ids),
                     errors,
                 )
-                dead_reminder = (
-                    "[SYSTEM NOTICE] 所有子任务均已失败，没有任何成功的执行结果。\n"
-                    f"失败任务: {', '.join(dead_ids)}\n"
-                    f"错误摘要: {errors}\n"
-                    "你必须如实向用户报告任务失败及原因，禁止虚构或推断未执行的结果。"
+                dead_reminder = self._config.all_tasks_failed_reminder.format(
+                    dead_ids=", ".join(dead_ids),
+                    errors=errors,
                 )
                 user_text = args.get("text", "")
-                return f"{dead_reminder}\n\n你当前提供的回复文本:\n{user_text}"
+                return f"{dead_reminder}\n\nProvided reply text:\n{user_text}"
             return args.get("text", "")
         if name == "dispatch_team":
             return await self._run_team(args, context)
@@ -1937,7 +1939,7 @@ class DynamicOrchestrator:
             """Fallback executor: calls gateway directly (no tools)."""
             sys_prompt = ctx.get(
                 "system_prompt",
-                "你是讨论参与者。根据你的角色，针对主题发表观点。",
+                self._config.team_default_agent_system_prompt,
             )
             messages = [
                 ModelMessage(role="system", content=sys_prompt),
@@ -2047,7 +2049,9 @@ class DynamicOrchestrator:
         await _emit_team_event(
             "progress",
             state="planning",
-            message=f"已启动 {len(enriched_agents)} 位专家讨论，最多 {max_rounds} 轮。",
+            message=self._config.team_debate_started_message.format(
+                n_agents=len(enriched_agents), max_rounds=max_rounds
+            ),
             progress=0.0,
         )
 
@@ -2057,7 +2061,9 @@ class DynamicOrchestrator:
             await _emit_team_event(
                 "progress",
                 state="running",
-                message=f"第 {round_num}/{total_rounds} 轮讨论进行中。",
+                message=self._config.team_debate_round_message.format(
+                    round_num=round_num, total_rounds=total_rounds
+                ),
                 progress=round_num / max(1, total_rounds + 1),
             )
 
@@ -2089,7 +2095,7 @@ class DynamicOrchestrator:
         await _emit_team_event(
             "completed" if result.completed else "failed",
             state="completed" if result.completed else "repairing",
-            message=result.summary[:200] or "讨论结束",
+            message=result.summary[:200] or self._config.team_debate_ended_message,
             progress=1.0 if result.completed else None,
         )
 
@@ -2144,8 +2150,8 @@ class DynamicOrchestrator:
         await _emit_team_event(
             "progress",
             state="planning",
-            message=(
-                f"已启动 {len(enriched_agents)} 位专家协作执行 {len(tasks)} 个任务。"
+            message=self._config.team_coop_started_message.format(
+                n_agents=len(enriched_agents), n_tasks=len(tasks)
             ),
             progress=0.0,
         )
@@ -2160,7 +2166,11 @@ class DynamicOrchestrator:
             await _emit_team_event(
                 "progress",
                 state="running",
-                message=f"任务 {task_id} 已完成 ({completed_count['n']}/{len(tasks)})",
+                message=self._config.team_coop_task_done_message.format(
+                    task_id=task_id,
+                    done=completed_count["n"],
+                    total=len(tasks),
+                ),
                 progress=progress,
             )
 
@@ -2193,7 +2203,7 @@ class DynamicOrchestrator:
         await _emit_team_event(
             "completed" if result.completed else "failed",
             state="completed" if result.completed else "repairing",
-            message=result.summary[:200] or "协作执行结束",
+            message=result.summary[:200] or self._config.team_coop_ended_message,
             progress=1.0 if result.completed else None,
         )
 
@@ -2233,16 +2243,24 @@ class DynamicOrchestrator:
             if inspect.isawaitable(result):
                 await result
 
-    @staticmethod
     def _build_fallback_result(
+        self,
         goal: str,
         results: dict[str, TaskResult],
     ) -> FinalResult:
         del goal
-        parts = ["（编排步数已达上限，以下为已完成的任务结果）"]
+        parts = [self._config.step_budget_exhausted_header]
         for task_id, r in results.items():
             if r.status == "succeeded":
-                parts.append(f"- {task_id}: {r.output or '完成'}")
+                parts.append(
+                    self._config.step_budget_succeeded_line.format(
+                        task_id=task_id, output=r.output or "done"
+                    )
+                )
             else:
-                parts.append(f"- {task_id}: 失败 — {r.error}")
+                parts.append(
+                    self._config.step_budget_failed_line.format(
+                        task_id=task_id, error=r.error or ""
+                    )
+                )
         return FinalResult(conclusion="\n".join(parts), task_results=results)

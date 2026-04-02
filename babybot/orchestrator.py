@@ -18,6 +18,7 @@ from .agent_kernel.dynamic_orchestrator import (
     DynamicOrchestrator,
     InMemoryChildTaskBus,
 )
+from .orchestrator_prompts import build_orchestrator_config
 from .agent_kernel.execution_constraints import (
     build_execution_constraint_hints,
     infer_execution_constraints,
@@ -886,6 +887,7 @@ class OrchestratorAgent:
                 continue
             orchestrator_kwargs[key] = value
 
+        orchestrator_kwargs["config"] = build_orchestrator_config()
         orchestrator = DynamicOrchestrator(**orchestrator_kwargs)
         flow_id = f"orchestrator:{uuid.uuid4().hex[:12]}"
         chat_key = getattr(tape, "chat_id", "") if tape is not None else ""
