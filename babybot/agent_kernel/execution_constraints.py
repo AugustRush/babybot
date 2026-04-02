@@ -21,9 +21,9 @@ class ExecutionHardLimits:
 
 @dataclass(frozen=True)
 class ExecutionSoftPreferences:
-    resolution_style: Literal["balanced", "single_pass", "fast_consensus", "thorough"] = (
-        "balanced"
-    )
+    resolution_style: Literal[
+        "balanced", "single_pass", "fast_consensus", "thorough"
+    ] = "balanced"
 
 
 @dataclass(frozen=True)
@@ -48,13 +48,13 @@ class ExecutionConstraints:
 
 @dataclass(frozen=True)
 class TeamExecutionPolicy:
-    max_rounds: int = 5
+    max_rounds: int = 3
     max_agents: int | None = None
     max_total_seconds: float | None = None
     max_turn_seconds: float | None = None
-    resolution_style: Literal["balanced", "single_pass", "fast_consensus", "thorough"] = (
-        "balanced"
-    )
+    resolution_style: Literal[
+        "balanced", "single_pass", "fast_consensus", "thorough"
+    ] = "balanced"
     on_budget_exhausted: Literal["summarize_partial", "raise_timeout"] = (
         "summarize_partial"
     )
@@ -68,9 +68,9 @@ class ExecutionHardLimitsModel(BaseModel):
 
 
 class ExecutionSoftPreferencesModel(BaseModel):
-    resolution_style: Literal["balanced", "single_pass", "fast_consensus", "thorough"] = (
-        "balanced"
-    )
+    resolution_style: Literal[
+        "balanced", "single_pass", "fast_consensus", "thorough"
+    ] = "balanced"
 
 
 class DegradationPolicyModel(BaseModel):
@@ -81,7 +81,9 @@ class DegradationPolicyModel(BaseModel):
 
 class ExecutionConstraintsModel(BaseModel):
     mode: Literal["interactive", "deferred"] = "interactive"
-    hard_limits: ExecutionHardLimitsModel = Field(default_factory=ExecutionHardLimitsModel)
+    hard_limits: ExecutionHardLimitsModel = Field(
+        default_factory=ExecutionHardLimitsModel
+    )
     soft_preferences: ExecutionSoftPreferencesModel = Field(
         default_factory=ExecutionSoftPreferencesModel
     )
@@ -364,14 +366,20 @@ def _structured_to_dict(payload: Any) -> dict[str, Any]:
 
 def normalize_execution_constraints(raw: Any) -> dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
-    hard_limits = payload.get("hard_limits") if isinstance(payload.get("hard_limits"), dict) else {}
+    hard_limits = (
+        payload.get("hard_limits")
+        if isinstance(payload.get("hard_limits"), dict)
+        else {}
+    )
     soft_preferences = (
         payload.get("soft_preferences")
         if isinstance(payload.get("soft_preferences"), dict)
         else {}
     )
     degradation = (
-        payload.get("degradation") if isinstance(payload.get("degradation"), dict) else {}
+        payload.get("degradation")
+        if isinstance(payload.get("degradation"), dict)
+        else {}
     )
     constraints = ExecutionConstraints(
         mode=(
@@ -388,7 +396,9 @@ def normalize_execution_constraints(raw: Any) -> dict[str, Any]:
         soft_preferences=ExecutionSoftPreferences(
             resolution_style=(
                 str(soft_preferences.get("resolution_style", "") or "").strip().lower()
-                if str(soft_preferences.get("resolution_style", "") or "").strip().lower()
+                if str(soft_preferences.get("resolution_style", "") or "")
+                .strip()
+                .lower()
                 in {"balanced", "single_pass", "fast_consensus", "thorough"}
                 else "balanced"
             )
@@ -452,9 +462,13 @@ def format_execution_constraints_for_prompt(constraints: Any) -> str:
     if hard_limits.get("max_agents") is not None:
         lines.append(f"- max_agents: {int(hard_limits['max_agents'])}")
     if hard_limits.get("max_total_seconds") is not None:
-        lines.append(f"- max_total_seconds: {float(hard_limits['max_total_seconds']):.1f}")
+        lines.append(
+            f"- max_total_seconds: {float(hard_limits['max_total_seconds']):.1f}"
+        )
     if hard_limits.get("max_turn_seconds") is not None:
-        lines.append(f"- max_turn_seconds: {float(hard_limits['max_turn_seconds']):.1f}")
+        lines.append(
+            f"- max_turn_seconds: {float(hard_limits['max_turn_seconds']):.1f}"
+        )
     lines.append(f"- resolution_style: {soft_preferences['resolution_style']}")
     lines.append(f"- on_budget_exhausted: {degradation['on_budget_exhausted']}")
     return "\n".join(lines)
@@ -472,7 +486,7 @@ def build_team_execution_policy(
     requested_rounds = _coerce_int(raw_rounds)
     user_round_cap = hard_limits.get("max_rounds")
     if requested_rounds is None and user_round_cap is None:
-        max_rounds = 5
+        max_rounds = 3
     elif requested_rounds is None:
         max_rounds = int(user_round_cap)
     elif user_round_cap is None:

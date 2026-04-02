@@ -2043,18 +2043,11 @@ class DynamicOrchestrator:
             heartbeat is not None,
         )
 
-        async def notify_progress(text: str) -> None:
-            if team_streaming and send_intermediate is not None and text.strip():
-                await send_intermediate(text)
-
         await _emit_team_event(
             "progress",
             state="planning",
             message=f"已启动 {len(enriched_agents)} 位专家讨论，最多 {max_rounds} 轮。",
             progress=0.0,
-        )
-        await notify_progress(
-            f"已启动 {len(enriched_agents)} 位专家讨论，最多 {max_rounds} 轮。"
         )
 
         async def on_round_start(round_num: int, total_rounds: int) -> None:
@@ -2066,7 +2059,6 @@ class DynamicOrchestrator:
                 message=f"第 {round_num}/{total_rounds} 轮讨论进行中。",
                 progress=round_num / max(1, total_rounds + 1),
             )
-            await notify_progress(f"第 {round_num}/{total_rounds} 轮讨论进行中。")
 
         if team_streaming:
             await reset_stream()
@@ -2148,10 +2140,6 @@ class DynamicOrchestrator:
             len(tasks),
         )
 
-        async def notify_progress(text: str) -> None:
-            if team_streaming and send_intermediate is not None and text.strip():
-                await send_intermediate(text)
-
         await _emit_team_event(
             "progress",
             state="planning",
@@ -2159,9 +2147,6 @@ class DynamicOrchestrator:
                 f"已启动 {len(enriched_agents)} 位专家协作执行 {len(tasks)} 个任务。"
             ),
             progress=0.0,
-        )
-        await notify_progress(
-            f"已启动 {len(enriched_agents)} 位专家协作执行 {len(tasks)} 个任务。"
         )
 
         completed_count = {"n": 0}
@@ -2176,9 +2161,6 @@ class DynamicOrchestrator:
                 state="running",
                 message=f"任务 {task_id} 已完成 ({completed_count['n']}/{len(tasks)})",
                 progress=progress,
-            )
-            await notify_progress(
-                f"任务 {task_id} 已完成 ({completed_count['n']}/{len(tasks)})"
             )
 
         if team_streaming and reset_stream is not None:
@@ -2232,12 +2214,20 @@ class DynamicOrchestrator:
             ensure_ascii=False,
         )
 
+    # DAG task events that carry meaningful user-facing progress.
+    # queued/started are internal lifecycle noise; only terminal states matter.
+    _FORWARD_EVENT_ALLOWLIST: frozenset[str] = frozenset(
+        {"succeeded", "failed", "dead_lettered", "stalled", "cancelled"}
+    )
+
     async def _forward_runtime_events(
         self,
         flow_id: str,
         callback: Callable[[dict[str, Any]], Any],
     ) -> None:
         async for event in self._child_task_bus.subscribe(flow_id):
+            if event.event not in self._FORWARD_EVENT_ALLOWLIST:
+                continue
             result = callback(dataclasses.asdict(event))
             if inspect.isawaitable(result):
                 await result

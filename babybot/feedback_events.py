@@ -51,7 +51,9 @@ def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
     else:
         payload = dict(getattr(raw, "payload", {}) or {})
         event_name = str(getattr(raw, "event", "") or "").strip().lower()
-        job_id = str(getattr(raw, "job_id", "") or payload.get("job_id", "") or "").strip()
+        job_id = str(
+            getattr(raw, "job_id", "") or payload.get("job_id", "") or ""
+        ).strip()
         flow_id = str(getattr(raw, "flow_id", "") or "").strip()
         task_id = str(getattr(raw, "task_id", "") or "").strip()
     state = str(payload.get("state", "") or "").strip().lower()
@@ -95,21 +97,28 @@ def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
 
 
 def render_runtime_feedback_event(event: RuntimeFeedbackEvent) -> str:
-    progress_pct = ""
-    if isinstance(event.progress, (int, float)):
-        progress_pct = f" ({int(float(event.progress) * 100)}%)"
-    if event.state in {"queued", "planning", "running", "waiting_tool", "waiting_user", "repairing"}:
-        label = event.message or event.stage or "处理中"
-        return f"处理中：{label}{progress_pct}"
+    progress_hint = ""
+    if isinstance(event.progress, (int, float)) and event.state not in {
+        "completed",
+        "cancelled",
+    }:
+        pct = int(float(event.progress) * 100)
+        progress_hint = f" ({pct}%)"
+    if event.state == "queued":
+        return event.message or "排队中…"
+    if event.state == "planning":
+        label = event.message or "规划中…"
+        return f"{label}{progress_hint}"
+    if event.state in {"running", "waiting_tool", "waiting_user", "repairing"}:
+        label = event.message or "执行中…"
+        return f"{label}{progress_hint}"
     if event.state == "completed":
-        label = event.message or event.stage or "阶段完成"
-        return f"阶段完成：{label}"
+        return event.message or "已完成"
     if event.state == "cancelled":
-        label = event.message or event.stage or "任务已取消"
-        return f"任务已取消：{label}"
+        return event.message or "已取消"
     if event.state == "failed":
-        label = event.message or event.stage or "任务失败"
+        label = event.message or "执行失败"
         if event.error:
-            return f"阶段失败：{label}\n原因：{event.error}"
-        return f"阶段失败：{label}"
+            return f"{label}\n原因：{event.error}"
+        return label
     return ""

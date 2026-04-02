@@ -174,7 +174,7 @@ class TeamRunner:
     def __init__(
         self,
         executor: Any,  # async callable(agent_id, prompt, context) -> str
-        max_rounds: int = 5,
+        max_rounds: int = 3,
         policy: TeamExecutionPolicy | None = None,
     ) -> None:
         self._executor = executor

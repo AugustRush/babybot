@@ -439,9 +439,12 @@ class MessageBus:
             None
         )
         last_runtime_progress_text_by_scope: dict[tuple[str, str, str, str], str] = {}
+        # Single progress message id: created once, patched on subsequent updates.
+        progress_message_id: str | None = None
+        progress_lock = asyncio.Lock()
 
         async def _runtime_event_callback(event: Any) -> None:
-            nonlocal stream_detached, last_runtime_progress_key
+            nonlocal stream_detached, last_runtime_progress_key, progress_message_id
             payload = _event_to_payload(event)
             runtime_events.append(payload)
             if isinstance(msg.metadata, dict):
@@ -482,13 +485,60 @@ class MessageBus:
             ):
                 return
             try:
-                await channel.send_response(
-                    msg.chat_id,
-                    TaskResponse(text=progress_text),
-                    sender_id=msg.sender_id,
-                    metadata=msg.metadata,
-                    message_format="post",
-                )
+                async with progress_lock:
+                    can_patch = progress_message_id is not None and callable(
+                        getattr(channel, "patch_stream_message", None)
+                    )
+                    if can_patch:
+                        patched = await channel.patch_stream_message(  # type: ignore[attr-defined]
+                            progress_message_id, progress_text
+                        )
+                        if patched:
+                            logger.debug(
+                                "Progress card patched channel=%s task_id=%s",
+                                msg.channel,
+                                normalized_event.task_id,
+                            )
+                            return
+                        logger.warning(
+                            "Progress card patch failed, will send new message "
+                            "channel=%s message_id=%s",
+                            msg.channel,
+                            progress_message_id,
+                        )
+                        progress_message_id = None
+                    # First progress event or patch failed: send a new message.
+                    can_create = callable(
+                        getattr(channel, "create_stream_message", None)
+                    )
+                    if can_create:
+                        new_id = await channel.create_stream_message(  # type: ignore[attr-defined]
+                            msg.chat_id,
+                            progress_text,
+                            sender_id=msg.sender_id,
+                            metadata=msg.metadata,
+                        )
+                        if new_id:
+                            progress_message_id = new_id
+                            logger.debug(
+                                "Progress card created channel=%s message_id=%s",
+                                msg.channel,
+                                new_id,
+                            )
+                            return
+                        logger.warning(
+                            "Progress card create returned None channel=%s chat_id=%s",
+                            msg.channel,
+                            msg.chat_id,
+                        )
+                    # Fallback: plain send_response (non-feishu channels or no stream support).
+                    await channel.send_response(
+                        msg.chat_id,
+                        TaskResponse(text=progress_text),
+                        sender_id=msg.sender_id,
+                        metadata=msg.metadata,
+                        message_format="post",
+                    )
             except Exception:
                 logger.warning(
                     "Failed to send runtime progress channel=%s chat_id=%s event=%s",
