@@ -9,7 +9,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .loop_guard import LoopGuard, LoopGuardConfig
-from .model import ModelMessage, ModelProvider, ModelRequest, ModelResponse, ModelToolCall
+from .model import (
+    ModelMessage,
+    ModelProvider,
+    ModelRequest,
+    ModelResponse,
+    ModelToolCall,
+)
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import ExecutionContext, TaskContract, TaskResult, ToolLease
@@ -40,7 +46,12 @@ class SingleAgentExecutor:
 
     model: ModelProvider
     tools: ToolRegistry
-    skill_resolver: Callable[[TaskContract, ExecutionContext], SkillPack | Iterable[SkillPack] | None] | None = None
+    skill_resolver: (
+        Callable[
+            [TaskContract, ExecutionContext], SkillPack | Iterable[SkillPack] | None
+        ]
+        | None
+    ) = None
     policy: ExecutorPolicy = field(default_factory=ExecutorPolicy)
 
     @staticmethod
@@ -61,7 +72,9 @@ class SingleAgentExecutor:
         return output[:head] + note + output[-tail:]
 
     @staticmethod
-    def _consume_runtime_hint_messages(state: dict[str, Any]) -> tuple[ModelMessage, ...]:
+    def _consume_runtime_hint_messages(
+        state: dict[str, Any],
+    ) -> tuple[ModelMessage, ...]:
         if not isinstance(state, dict):
             return ()
         raw_hints = state.pop("pending_runtime_hints", None)
@@ -87,7 +100,9 @@ class SingleAgentExecutor:
         state["pending_runtime_hints"] = []
         return tuple(messages)
 
-    async def execute(self, task: TaskContract, context: ExecutionContext) -> TaskResult:
+    async def execute(
+        self, task: TaskContract, context: ExecutionContext
+    ) -> TaskResult:
         skills = self._resolve_skills(task, context)
         base_lease = task.lease
         for skill in skills:
@@ -103,19 +118,24 @@ class SingleAgentExecutor:
             history_budget = context.state.get("context_history_tokens", 2000)
             tape_store = context.state.get("tape_store")
             memory_store = context.state.get("memory_store")
-            messages.extend(_build_history_messages(
-                tape, history_budget,
-                query=task.description,
-                tape_store=tape_store,
-                memory_store=memory_store,
-            ))
+            messages.extend(
+                _build_history_messages(
+                    tape,
+                    history_budget,
+                    query=task.description,
+                    tape_store=tape_store,
+                    memory_store=memory_store,
+                )
+            )
 
         media_paths = context.state.get("media_paths") or ()
-        messages.append(ModelMessage(
-            role="user",
-            content=task.description,
-            images=tuple(media_paths),
-        ))
+        messages.append(
+            ModelMessage(
+                role="user",
+                content=task.description,
+                images=tuple(media_paths),
+            )
+        )
 
         available_tools = self.tools.tool_schemas(base_lease)
         tool_names = [t["function"]["name"] for t in available_tools]
@@ -123,11 +143,15 @@ class SingleAgentExecutor:
             all_tools = {n: rt.group for n, rt in self.tools._tools.items()}
             logger.warning(
                 "Executor NO TOOLS task=%s lease=%s registry_tools=%s",
-                task.task_id, base_lease, all_tools,
+                task.task_id,
+                base_lease,
+                all_tools,
             )
         logger.info(
             "Executor start task=%s max_steps=%d tools=%s lease_groups=%s include_tools=%s exclude_tools=%s",
-            task.task_id, self.policy.max_steps, tool_names,
+            task.task_id,
+            self.policy.max_steps,
+            tool_names,
             list(base_lease.include_groups),
             list(base_lease.include_tools),
             list(base_lease.exclude_tools),
@@ -172,14 +196,17 @@ class SingleAgentExecutor:
             context.emit("executor.step", task_id=task.task_id, step=step)
             logger.info(
                 "Executor step=%d/%d task=%s",
-                step, self.policy.max_steps, task.task_id,
+                step,
+                self.policy.max_steps,
+                task.task_id,
             )
 
             messages = loop_guard.compress_messages(messages)
             runtime_hint_messages = self._consume_runtime_hint_messages(context.state)
             if blocked_tool_names:
                 step_tools = [
-                    t for t in available_tools
+                    t
+                    for t in available_tools
                     if t["function"]["name"] not in blocked_tool_names
                 ]
             else:
@@ -209,7 +236,8 @@ class SingleAgentExecutor:
                 tool_call_count += len(response.tool_calls)
                 logger.info(
                     "Executor tool_calls task=%s step=%d calls=%s",
-                    task.task_id, step,
+                    task.task_id,
+                    step,
                     [tc.name for tc in response.tool_calls],
                 )
                 if tape is not None:
@@ -246,17 +274,18 @@ class SingleAgentExecutor:
                         loop_guard_block_count += 1
                         logger.warning(
                             "Executor loop guard blocked task=%s tool=%s reason=%s",
-                            task.task_id, tool_call.name, verdict.reason,
+                            task.task_id,
+                            tool_call.name,
+                            verdict.reason,
                         )
                         if verdict.disable_tool:
                             blocked_tool_names.add(tool_call.name)
                         remaining = [
-                            t["function"]["name"] for t in available_tools
+                            t["function"]["name"]
+                            for t in available_tools
                             if t["function"]["name"] not in blocked_tool_names
                         ]
-                        hint = (
-                            f"Loop guard: {verdict.reason}"
-                        )
+                        hint = f"Loop guard: {verdict.reason}"
                         if verdict.disable_tool:
                             hint += (
                                 f"\nTool '{tool_call.name}' is now disabled for this task."
@@ -272,32 +301,45 @@ class SingleAgentExecutor:
 
                     registered = self.tools.get(tool_call.name)
                     if not registered or not self._tool_allowed(
-                        registered.group, tool_call.name, base_lease,
+                        registered.group,
+                        tool_call.name,
+                        base_lease,
                     ):
                         logger.warning(
                             "Executor tool unavailable task=%s tool=%s",
-                            task.task_id, tool_call.name,
+                            task.task_id,
+                            tool_call.name,
                         )
-                        error_results.append((tool_call, (
-                            f"Tool unavailable: {tool_call.name}"
-                            "\n[Hint: This tool is not available. Use a different tool or approach.]"
-                        )))
+                        error_results.append(
+                            (
+                                tool_call,
+                                (
+                                    f"Tool unavailable: {tool_call.name}"
+                                    "\n[Hint: This tool is not available. Use a different tool or approach.]"
+                                ),
+                            )
+                        )
                         tool_failure_count += 1
                         continue
 
-                    if (
-                        isinstance(tool_call.arguments, dict)
-                        and tool_call.arguments.get("__tool_argument_parse_error__")
-                    ):
+                    if isinstance(
+                        tool_call.arguments, dict
+                    ) and tool_call.arguments.get("__tool_argument_parse_error__"):
                         logger.warning(
                             "Executor invalid arguments JSON task=%s tool=%s",
-                            task.task_id, tool_call.name,
+                            task.task_id,
+                            tool_call.name,
                         )
-                        error_results.append((tool_call, (
-                            f"Tool argument JSON parse error for {tool_call.name}: "
-                            f"{tool_call.arguments.get('__raw_arguments__', '')}"
-                            "\n[Hint: Fix the JSON syntax in your tool arguments.]"
-                        )))
+                        error_results.append(
+                            (
+                                tool_call,
+                                (
+                                    f"Tool argument JSON parse error for {tool_call.name}: "
+                                    f"{tool_call.arguments.get('__raw_arguments__', '')}"
+                                    "\n[Hint: Fix the JSON syntax in your tool arguments.]"
+                                ),
+                            )
+                        )
                         tool_failure_count += 1
                         continue
 
@@ -312,12 +354,19 @@ class SingleAgentExecutor:
                     if validation_error:
                         logger.warning(
                             "Executor argument validation failed task=%s tool=%s error=%s",
-                            task.task_id, tool_call.name, validation_error,
+                            task.task_id,
+                            tool_call.name,
+                            validation_error,
                         )
-                        error_results.append((tool_call, (
-                            f"Tool argument validation failed for {tool_call.name}: {validation_error}"
-                            "\n[Hint: Check parameter types and values against the tool schema.]"
-                        )))
+                        error_results.append(
+                            (
+                                tool_call,
+                                (
+                                    f"Tool argument validation failed for {tool_call.name}: {validation_error}"
+                                    "\n[Hint: Check parameter types and values against the tool schema.]"
+                                ),
+                            )
+                        )
                         tool_failure_count += 1
                         continue
 
@@ -337,15 +386,15 @@ class SingleAgentExecutor:
 
                 if not valid_calls:
                     no_progress_turns += 1
-                    if no_progress_turns >= max(1, int(self.policy.max_no_progress_turns)):
+                    if no_progress_turns >= max(
+                        1, int(self.policy.max_no_progress_turns)
+                    ):
                         last_issues = " | ".join(
                             err_output.splitlines()[0][:200]
                             for _, err_output in error_results[:3]
                             if err_output
                         )
-                        error = (
-                            f"No progress after {no_progress_turns} consecutive tool-only turns."
-                        )
+                        error = f"No progress after {no_progress_turns} consecutive tool-only turns."
                         if last_issues:
                             error += f" Last issues: {last_issues}"
                         logger.warning(
@@ -371,7 +420,17 @@ class SingleAgentExecutor:
                             ),
                         )
                 else:
-                    no_progress_turns = 0
+                    # When all valid calls are exploration-only (read/view/list/inspect/shell-read),
+                    # the agent isn't making real progress — count toward no-progress limit.
+                    # This prevents sub-agents from endlessly exploring when they should
+                    # be producing output or using action tools.
+                    if all(
+                        loop_guard.is_exploration_call(tc.name, tc.arguments)
+                        for tc, _ in valid_calls
+                    ):
+                        no_progress_turns += 1
+                    else:
+                        no_progress_turns = 0
 
                 # Phase 2: parallel execution of validated tool calls
                 if valid_calls:
@@ -393,7 +452,8 @@ class SingleAgentExecutor:
                     ) -> tuple[ModelToolCall, str, list[str], bool]:
                         logger.info(
                             "Executor invoke task=%s tool=%s args_keys=%s",
-                            task.task_id, tc.name,
+                            task.task_id,
+                            tc.name,
                             list(tc.arguments.keys()),
                         )
                         started = time.perf_counter()
@@ -418,15 +478,22 @@ class SingleAgentExecutor:
                             )
 
                         elapsed = time.perf_counter() - started
-                        output = result.content if result.ok else (
-                            f"Tool error: {result.error}"
-                            "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
+                        output = (
+                            result.content
+                            if result.ok
+                            else (
+                                f"Tool error: {result.error}"
+                                "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
+                            )
                         )
                         if result.ok:
                             logger.info(
                                 "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
-                                task.task_id, tc.name, result.ok,
-                                elapsed, len(output),
+                                task.task_id,
+                                tc.name,
+                                result.ok,
+                                elapsed,
+                                len(output),
                             )
                         else:
                             logger.warning(
@@ -438,7 +505,9 @@ class SingleAgentExecutor:
                             )
                         return tc, output, list(result.artifacts or []), not result.ok
 
-                    done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
+                    done = await _aio.gather(
+                        *[_invoke_one(tc, reg) for tc, reg in valid_calls]
+                    )
                     result_entries: list[Entry] = []
                     for tc, output, artifacts, failed in done:
                         if failed:
@@ -475,6 +544,34 @@ class SingleAgentExecutor:
                 for tool_call in response.tool_calls:
                     if tool_call.call_id in tool_result_map:
                         messages.append(tool_result_map[tool_call.call_id])
+
+                # Fail fast when the agent is stuck in exploration-only loops
+                if no_progress_turns >= max(1, int(self.policy.max_no_progress_turns)):
+                    error = (
+                        f"No progress after {no_progress_turns} consecutive tool-only turns."
+                        " Only exploratory tools were used; switch to edit/write/action tools or finish."
+                    )
+                    logger.warning(
+                        "Executor no-progress fail task=%s turns=%d mode=exploration_only",
+                        task.task_id,
+                        no_progress_turns,
+                    )
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                        metadata=self._build_usage_metadata(
+                            usage_totals,
+                            extra={
+                                "no_progress_turns": no_progress_turns,
+                                "blocked_tools": sorted(blocked_tool_names),
+                                "tool_call_count": tool_call_count,
+                                "tool_failure_count": tool_failure_count,
+                                "loop_guard_block_count": loop_guard_block_count,
+                                "max_step_exhausted_count": 0,
+                            },
+                        ),
+                    )
 
                 if heartbeat is not None:
                     heartbeat.beat()
@@ -515,7 +612,9 @@ class SingleAgentExecutor:
             if text:
                 logger.info(
                     "Executor final answer task=%s step=%d output_len=%d",
-                    task.task_id, step, len(text),
+                    task.task_id,
+                    step,
+                    len(text),
                 )
                 return TaskResult(
                     task_id=task.task_id,
@@ -534,7 +633,8 @@ class SingleAgentExecutor:
 
         logger.warning(
             "Executor exhausted steps task=%s max_steps=%d",
-            task.task_id, self.policy.max_steps,
+            task.task_id,
+            self.policy.max_steps,
         )
         return TaskResult(
             task_id=task.task_id,
@@ -569,7 +669,9 @@ class SingleAgentExecutor:
             if finish_reason != "length":
                 break
             messages.append(ModelMessage(role="assistant", content=text))
-            messages.append(ModelMessage(role="user", content="Continue from where you left off."))
+            messages.append(
+                ModelMessage(role="user", content="Continue from where you left off.")
+            )
             response = await self.model.generate(
                 ModelRequest(
                     messages=tuple(messages),
@@ -588,7 +690,9 @@ class SingleAgentExecutor:
             finish_reason = response.finish_reason or "stop"
         return text
 
-    def _resolve_skills(self, task: TaskContract, context: ExecutionContext) -> list[SkillPack]:
+    def _resolve_skills(
+        self, task: TaskContract, context: ExecutionContext
+    ) -> list[SkillPack]:
         resolver = self.skill_resolver
         if resolver is None:
             return []
@@ -673,7 +777,9 @@ class SingleAgentExecutor:
         return metadata
 
     @staticmethod
-    def _cast_tool_arguments(schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    def _cast_tool_arguments(
+        schema: dict[str, Any], args: dict[str, Any]
+    ) -> dict[str, Any]:
         """Best-effort type coercion based on the tool schema."""
         properties = schema.get("properties") or {}
         if not isinstance(properties, dict):
@@ -759,8 +865,14 @@ class SingleAgentExecutor:
 class EchoModelProvider:
     """Tiny debug model provider for local wiring tests."""
 
-    async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
-        last = request.messages[-1] if request.messages else ModelMessage(role="assistant", content="")
+    async def generate(
+        self, request: ModelRequest, context: ExecutionContext
+    ) -> ModelResponse:
+        last = (
+            request.messages[-1]
+            if request.messages
+            else ModelMessage(role="assistant", content="")
+        )
         if last.role == "tool":
             return ModelResponse(text=f"Observed: {last.content}")
         if request.tools:
@@ -790,7 +902,9 @@ def _history_entry_text(entry: object) -> str:
         status = "成功" if payload.get("ok") else "失败"
         preview = str(payload.get("content_preview", "") or "").strip()
         artifacts = payload.get("artifacts") or []
-        suffix = f"\n产物: {', '.join(str(item) for item in artifacts)}" if artifacts else ""
+        suffix = (
+            f"\n产物: {', '.join(str(item) for item in artifacts)}" if artifacts else ""
+        )
         return f"[工具结果][{status}] {name}: {preview}{suffix}".rstrip()
     if kind == "tool_call":
         name = str(payload.get("name", "") or "?")
@@ -803,8 +917,10 @@ def _history_entry_text(entry: object) -> str:
         error = str(event_payload.get("error", "") or "").strip()
         output = str(event_payload.get("output", "") or "").strip()
         details_parts = [part for part in (description, output, error) if part]
-        details = " | ".join(details_parts) if details_parts else _json.dumps(
-            event_payload, ensure_ascii=False
+        details = (
+            " | ".join(details_parts)
+            if details_parts
+            else _json.dumps(event_payload, ensure_ascii=False)
         )
         return f"[运行事件] {event_name}: {details}"
     if kind == "anchor":
@@ -879,7 +995,9 @@ def _build_history_messages(
                 parts.append(f"下一步: {', '.join(str(item) for item in next_steps)}")
             open_questions = state.get("open_questions")
             if open_questions and isinstance(open_questions, list):
-                parts.append(f"待确认: {', '.join(str(item) for item in open_questions)}")
+                parts.append(
+                    f"待确认: {', '.join(str(item) for item in open_questions)}"
+                )
             decisions = state.get("decisions")
             if decisions and isinstance(decisions, list):
                 parts.append(f"已确认: {', '.join(str(item) for item in decisions)}")
@@ -899,10 +1017,7 @@ def _build_history_messages(
 
     recent = entries_since()
     msg_entries = [e for e in recent if e.kind == "message"]
-    recent_state_entries = [
-        e for e in recent
-        if e.kind in {"tool_result", "event"}
-    ]
+    recent_state_entries = [e for e in recent if e.kind in {"tool_result", "event"}]
     # Exclude the last user message (it's the current turn, added by executor)
     if msg_entries and msg_entries[-1].payload.get("role") == "user":
         msg_entries = msg_entries[:-1]
@@ -931,10 +1046,12 @@ def _build_history_messages(
                 recall_lines.append(line)
                 recall_tokens += est
             if recall_lines:
-                messages.append(ModelMessage(
-                    role="system",
-                    content="[相关历史]\n" + "\n".join(recall_lines),
-                ))
+                messages.append(
+                    ModelMessage(
+                        role="system",
+                        content="[相关历史]\n" + "\n".join(recall_lines),
+                    )
+                )
                 budget_remaining -= recall_tokens
 
     # 2.5. Recent non-message execution state (tool results / failed events)
@@ -1002,9 +1119,11 @@ def _build_history_messages(
     # Emit in original chronological order
     for idx, entry in enumerate(msg_entries):
         if idx in picked_indices:
-            messages.append(ModelMessage(
-                role=entry.payload["role"],
-                content=entry.payload["content"],
-            ))
+            messages.append(
+                ModelMessage(
+                    role=entry.payload["role"],
+                    content=entry.payload["content"],
+                )
+            )
 
     return messages

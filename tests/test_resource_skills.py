@@ -27,10 +27,15 @@ _AUTO_SKILL_CREATOR_SCRIPTS = Path("skills/auto_skill_creator/scripts").resolve(
 if str(_AUTO_SKILL_CREATOR_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_AUTO_SKILL_CREATOR_SCRIPTS))
 auto_init_skill = importlib.import_module("init_skill")
-from babybot.builtin_tools.workers import build_create_worker_tool, build_dispatch_workers_tool
+from babybot.builtin_tools.workers import (
+    build_create_worker_tool,
+    build_dispatch_workers_tool,
+)
 
 
-def test_resource_manager_exposes_expected_registration_and_runtime_entrypoints() -> None:
+def test_resource_manager_exposes_expected_registration_and_runtime_entrypoints() -> (
+    None
+):
     assert hasattr(ResourceManager, "_register_skill_tools")
     assert hasattr(ResourceManager, "_invoke_external_skill_function")
     assert hasattr(ResourceManager, "_build_external_cli_script_callable")
@@ -148,13 +153,15 @@ def test_build_worker_prompt_enforces_execution_only_boundary() -> None:
         selected_skill_packs=[],
     )
 
-    assert "不是任务编排器" in prompt
+    assert "请完成任务并直接输出最终答案" in prompt
     assert "不要直接向用户发送消息" in prompt
     assert "缺少输入" in prompt
 
 
 def test_subagent_runtime_strips_channel_and_worker_control_capabilities() -> None:
-    owner = SimpleNamespace(groups={"channel_feishu": object(), "worker_control": object()})
+    owner = SimpleNamespace(
+        groups={"channel_feishu": object(), "worker_control": object()}
+    )
     runtime = ResourceSubagentRuntime(owner)
 
     hardened = runtime.harden_execution_lease(
@@ -220,7 +227,9 @@ def test_coerce_timeout_handles_invalid_values() -> None:
 def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -238,10 +247,14 @@ def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
     assert any(name.endswith("__generate_image") for name in tools)
 
 
-def test_register_skill_tools_for_auto_skill_creator_exposes_only_agent_facing_tools() -> None:
+def test_register_skill_tools_for_auto_skill_creator_exposes_only_agent_facing_tools() -> (
+    None
+):
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -264,7 +277,9 @@ def test_agent_admin_skill_exists_and_guides_builtin_admin_workflows() -> None:
 
     assert skill_md.exists()
 
-    meta, body = ResourceManager._parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+    meta, body = ResourceManager._parse_frontmatter(
+        skill_md.read_text(encoding="utf-8")
+    )
 
     assert meta["name"] == "agent-admin"
     assert set(meta["include_groups"]) >= {"admin", "basic"}
@@ -275,7 +290,9 @@ def test_agent_admin_skill_exists_and_guides_builtin_admin_workflows() -> None:
     assert "reload_skill" in body
 
 
-def test_discovered_generated_skill_uses_example_requests_for_keywords(tmp_path: Path) -> None:
+def test_discovered_generated_skill_uses_example_requests_for_keywords(
+    tmp_path: Path,
+) -> None:
     workspace_dir = tmp_path / "workspace"
     workspace_skills_dir = workspace_dir / "skills"
     builtin_skills_dir = tmp_path / "builtin" / "skills"
@@ -399,7 +416,9 @@ def test_register_skill_tools_avoids_import_side_effects_for_function_scripts(
 ) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -427,7 +446,9 @@ def test_register_skill_tools_avoids_import_side_effects_for_function_scripts(
 def test_register_skill_tools_skips_cli_main_function(tmp_path: Path) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -455,7 +476,9 @@ def test_register_skill_tools_skips_cli_main_function(tmp_path: Path) -> None:
 def test_register_skill_tools_registers_cli_script_proxy(tmp_path: Path) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -495,14 +518,18 @@ def test_register_skill_tools_registers_cli_script_proxy(tmp_path: Path) -> None
 def test_cli_script_proxy_invokes_script_with_named_arguments(tmp_path: Path) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
         {
             "resolve_workspace_path": staticmethod(lambda value: str(value)),
             "workspace_dir": tmp_path,
-            "system": SimpleNamespace(shell_command_timeout=300, python_executable="python3"),
+            "system": SimpleNamespace(
+                shell_command_timeout=300, python_executable="python3"
+            ),
         },
     )()
     manager._active_write_root = contextvars.ContextVar(
@@ -548,7 +575,9 @@ def test_cli_script_proxy_retries_with_fallback_python_on_env_failure(
 ) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -583,18 +612,22 @@ def test_cli_script_proxy_retries_with_fallback_python_on_env_failure(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
-        {
-            "executable": "/broken/python",
-            "required_modules": (),
-            "source": "skill.python_executable",
-        },
-        {
-            "executable": "/healthy/python",
-            "required_modules": (),
-            "source": "skill.python_fallback_executables",
-        },
-    ])
+    monkeypatch.setattr(
+        manager,
+        "_get_python_candidates",
+        lambda skill_runtime=None: [
+            {
+                "executable": "/broken/python",
+                "required_modules": (),
+                "source": "skill.python_executable",
+            },
+            {
+                "executable": "/healthy/python",
+                "required_modules": (),
+                "source": "skill.python_fallback_executables",
+            },
+        ],
+    )
     monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
 
     calls: list[str] = []
@@ -644,7 +677,9 @@ def test_cli_script_proxy_retries_with_fallback_python_on_env_failure(
     assert calls == ["/broken/python", "/healthy/python"]
 
 
-def test_get_user_python_prefers_path_python3_over_hardcoded_system_python(tmp_path: Path, monkeypatch) -> None:
+def test_get_user_python_prefers_path_python3_over_hardcoded_system_python(
+    tmp_path: Path, monkeypatch
+) -> None:
     manager = object.__new__(ResourceManager)
     manager.config = type(
         "DummyConfig",
@@ -654,12 +689,19 @@ def test_get_user_python_prefers_path_python3_over_hardcoded_system_python(tmp_p
             "workspace_dir": tmp_path,
         },
     )()
-    monkeypatch.setattr("babybot.resource.shutil.which", lambda name: {
-        "python3": "/Users/test/miniconda3/bin/python3",
-        "python": "/Users/test/miniconda3/bin/python",
-    }.get(name))
-    monkeypatch.setattr("babybot.resource.os.path.isfile", lambda path: path == "/usr/bin/python3")
-    monkeypatch.setattr("babybot.resource.os.access", lambda path, mode: path == "/usr/bin/python3")
+    monkeypatch.setattr(
+        "babybot.resource.shutil.which",
+        lambda name: {
+            "python3": "/Users/test/miniconda3/bin/python3",
+            "python": "/Users/test/miniconda3/bin/python",
+        }.get(name),
+    )
+    monkeypatch.setattr(
+        "babybot.resource.os.path.isfile", lambda path: path == "/usr/bin/python3"
+    )
+    monkeypatch.setattr(
+        "babybot.resource.os.access", lambda path, mode: path == "/usr/bin/python3"
+    )
 
     assert manager._get_user_python() == "/Users/test/miniconda3/bin/python3"
 
@@ -717,7 +759,9 @@ def test_select_skill_packs_prefers_keyword_and_phrase_matches() -> None:
         ),
     }
 
-    packs = asyncio.run(manager._select_skill_packs("请帮我查天气并给出 weather forecast"))
+    packs = asyncio.run(
+        manager._select_skill_packs("请帮我查天气并给出 weather forecast")
+    )
 
     assert [pack.name for pack in packs] == ["weather-query"]
 
@@ -764,7 +808,9 @@ def test_resource_briefs_and_scope_resolution() -> None:
             active=True,
         ),
     }
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.mcp_server_groups = {"gaode_map": "map_services"}
     manager.skills = {
         "weather-query": LoadedSkill(
@@ -813,7 +859,9 @@ def test_resource_briefs_and_scope_resolution() -> None:
     assert mcp_lease["include_groups"] == ["map_services"]
     assert mcp_skills == ()
 
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     unavailable_scope = manager.resolve_resource_scope(
         "skill.weather-query",
         require_tools=True,
@@ -831,7 +879,9 @@ def test_search_resources_filters_groups_tools_skills_and_mcp_servers() -> None:
             active=True,
         ),
     }
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.mcp_server_groups = {"gaode_map": "map_services"}
     manager.mcp_clients = {"gaode_map": object()}
     manager.skills = {
@@ -859,12 +909,16 @@ def test_search_resources_filters_groups_tools_skills_and_mcp_servers() -> None:
     assert result["mcp_servers"] == ["gaode_map"]
 
 
-def test_get_resource_briefs_keeps_prompt_only_skill_active_without_unrelated_tools() -> None:
+def test_get_resource_briefs_keeps_prompt_only_skill_active_without_unrelated_tools() -> (
+    None
+):
     manager = object.__new__(ResourceManager)
     manager.groups = {
         "basic": ToolGroup(name="basic", description="Core tools", active=True),
     }
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.mcp_server_groups = {}
     manager.skills = {
         "prompt-helper": LoadedSkill(
@@ -995,7 +1049,9 @@ def test_load_tool_module_raises_when_script_calls_sys_exit(tmp_path: Path) -> N
         raise AssertionError("expected ModuleNotFoundError")
 
 
-def test_resource_manager_does_not_auto_discover_workspace_tools(tmp_path: Path) -> None:
+def test_resource_manager_does_not_auto_discover_workspace_tools(
+    tmp_path: Path,
+) -> None:
     workspace_dir = tmp_path / "workspace"
     tools_root = workspace_dir / "tools"
     analysis_dir = tools_root / "analysis"
@@ -1036,7 +1092,9 @@ def test_run_subagent_task_returns_collected_media_from_context(
         system=SimpleNamespace(context_history_tokens=2000),
         workspace_dir=tmp_path,
     )
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.groups = {}
     manager.skills = {}
     manager._shared_gateway = object()
@@ -1083,7 +1141,9 @@ def test_run_subagent_task_propagates_channel_context_to_worker_context(
         system=SimpleNamespace(context_history_tokens=2000),
         workspace_dir=tmp_path,
     )
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.groups = {}
     manager.skills = {}
     manager._shared_gateway = object()
@@ -1128,13 +1188,17 @@ def test_run_subagent_task_propagates_channel_context_to_worker_context(
     assert seen["channel_context"] is parent_ctx
 
 
-def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_path: Path) -> None:
+def test_run_subagent_task_merges_skill_leases_before_executor(
+    monkeypatch, tmp_path: Path
+) -> None:
     manager = object.__new__(ResourceManager)
     manager.config = SimpleNamespace(
         system=SimpleNamespace(context_history_tokens=2000),
         workspace_dir=tmp_path,
     )
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.groups = {}
     manager.skills = {}
     manager._shared_gateway = object()
@@ -1178,7 +1242,9 @@ def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_
         captured["skill_packs"] = kwargs["skill_packs"]
         return _FakeExecutor()
 
-    monkeypatch.setattr("babybot.resource.create_worker_executor", _fake_create_worker_executor)
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor", _fake_create_worker_executor
+    )
 
     text, media = asyncio.run(manager.run_subagent_task("check weather"))
 
@@ -1187,7 +1253,10 @@ def test_run_subagent_task_merges_skill_leases_before_executor(monkeypatch, tmp_
     merged_lease = captured["lease"]
     assert isinstance(merged_lease, ToolLease)
     assert merged_lease.include_groups == ("basic", "skill_weather_query")
-    assert merged_lease.include_tools == ("regular_tool", "weather_query__fetch_weather")
+    assert merged_lease.include_tools == (
+        "regular_tool",
+        "weather_query__fetch_weather",
+    )
     assert "create_worker" in merged_lease.exclude_tools
     assert "dispatch_workers" in merged_lease.exclude_tools
     assert "send_text" in merged_lease.exclude_tools
@@ -1204,7 +1273,9 @@ def test_create_worker_tool_enforces_max_depth() -> None:
             self.config = SimpleNamespace(system=SimpleNamespace(worker_max_depth=2))
             self._lease_var = contextvars.ContextVar("lease_var", default=None)
             self._skill_ids_var = contextvars.ContextVar("skill_ids_var", default=None)
-            self._worker_depth_var = contextvars.ContextVar("worker_depth_var", default=2)
+            self._worker_depth_var = contextvars.ContextVar(
+                "worker_depth_var", default=2
+            )
             self.called = False
 
         def _get_current_task_lease_var(self):
@@ -1233,7 +1304,9 @@ def test_create_worker_tool_enforces_max_depth() -> None:
 def test_dispatch_workers_tool_applies_timeout_to_hung_subtasks() -> None:
     class _Owner:
         def __init__(self) -> None:
-            self.config = SimpleNamespace(system=SimpleNamespace(worker_subtask_timeout=0.01))
+            self.config = SimpleNamespace(
+                system=SimpleNamespace(worker_subtask_timeout=0.01)
+            )
             self._lease_var = contextvars.ContextVar("lease_var", default=None)
             self._skill_ids_var = contextvars.ContextVar("skill_ids_var", default=None)
 
@@ -1256,7 +1329,9 @@ def test_dispatch_workers_tool_applies_timeout_to_hung_subtasks() -> None:
     assert payload["results"][0]["error"].lower().startswith("timeout")
 
 
-def test_run_subagent_task_keeps_channel_context_but_strips_channel_delivery_tools(monkeypatch, tmp_path: Path) -> None:
+def test_run_subagent_task_keeps_channel_context_but_strips_channel_delivery_tools(
+    monkeypatch, tmp_path: Path
+) -> None:
     from babybot.agent_kernel import ToolRegistry
     from babybot.channels.tools import ChannelToolContext
 
@@ -1288,8 +1363,12 @@ def test_run_subagent_task_keeps_channel_context_but_strips_channel_delivery_too
     def _tool_ok() -> str:
         return "ok"
 
-    manager.register_tool(_tool_ok, group_name="basic", func_name="inspect_chat_context")
-    manager.register_tool(_tool_ok, group_name="code", func_name="_workspace_execute_shell_command")
+    manager.register_tool(
+        _tool_ok, group_name="basic", func_name="inspect_chat_context"
+    )
+    manager.register_tool(
+        _tool_ok, group_name="code", func_name="_workspace_execute_shell_command"
+    )
     manager.register_tool(_tool_ok, group_name="channel_feishu", func_name="send_audio")
     manager.register_tool(_tool_ok, group_name="channel_feishu", func_name="send_file")
 
@@ -1364,18 +1443,20 @@ def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
 
     manager.run_subagent_task = _run_subagent_task
 
-    text = asyncio.run(
-        manager.create_worker_tool()("inspect the project homepage")
-    )
+    text = asyncio.run(manager.create_worker_tool()("inspect the project homepage"))
 
     assert text == "done"
     assert captured["task_description"] == "inspect the project homepage"
     assert captured["agent_name"] == "Worker"
-    assert captured["lease"] == {"include_groups": ["basic", "skill_auto_skill_creator"]}
+    assert captured["lease"] == {
+        "include_groups": ["basic", "skill_auto_skill_creator"]
+    }
     assert captured["skill_ids"] == ["auto-skill-creator"]
 
 
-def test_build_worker_prompt_returns_results_to_main_agent_instead_of_direct_delivery() -> None:
+def test_build_worker_prompt_returns_results_to_main_agent_instead_of_direct_delivery() -> (
+    None
+):
     manager = object.__new__(ResourceManager)
     manager.skills = {}
     prompt = manager._build_worker_sys_prompt(
@@ -1467,7 +1548,9 @@ def test_select_skill_packs_loads_full_body_for_explicit_skill_request() -> None
         ),
     }
 
-    packs = asyncio.run(manager._select_skill_packs("请使用 $weather-query 处理这个请求"))
+    packs = asyncio.run(
+        manager._select_skill_packs("请使用 $weather-query 处理这个请求")
+    )
 
     assert [pack.name for pack in packs] == ["weather-query"]
     assert packs[0].system_prompt == "FULL BODY PROMPT"
@@ -1529,17 +1612,23 @@ def test_build_task_lease_keeps_code_as_default_baseline_for_browser_tasks() -> 
         "code": ToolGroup("code", "code", active=True),
         "browser": ToolGroup("browser", "browser", active=False),
     }
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
 
     lease = manager._build_task_lease({"include_groups": ["browser"]})
 
     assert lease.include_groups == ("browser", "basic", "code")
 
 
-def test_register_skill_tools_falls_back_to_proxy_when_import_fails(tmp_path: Path) -> None:
+def test_register_skill_tools_falls_back_to_proxy_when_import_fails(
+    tmp_path: Path,
+) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -1568,7 +1657,9 @@ def test_register_skill_tools_records_error_without_import_fallback_on_parse_fai
 ) -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {}
-    manager.registry = __import__("babybot.agent_kernel", fromlist=["ToolRegistry"]).ToolRegistry()
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
     manager.config = type(
         "DummyConfig",
         (),
@@ -1793,7 +1884,9 @@ def test_callable_tool_can_disable_implicit_artifact_collection(tmp_path: Path) 
     assert result.artifacts == []
 
 
-def test_callable_tool_relocates_external_artifact_into_workspace_output(tmp_path: Path) -> None:
+def test_callable_tool_relocates_external_artifact_into_workspace_output(
+    tmp_path: Path,
+) -> None:
     workspace_output = tmp_path / "output"
     workspace_output.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
@@ -1833,7 +1926,9 @@ def test_callable_tool_relocates_external_artifact_into_workspace_output(tmp_pat
     assert relocated.read_bytes() == b"png-bytes"
 
 
-def test_get_python_candidates_prefers_skill_runtime_then_fallbacks(tmp_path: Path) -> None:
+def test_get_python_candidates_prefers_skill_runtime_then_fallbacks(
+    tmp_path: Path,
+) -> None:
     manager = object.__new__(ResourceManager)
     manager.config = type(
         "DummyConfig",
@@ -1896,18 +1991,22 @@ def test_invoke_external_skill_function_retries_with_fallback_python_on_env_fail
             "python_fallback_executables": ["/healthy/python"],
         }
     )
-    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
-        {
-            "executable": "/broken/python",
-            "required_modules": (),
-            "source": "skill.python_executable",
-        },
-        {
-            "executable": "/healthy/python",
-            "required_modules": (),
-            "source": "skill.python_fallback_executables",
-        },
-    ])
+    monkeypatch.setattr(
+        manager,
+        "_get_python_candidates",
+        lambda skill_runtime=None: [
+            {
+                "executable": "/broken/python",
+                "required_modules": (),
+                "source": "skill.python_executable",
+            },
+            {
+                "executable": "/healthy/python",
+                "required_modules": (),
+                "source": "skill.python_fallback_executables",
+            },
+        ],
+    )
     monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
 
     calls: list[str] = []
@@ -1976,10 +2075,18 @@ def test_invoke_external_skill_function_does_not_retry_business_failure(
         default=str(tmp_path),
     )
 
-    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
-        {"executable": "/primary/python", "required_modules": (), "source": "auto"},
-        {"executable": "/fallback/python", "required_modules": (), "source": "auto"},
-    ])
+    monkeypatch.setattr(
+        manager,
+        "_get_python_candidates",
+        lambda skill_runtime=None: [
+            {"executable": "/primary/python", "required_modules": (), "source": "auto"},
+            {
+                "executable": "/fallback/python",
+                "required_modules": (),
+                "source": "auto",
+            },
+        ],
+    )
     monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
 
     calls: list[str] = []
@@ -2041,15 +2148,21 @@ def test_invoke_external_skill_function_beats_heartbeat_from_process_output(
         default=str(tmp_path),
     )
 
-    monkeypatch.setattr(manager, "_get_python_candidates", lambda skill_runtime=None: [
-        {"executable": "/primary/python", "required_modules": (), "source": "auto"},
-    ])
+    monkeypatch.setattr(
+        manager,
+        "_get_python_candidates",
+        lambda skill_runtime=None: [
+            {"executable": "/primary/python", "required_modules": (), "source": "auto"},
+        ],
+    )
     monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
 
     beats: list[tuple[str | None, float | None]] = []
 
     class _Heartbeat:
-        def beat(self, *, progress: float | None = None, status: str | None = None) -> None:
+        def beat(
+            self, *, progress: float | None = None, status: str | None = None
+        ) -> None:
             beats.append((status, progress))
 
     monkeypatch.setattr(manager, "_get_current_task_heartbeat", lambda: _Heartbeat())
@@ -2100,7 +2213,9 @@ def test_invoke_external_skill_function_beats_heartbeat_from_process_output(
     assert any(progress == 0.75 for _, progress in beats)
 
 
-def test_inspect_chat_context_uses_channel_context_default_chat_key(tmp_path: Path) -> None:
+def test_inspect_chat_context_uses_channel_context_default_chat_key(
+    tmp_path: Path,
+) -> None:
     from babybot.channels.tools import ChannelToolContext
 
     manager = object.__new__(ResourceManager)
@@ -2266,12 +2381,26 @@ def test_inspect_skills_and_load_errors_tools_proxy_to_manager() -> None:
     ]
 
     skills_text = asyncio.run(observability_tools.build_inspect_skills_tool(manager)())
-    errors_text = asyncio.run(observability_tools.build_inspect_skill_load_errors_tool(manager)(limit=5))
-    tools_text = asyncio.run(observability_tools.build_inspect_tools_tool(type("Owner", (), {
-        "_inspect_tools": staticmethod(
-            lambda query="", group="", active_only=False, limit=50, offset=0: "ok-tools"
-        )
-    })())())
+    errors_text = asyncio.run(
+        observability_tools.build_inspect_skill_load_errors_tool(manager)(limit=5)
+    )
+    tools_text = asyncio.run(
+        observability_tools.build_inspect_tools_tool(
+            type(
+                "Owner",
+                (),
+                {
+                    "_inspect_tools": staticmethod(
+                        lambda query="",
+                        group="",
+                        active_only=False,
+                        limit=50,
+                        offset=0: "ok-tools"
+                    )
+                },
+            )()
+        )()
+    )
 
     assert "demo" in skills_text
     assert "demo__run" in skills_text
@@ -2351,7 +2480,9 @@ def test_reload_skill_preserves_existing_active_state(tmp_path: Path) -> None:
     assert manager.skills["demo"].active is False
 
 
-def test_delete_skill_removes_workspace_skill_files_and_registry_entries(tmp_path: Path) -> None:
+def test_delete_skill_removes_workspace_skill_files_and_registry_entries(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.json"
     workspace_dir = tmp_path / "workspace"
     config_path.write_text(
@@ -2421,8 +2552,9 @@ def test_delete_skill_rejects_builtin_skill_directories(tmp_path: Path) -> None:
     assert "demo" in manager.skills
 
 
-
-def test_callable_tool_runs_sync_tools_concurrently_without_workspace_chdir(tmp_path: Path, monkeypatch) -> None:
+def test_callable_tool_runs_sync_tools_concurrently_without_workspace_chdir(
+    tmp_path: Path, monkeypatch
+) -> None:
     dir_a = tmp_path / "a"
     dir_b = tmp_path / "b"
     dir_a.mkdir()
@@ -2478,9 +2610,13 @@ def test_callable_tool_runs_sync_tools_concurrently_without_workspace_chdir(tmp_
     )
 
     async def _run() -> tuple[str, str]:
-        first = asyncio.create_task(tool_a.invoke({}, ToolContext(session_id="s1", state={})))
+        first = asyncio.create_task(
+            tool_a.invoke({}, ToolContext(session_id="s1", state={}))
+        )
         await asyncio.to_thread(started.wait, 1.0)
-        second = asyncio.create_task(tool_b.invoke({}, ToolContext(session_id="s2", state={})))
+        second = asyncio.create_task(
+            tool_b.invoke({}, ToolContext(session_id="s2", state={}))
+        )
         result_a, result_b = await asyncio.gather(first, second)
         assert result_a.ok is True
         assert result_b.ok is True
@@ -2529,7 +2665,6 @@ def test_callable_tool_without_manager_uses_bound_context_write_root(
 
     assert result.ok is True
     assert result.content == str(workspace.resolve())
-
 
 
 def test_resource_manager_areset_awaits_client_close() -> None:
@@ -2763,6 +2898,7 @@ def test_tool_registry_unregister_removes_tool() -> None:
         name = "foo"
         description = "foo tool"
         schema = {}
+
         async def invoke(self, args, context):
             pass
 
@@ -2790,6 +2926,7 @@ def test_tool_registry_unregister_group_removes_all_group_tools() -> None:
             self.name = name
             self.description = f"{name} tool"
             self.schema = {}
+
         async def invoke(self, args, context):
             pass
 

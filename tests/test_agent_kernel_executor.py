@@ -46,12 +46,16 @@ class AddTool(Tool):
 
 
 class TwoStepModel(ModelProvider):
-    async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+    async def generate(
+        self, request: ModelRequest, context: ExecutionContext
+    ) -> ModelResponse:
         last = request.messages[-1]
         if last.role == "tool":
             return ModelResponse(text=f"final={last.content}")
         return ModelResponse(
-            tool_calls=(ModelToolCall(call_id="c1", name="add", arguments={"a": 1, "b": 2}),)
+            tool_calls=(
+                ModelToolCall(call_id="c1", name="add", arguments={"a": 1, "b": 2}),
+            )
         )
 
 
@@ -126,7 +130,9 @@ def test_single_agent_executor_respects_tool_lease() -> None:
     assert "Tool unavailable: add" in result.output
 
 
-def test_single_agent_executor_sets_tool_call_id_and_keeps_assistant_tool_calls() -> None:
+def test_single_agent_executor_sets_tool_call_id_and_keeps_assistant_tool_calls() -> (
+    None
+):
     class InspectingModel(ModelProvider):
         def __init__(self) -> None:
             self.requests: list[ModelRequest] = []
@@ -308,11 +314,15 @@ def test_single_agent_executor_fails_fast_on_exploration_only_turns() -> None:
 
     assert result.status == "failed"
     assert "No progress" in result.error
-    assert tool.calls >= 5
-    assert model.calls >= 6
+    # With exploration-only no-progress detection restored, the executor
+    # fails after max_no_progress_turns (3) consecutive exploration-only rounds.
+    assert tool.calls == 3
+    assert model.calls == 3
 
 
-def test_single_agent_executor_allows_short_exploration_burst_before_finishing() -> None:
+def test_single_agent_executor_allows_short_exploration_burst_before_finishing() -> (
+    None
+):
     class ExploringThenFinishingModel(ModelProvider):
         def __init__(self) -> None:
             self.calls = 0
@@ -322,7 +332,8 @@ def test_single_agent_executor_allows_short_exploration_burst_before_finishing()
         ) -> ModelResponse:
             del request, context
             self.calls += 1
-            if self.calls <= 4:
+            # 2 exploration rounds (within max_no_progress_turns=3), then finish
+            if self.calls <= 2:
                 return ModelResponse(
                     text="",
                     tool_calls=(
@@ -354,7 +365,7 @@ def test_single_agent_executor_allows_short_exploration_burst_before_finishing()
 
     assert result.status == "succeeded"
     assert result.output == "done"
-    assert tool.calls == 4
+    assert tool.calls == 2
 
 
 def test_single_agent_executor_collects_usage_metadata() -> None:
@@ -386,7 +397,9 @@ def test_single_agent_executor_collects_usage_metadata() -> None:
     assert result.metadata["total_tokens"] == 15
 
 
-def test_single_agent_executor_collects_tool_artifacts_into_context(tmp_path: Path) -> None:
+def test_single_agent_executor_collects_tool_artifacts_into_context(
+    tmp_path: Path,
+) -> None:
     image_path = tmp_path / "pig.png"
     image_path.write_bytes(b"png")
 
@@ -475,11 +488,15 @@ def test_single_agent_executor_isolates_parallel_tool_exceptions() -> None:
             if self.calls == 1:
                 return ModelResponse(
                     tool_calls=(
-                        ModelToolCall(call_id="c1", name="add", arguments={"a": 2, "b": 3}),
+                        ModelToolCall(
+                            call_id="c1", name="add", arguments={"a": 2, "b": 3}
+                        ),
                         ModelToolCall(call_id="c2", name="explode", arguments={}),
                     )
                 )
-            tool_messages = [msg.content for msg in request.messages if msg.role == "tool"]
+            tool_messages = [
+                msg.content for msg in request.messages if msg.role == "tool"
+            ]
             return ModelResponse(text=" | ".join(tool_messages))
 
     registry = ToolRegistry()
@@ -649,7 +666,9 @@ def test_single_agent_executor_enforces_token_budget() -> None:
     assert "token budget exceeded" in result.error.lower()
 
 
-def test_single_agent_executor_truncates_huge_tool_outputs_before_next_model_call() -> None:
+def test_single_agent_executor_truncates_huge_tool_outputs_before_next_model_call() -> (
+    None
+):
     huge = "A" * 50000
 
     class HugeTool(Tool):
@@ -674,7 +693,9 @@ def test_single_agent_executor_truncates_huge_tool_outputs_before_next_model_cal
             self.calls = 0
             self.last_tool_content = ""
 
-        async def generate(self, request: ModelRequest, context: ExecutionContext) -> ModelResponse:
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
             del context
             self.calls += 1
             if self.calls == 1:

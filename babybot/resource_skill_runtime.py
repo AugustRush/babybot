@@ -119,8 +119,7 @@ class ResourceSkillRuntime:
             ]
         else:
             scored = [
-                (self._match_score(skill, task_description), skill)
-                for skill in active
+                (self._match_score(skill, task_description), skill) for skill in active
             ]
             matched = [
                 skill
@@ -162,21 +161,21 @@ class ResourceSkillRuntime:
         else:
             skill_catalog = self.format_skill_catalog(max_items=24)
         lines = [
-            f"你是 {agent_name}，是执行型子任务，不是任务编排器，也不是最终回复器。",
+            f"你是 {agent_name}，请完成任务并直接输出最终答案。",
             f"任务：{task_description}",
             f"已激活技能（本次强相关）：{selected_names}",
             f"可用技能目录（按需选择）：\n{skill_catalog}",
             f"可用工具：{tools_text}",
             "要求：",
-            "1. 只执行当前任务说明中明确给出的目标、输入、输出与完成条件，不要自行扩展目标。",
-            "2. 缺少输入、目标路径、上游结果或权限时，立即返回失败原因；不要继续猜测，不要大范围探索。",
-            "3. 禁止编造工具执行结果、虚构文件路径，或把 output/ 当成技能源码目录。",
-            "4. 不要创建或派生新的 worker，不要把任务改写成讨论、评审或 team 流程。",
-            "5. 不要直接向用户发送消息；只把执行结果、差异、失败原因写入最终输出返回给主 agent。",
-            "6. 对代码或技能维护任务，优先使用明确目标的文件工具；少量定位后仍无目标时应立即停止并说明缺口。",
-            "7. 更新或删除现有 workspace 技能前，必须先检查目标技能是否存在，并先查看该技能目录中的 SKILL.md。",
-            "8. workspace 技能的入口文档固定为 SKILL.md；不要猜测或依赖 skill.yaml、config.yaml 等文件，除非你已经确认它们真实存在。",
-            "9. 在宣称“新增支持/删除完成”前，必须先核对当前实现是否已经支持该能力，或目标是否本就不存在。",
+            "1. 如果任务是文本生成（写作、翻译、分析、总结、创意等），直接输出文本结果，不要调用任何工具。",
+            "2. 只有当任务明确需要外部操作（查询信息、生成图片、读写文件、执行代码等）时才调用工具。",
+            "3. 只执行任务说明中明确给出的目标，不要自行扩展目标或大范围探索。",
+            "4. 禁止编造工具执行结果、虚构文件路径，或把 output/ 当成技能源码目录。",
+            "5. 不要创建或派生新的 worker，不要把任务改写成讨论、评审或 team 流程。",
+            "6. 不要直接向用户发送消息；只把执行结果写入最终输出返回给主 agent。",
+            "7. 缺少输入、目标路径或权限时，立即返回失败原因，不要猜测。",
+            "8. 对代码或技能维护任务，优先使用明确目标的文件工具；少量定位后仍无目标时应立即停止并说明缺口。",
+            "9. 更新或删除现有 workspace 技能前，必须先检查目标技能是否存在，并查看 SKILL.md。",
             "10. 修改完成后必须 reload_skill，确认技能可重新加载。",
         ]
         return "\n".join(lines)
@@ -192,7 +191,9 @@ class ResourceSkillRuntime:
             return self.format_skill_catalog(max_items=max_items)
 
         accessible = []
-        for skill in sorted(self._owner.skills.values(), key=lambda item: item.name.lower()):
+        for skill in sorted(
+            self._owner.skills.values(), key=lambda item: item.name.lower()
+        ):
             if not skill.active:
                 continue
             skill_lease = skill.lease or ToolLease()
