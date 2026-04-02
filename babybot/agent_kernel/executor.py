@@ -18,7 +18,7 @@ from .model import (
 )
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
-from .types import ExecutionContext, TaskContract, TaskResult, ToolLease
+from .types import AgentEvent, ExecutionContext, TaskContract, TaskResult, ToolLease
 from ..context_views import build_context_view_messages
 from ..context import Entry, _estimate_token_count, _extract_keywords
 
@@ -42,6 +42,18 @@ class SingleAgentExecutor:
 
     It runs a compact agent loop:
     model -> tool_calls -> tool_results -> model ... -> final text
+
+    Lifecycle events (emitted to context.event_bus):
+    - agent_start / agent_end: bracket the entire execute() call
+    - turn_start / turn_end: bracket each step in the main loop
+    - llm_request_start / llm_request_end: bracket each model.generate() call
+    - tool_execution_start / tool_execution_end: bracket each tool invocation
+    - context_transform: emitted when transformContext hook modifies messages
+
+    Hook points (set on ExecutionContext):
+    - transform_context(messages, context) -> messages: modify message list before LLM
+    - before_tool_call(tool_name, args, context) -> None: called before each tool invoke
+    - after_tool_call(tool_name, args, result, context) -> None: called after each tool
     """
 
     model: ModelProvider
@@ -53,6 +65,29 @@ class SingleAgentExecutor:
         | None
     ) = None
     policy: ExecutorPolicy = field(default_factory=ExecutorPolicy)
+
+    # ── Event emission helpers ───────────────────────────────────────
+
+    @staticmethod
+    def _emit(
+        context: ExecutionContext,
+        kind: str,
+        task_id: str = "",
+        step: int = 0,
+        **data: Any,
+    ) -> None:
+        """Emit a structured AgentEvent to the context's EventBus."""
+        context.event_bus.emit(
+            AgentEvent(
+                kind=kind,  # type: ignore[arg-type]
+                session_id=context.session_id,
+                task_id=task_id,
+                step=step,
+                data=data,
+            )
+        )
+
+    # ── Static helpers ───────────────────────────────────────────────
 
     @staticmethod
     def _truncate_tool_output_for_model(output: str, max_chars: int) -> str:
@@ -100,9 +135,15 @@ class SingleAgentExecutor:
         state["pending_runtime_hints"] = []
         return tuple(messages)
 
+    # ── Main execution loop ──────────────────────────────────────────
+
     async def execute(
         self, task: TaskContract, context: ExecutionContext
     ) -> TaskResult:
+        self._emit(
+            context, "agent_start", task_id=task.task_id, description=task.description
+        )
+
         skills = self._resolve_skills(task, context)
         base_lease = task.lease
         for skill in skills:
@@ -193,6 +234,10 @@ class SingleAgentExecutor:
         for step in range(1, max(1, self.policy.max_steps) + 1):
             if heartbeat is not None:
                 heartbeat.beat()
+
+            # ── Turn start event ─────────────────────────────────
+            self._emit(context, "turn_start", task_id=task.task_id, step=step)
+            # Legacy event for backward compat
             context.emit("executor.step", task_id=task.task_id, step=step)
             logger.info(
                 "Executor step=%d/%d task=%s",
@@ -202,6 +247,22 @@ class SingleAgentExecutor:
             )
 
             messages = loop_guard.compress_messages(messages)
+
+            # ── transformContext hook ─────────────────────────────
+            transform_fn = context.transform_context
+            if callable(transform_fn):
+                pre_count = len(messages)
+                messages = transform_fn(messages, context)
+                if len(messages) != pre_count:
+                    self._emit(
+                        context,
+                        "context_transform",
+                        task_id=task.task_id,
+                        step=step,
+                        messages_before=pre_count,
+                        messages_after=len(messages),
+                    )
+
             runtime_hint_messages = self._consume_runtime_hint_messages(context.state)
             if blocked_tool_names:
                 step_tools = [
@@ -211,6 +272,17 @@ class SingleAgentExecutor:
                 ]
             else:
                 step_tools = available_tools
+
+            # ── LLM request ──────────────────────────────────────
+            self._emit(
+                context,
+                "llm_request_start",
+                task_id=task.task_id,
+                step=step,
+                message_count=len(messages) + len(runtime_hint_messages),
+                tool_count=len(step_tools),
+            )
+            llm_start = time.perf_counter()
             response = await self.model.generate(
                 ModelRequest(
                     messages=tuple([*messages, *runtime_hint_messages]),
@@ -219,10 +291,21 @@ class SingleAgentExecutor:
                 ),
                 context,
             )
+            llm_elapsed = time.perf_counter() - llm_start
             self._accumulate_usage(usage_totals, response)
+            self._emit(
+                context,
+                "llm_request_end",
+                task_id=task.task_id,
+                step=step,
+                elapsed_s=round(llm_elapsed, 3),
+                has_tool_calls=bool(response.tool_calls),
+                finish_reason=response.finish_reason or "stop",
+            )
+
             budget_error = self._check_token_budget(usage_totals, max_model_tokens)
             if budget_error:
-                return TaskResult(
+                result = TaskResult(
                     task_id=task.task_id,
                     status="failed",
                     error=budget_error,
@@ -231,6 +314,14 @@ class SingleAgentExecutor:
                         extra={"max_model_tokens": max_model_tokens},
                     ),
                 )
+                self._emit(
+                    context,
+                    "agent_end",
+                    task_id=task.task_id,
+                    status="failed",
+                    error=budget_error,
+                )
+                return result
 
             if response.tool_calls:
                 tool_call_count += len(response.tool_calls)
@@ -403,7 +494,7 @@ class SingleAgentExecutor:
                             no_progress_turns,
                             last_issues,
                         )
-                        return TaskResult(
+                        result = TaskResult(
                             task_id=task.task_id,
                             status="failed",
                             error=error,
@@ -419,11 +510,17 @@ class SingleAgentExecutor:
                                 },
                             ),
                         )
+                        self._emit(
+                            context,
+                            "agent_end",
+                            task_id=task.task_id,
+                            status="failed",
+                            error=error,
+                        )
+                        return result
                 else:
                     # When all valid calls are exploration-only (read/view/list/inspect/shell-read),
                     # the agent isn't making real progress — count toward no-progress limit.
-                    # This prevents sub-agents from endlessly exploring when they should
-                    # be producing output or using action tools.
                     if all(
                         loop_guard.is_exploration_call(tc.name, tc.arguments)
                         for tc, _ in valid_calls
@@ -450,6 +547,21 @@ class SingleAgentExecutor:
                         tc: ModelToolCall,
                         reg: Any,
                     ) -> tuple[ModelToolCall, str, list[str], bool]:
+                        # ── before_tool_call hook ────────────────
+                        hook_before = context.before_tool_call
+                        if callable(hook_before):
+                            hook_before(tc.name, tc.arguments, context)
+
+                        # ── tool_execution_start event ───────────
+                        self._emit(
+                            context,
+                            "tool_execution_start",
+                            task_id=task.task_id,
+                            step=step,
+                            tool_name=tc.name,
+                            call_id=tc.call_id,
+                        )
+
                         logger.info(
                             "Executor invoke task=%s tool=%s args_keys=%s",
                             task.task_id,
@@ -467,15 +579,26 @@ class SingleAgentExecutor:
                                 tc.name,
                                 elapsed,
                             )
-                            return (
-                                tc,
-                                (
-                                    f"Tool error: {exc}"
-                                    "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
-                                ),
-                                [],
-                                True,
+                            output = (
+                                f"Tool error: {exc}"
+                                "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
                             )
+                            # ── tool_execution_end event (error) ─
+                            self._emit(
+                                context,
+                                "tool_execution_end",
+                                task_id=task.task_id,
+                                step=step,
+                                tool_name=tc.name,
+                                call_id=tc.call_id,
+                                ok=False,
+                                elapsed_s=round(elapsed, 3),
+                            )
+                            # ── after_tool_call hook ─────────────
+                            hook_after = context.after_tool_call
+                            if callable(hook_after):
+                                hook_after(tc.name, tc.arguments, None, context)
+                            return (tc, output, [], True)
 
                         elapsed = time.perf_counter() - started
                         output = (
@@ -503,6 +626,24 @@ class SingleAgentExecutor:
                                 elapsed,
                                 (result.error or "")[:500],
                             )
+
+                        # ── tool_execution_end event (success) ───
+                        self._emit(
+                            context,
+                            "tool_execution_end",
+                            task_id=task.task_id,
+                            step=step,
+                            tool_name=tc.name,
+                            call_id=tc.call_id,
+                            ok=result.ok,
+                            elapsed_s=round(elapsed, 3),
+                            output_len=len(output),
+                        )
+                        # ── after_tool_call hook ─────────────────
+                        hook_after = context.after_tool_call
+                        if callable(hook_after):
+                            hook_after(tc.name, tc.arguments, result, context)
+
                         return tc, output, list(result.artifacts or []), not result.ok
 
                     done = await _aio.gather(
@@ -556,7 +697,7 @@ class SingleAgentExecutor:
                         task.task_id,
                         no_progress_turns,
                     )
-                    return TaskResult(
+                    result = TaskResult(
                         task_id=task.task_id,
                         status="failed",
                         error=error,
@@ -572,6 +713,23 @@ class SingleAgentExecutor:
                             },
                         ),
                     )
+                    self._emit(
+                        context,
+                        "agent_end",
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                    )
+                    return result
+
+                # ── Turn end event ───────────────────────────────
+                self._emit(
+                    context,
+                    "turn_end",
+                    task_id=task.task_id,
+                    step=step,
+                    tool_calls=[tc.name for tc in response.tool_calls],
+                )
 
                 if heartbeat is not None:
                     heartbeat.beat()
@@ -589,13 +747,14 @@ class SingleAgentExecutor:
                     max_model_tokens=max_model_tokens,
                 )
                 if text is None:
-                    return TaskResult(
+                    error = (
+                        f"Model token budget exceeded "
+                        f"({usage_totals['total_tokens']}/{max_model_tokens})."
+                    )
+                    result = TaskResult(
                         task_id=task.task_id,
                         status="failed",
-                        error=(
-                            f"Model token budget exceeded "
-                            f"({usage_totals['total_tokens']}/{max_model_tokens})."
-                        ),
+                        error=error,
                         metadata=self._build_usage_metadata(
                             usage_totals,
                             extra={
@@ -607,6 +766,14 @@ class SingleAgentExecutor:
                             },
                         ),
                     )
+                    self._emit(
+                        context,
+                        "agent_end",
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                    )
+                    return result
 
             text = text.strip()
             if text:
@@ -615,6 +782,18 @@ class SingleAgentExecutor:
                     task.task_id,
                     step,
                     len(text),
+                )
+                # ── Turn end (final) + Agent end events ──────────
+                self._emit(
+                    context, "turn_end", task_id=task.task_id, step=step, final=True
+                )
+                self._emit(
+                    context,
+                    "agent_end",
+                    task_id=task.task_id,
+                    status="succeeded",
+                    output_len=len(text),
+                    total_tool_calls=tool_call_count,
                 )
                 return TaskResult(
                     task_id=task.task_id,
@@ -636,10 +815,14 @@ class SingleAgentExecutor:
             task.task_id,
             self.policy.max_steps,
         )
+        error = f"No terminal answer within {self.policy.max_steps} steps."
+        self._emit(
+            context, "agent_end", task_id=task.task_id, status="failed", error=error
+        )
         return TaskResult(
             task_id=task.task_id,
             status="failed",
-            error=f"No terminal answer within {self.policy.max_steps} steps.",
+            error=error,
             metadata=self._build_usage_metadata(
                 usage_totals,
                 extra={

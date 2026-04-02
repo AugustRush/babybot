@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 import copy
 
-from .types import ExecutionContext
+from .types import EventBus, ExecutionContext
 
 
 @dataclass
@@ -58,9 +58,14 @@ class ContextManager:
     # Keys whose values are shared singletons or contain unpicklable
     # resources (e.g. sqlite3.Connection inside TapeStore/HybridMemoryStore).
     # They are passed by reference to child contexts instead of deep-copied.
-    _SHARED_STATE_KEYS = frozenset((
-        "tape", "tape_store", "memory_store", "upstream_results",
-    ))
+    _SHARED_STATE_KEYS = frozenset(
+        (
+            "tape",
+            "tape_store",
+            "memory_store",
+            "upstream_results",
+        )
+    )
     _OMITTED_STATE_KEYS = frozenset(("heartbeat",))
 
     def fork(self, session_id: str | None = None) -> ExecutionContext:
@@ -69,6 +74,10 @@ class ContextManager:
         Shared objects listed in ``_SHARED_STATE_KEYS`` are passed by reference
         so child tasks can signal the same heartbeat / read the same tape.
         Everything else is deep-copied for isolation.
+
+        The child context gets a fresh EventBus so events are isolated,
+        but hook callbacks (transform_context, before/after_tool_call)
+        are inherited by reference from the parent.
         """
         # Separate shared refs from copyable state to avoid deepcopy failures
         # on unpicklable objects (e.g. sqlite3.Connection in TapeStore).
@@ -83,8 +92,14 @@ class ContextManager:
                 copyable[k] = v
         new_state = copy.deepcopy(copyable)
         new_state.update(shared)
-        return ExecutionContext(
+        child = ExecutionContext(
             session_id=session_id or self._context.session_id,
             state=new_state,
             events=[],
+            event_bus=EventBus(),
+            # Inherit hook callbacks by reference
+            transform_context=self._context.transform_context,
+            before_tool_call=self._context.before_tool_call,
+            after_tool_call=self._context.after_tool_call,
         )
+        return child
