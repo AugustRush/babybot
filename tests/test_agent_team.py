@@ -1,11 +1,17 @@
 # tests/test_agent_team.py
-"""Tests for agent team: Mailbox and SharedTaskList."""
+"""Tests for agent team: Mailbox, SharedTaskList, and TeamRunner (debate + cooperative)."""
 
 from __future__ import annotations
 import asyncio
 import pytest
 from babybot.agent_kernel.execution_constraints import TeamExecutionPolicy
-from babybot.agent_kernel.team import Mailbox, SharedTaskList, TeamTask, TeamRunner
+from babybot.agent_kernel.team import (
+    Mailbox,
+    SharedTaskList,
+    TeamTask,
+    TeamRunner,
+    CooperativeResult,
+)
 
 
 @pytest.mark.asyncio
@@ -238,6 +244,7 @@ async def test_team_runner_sync_on_turn_works() -> None:
 @pytest.mark.asyncio
 async def test_team_runner_on_turn_not_required() -> None:
     """Omitting on_turn still works (backward compatible)."""
+
     async def fake_executor(agent_id: str, prompt: str, ctx: dict) -> str:
         return "ok"
 
@@ -289,7 +296,9 @@ def test_team_runner_summarizes_partial_result_when_turn_budget_exceeded() -> No
     runner = TeamRunner(
         executor=slow_executor,
         max_rounds=3,
-        policy=TeamExecutionPolicy(max_turn_seconds=0.01, on_budget_exhausted="summarize_partial"),
+        policy=TeamExecutionPolicy(
+            max_turn_seconds=0.01, on_budget_exhausted="summarize_partial"
+        ),
     )
     result = asyncio.run(
         runner.run_debate(
@@ -305,3 +314,267 @@ def test_team_runner_summarizes_partial_result_when_turn_budget_exceeded() -> No
     assert result.completed is False
     assert result.termination_reason == "turn_timeout"
     assert "partial" in result.summary.lower()
+
+
+# ── Cooperative mode tests ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cooperative_basic_two_agents_two_tasks() -> None:
+    """Two agents execute two independent tasks in cooperative mode."""
+    call_log: list[tuple[str, str]] = []
+
+    async def mock_executor(agent_id: str, prompt: str, context: dict) -> str:
+        # Extract task_id from prompt
+        task_id = ""
+        for line in prompt.split("\n"):
+            if line.startswith("Task ["):
+                task_id = line.split("[")[1].split("]")[0]
+                break
+        call_log.append((agent_id, task_id))
+        return f"Result from {agent_id} for {task_id}"
+
+    runner = TeamRunner(executor=mock_executor, max_rounds=5)
+    result = await runner.run_cooperative(
+        topic="Build a website",
+        agents=[
+            {"id": "agent_a", "role": "frontend", "description": "Frontend developer"},
+            {"id": "agent_b", "role": "backend", "description": "Backend developer"},
+        ],
+        tasks=[
+            {"task_id": "t1", "description": "Build homepage"},
+            {"task_id": "t2", "description": "Build API"},
+        ],
+    )
+
+    assert isinstance(result, CooperativeResult)
+    assert result.tasks_completed == 2
+    assert result.tasks_failed == 0
+    assert result.tasks_total == 2
+    assert result.completed is True
+    assert result.termination_reason == "completed"
+    assert "t1" in result.task_outputs
+    assert "t2" in result.task_outputs
+    assert len(result.mailbox_log) >= 2  # At least 2 task_completed broadcasts
+
+
+@pytest.mark.asyncio
+async def test_cooperative_task_dependencies() -> None:
+    """Tasks with deps wait for upstream tasks to complete first."""
+    execution_order: list[str] = []
+
+    async def mock_executor(agent_id: str, prompt: str, context: dict) -> str:
+        task_id = ""
+        for line in prompt.split("\n"):
+            if line.startswith("Task ["):
+                task_id = line.split("[")[1].split("]")[0]
+                break
+        execution_order.append(task_id)
+        await asyncio.sleep(0.02)  # Simulate work
+        return f"Done {task_id}"
+
+    runner = TeamRunner(executor=mock_executor, max_rounds=5)
+    result = await runner.run_cooperative(
+        topic="Sequential pipeline",
+        agents=[
+            {"id": "a", "role": "worker", "description": "Worker"},
+            {"id": "b", "role": "worker", "description": "Worker"},
+        ],
+        tasks=[
+            {"task_id": "step1", "description": "First step"},
+            {"task_id": "step2", "description": "Second step", "deps": ["step1"]},
+        ],
+    )
+
+    assert result.tasks_completed == 2
+    assert result.completed is True
+    # step1 must complete before step2 can be claimed
+    assert execution_order.index("step1") < execution_order.index("step2")
+
+
+@pytest.mark.asyncio
+async def test_cooperative_task_failure() -> None:
+    """A failing task is recorded and doesn't block other tasks."""
+
+    async def failing_executor(agent_id: str, prompt: str, context: dict) -> str:
+        task_id = ""
+        for line in prompt.split("\n"):
+            if line.startswith("Task ["):
+                task_id = line.split("[")[1].split("]")[0]
+                break
+        if task_id == "bad_task":
+            raise ValueError("Intentional failure")
+        return f"Success for {task_id}"
+
+    runner = TeamRunner(executor=failing_executor, max_rounds=5)
+    result = await runner.run_cooperative(
+        topic="Mixed tasks",
+        agents=[
+            {"id": "a", "role": "worker", "description": "Worker"},
+            {"id": "b", "role": "worker", "description": "Worker"},
+        ],
+        tasks=[
+            {"task_id": "good_task", "description": "This should succeed"},
+            {"task_id": "bad_task", "description": "This will fail"},
+        ],
+    )
+
+    assert result.tasks_completed == 1
+    assert result.tasks_failed == 1
+    assert result.tasks_total == 2
+    assert result.completed is False  # Not all tasks succeeded
+    assert "good_task" in result.task_outputs
+    assert "bad_task" not in result.task_outputs
+
+
+@pytest.mark.asyncio
+async def test_cooperative_on_task_complete_callback() -> None:
+    """on_task_complete callback fires after each successful task."""
+    callback_log: list[tuple[str, str]] = []
+
+    async def mock_executor(agent_id: str, prompt: str, context: dict) -> str:
+        return "done"
+
+    async def on_complete(agent_id: str, task_id: str, output: str) -> None:
+        callback_log.append((agent_id, task_id))
+
+    runner = TeamRunner(executor=mock_executor, max_rounds=5)
+    result = await runner.run_cooperative(
+        topic="Callback test",
+        agents=[
+            {"id": "a", "role": "worker", "description": "Worker"},
+            {"id": "b", "role": "worker", "description": "Worker"},
+        ],
+        tasks=[
+            {"task_id": "t1", "description": "Task 1"},
+            {"task_id": "t2", "description": "Task 2"},
+        ],
+        on_task_complete=on_complete,
+    )
+
+    assert result.tasks_completed == 2
+    assert len(callback_log) == 2
+    task_ids_completed = {tid for _, tid in callback_log}
+    assert task_ids_completed == {"t1", "t2"}
+
+
+@pytest.mark.asyncio
+async def test_cooperative_upstream_context_in_prompt() -> None:
+    """Dependent tasks receive upstream results via mailbox in their prompts."""
+    prompts_seen: dict[str, str] = {}
+
+    async def capturing_executor(agent_id: str, prompt: str, context: dict) -> str:
+        task_id = ""
+        for line in prompt.split("\n"):
+            if line.startswith("Task ["):
+                task_id = line.split("[")[1].split("]")[0]
+                break
+        prompts_seen[task_id] = prompt
+        return f"output_of_{task_id}"
+
+    runner = TeamRunner(executor=capturing_executor, max_rounds=5)
+    result = await runner.run_cooperative(
+        topic="Context passing",
+        agents=[
+            {"id": "a", "role": "producer", "description": "Produces data"},
+            {"id": "b", "role": "consumer", "description": "Consumes data"},
+        ],
+        tasks=[
+            {"task_id": "produce", "description": "Produce data"},
+            {"task_id": "consume", "description": "Consume data", "deps": ["produce"]},
+        ],
+    )
+
+    assert result.tasks_completed == 2
+    # The consumer task's prompt should contain upstream context from the producer
+    consume_prompt = prompts_seen.get("consume", "")
+    assert "上游任务结果" in consume_prompt or "DONE" in consume_prompt
+
+
+@pytest.mark.asyncio
+async def test_cooperative_deadline_exceeded() -> None:
+    """Cooperative execution respects deadline and reports partial results."""
+
+    async def slow_executor(agent_id: str, prompt: str, context: dict) -> str:
+        await asyncio.sleep(0.5)  # Slow task
+        return "done"
+
+    runner = TeamRunner(
+        executor=slow_executor,
+        max_rounds=5,
+        policy=TeamExecutionPolicy(max_total_seconds=0.1),
+    )
+    result = await runner.run_cooperative(
+        topic="Deadline test",
+        agents=[
+            {"id": "a", "role": "worker", "description": "Worker"},
+            {"id": "b", "role": "worker", "description": "Worker"},
+        ],
+        tasks=[
+            {"task_id": "t1", "description": "Slow task 1"},
+            {"task_id": "t2", "description": "Slow task 2"},
+            {"task_id": "t3", "description": "Slow task 3"},
+        ],
+    )
+
+    # Should not have completed all tasks due to deadline
+    assert result.tasks_total == 3
+    assert result.termination_reason == "deadline_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_cooperative_mailbox_log_captured() -> None:
+    """Mailbox broadcast messages are recorded in the result log."""
+
+    async def mock_executor(agent_id: str, prompt: str, context: dict) -> str:
+        return "result"
+
+    runner = TeamRunner(executor=mock_executor, max_rounds=5)
+    result = await runner.run_cooperative(
+        topic="Log test",
+        agents=[
+            {"id": "a", "role": "worker", "description": "Worker"},
+            {"id": "b", "role": "worker", "description": "Worker"},
+        ],
+        tasks=[
+            {"task_id": "t1", "description": "Task 1"},
+        ],
+    )
+
+    assert result.tasks_completed == 1
+    assert len(result.mailbox_log) >= 1
+    assert result.mailbox_log[0]["type"] == "task_completed"
+    assert result.mailbox_log[0]["task_id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_cooperative_max_agents_policy() -> None:
+    """TeamExecutionPolicy.max_agents limits the number of active workers."""
+
+    call_agents: set[str] = set()
+
+    async def mock_executor(agent_id: str, prompt: str, context: dict) -> str:
+        call_agents.add(agent_id)
+        return "done"
+
+    runner = TeamRunner(
+        executor=mock_executor,
+        max_rounds=5,
+        policy=TeamExecutionPolicy(max_agents=1),
+    )
+    result = await runner.run_cooperative(
+        topic="Agent limit test",
+        agents=[
+            {"id": "a", "role": "worker1", "description": "Worker 1"},
+            {"id": "b", "role": "worker2", "description": "Worker 2"},
+            {"id": "c", "role": "worker3", "description": "Worker 3"},
+        ],
+        tasks=[
+            {"task_id": "t1", "description": "Task 1"},
+            {"task_id": "t2", "description": "Task 2"},
+        ],
+    )
+
+    assert result.tasks_completed == 2
+    # Only 1 agent should have been active (max_agents=1)
+    assert len(call_agents) == 1

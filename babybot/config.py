@@ -19,7 +19,7 @@ class ModelConfig:
     api_key: str = ""
     api_base: str = ""
     temperature: float = 0.7
-    max_tokens: int = 2048
+    max_tokens: int = 65536
 
     def validate(self) -> None:
         """Validate configuration."""
@@ -33,10 +33,12 @@ class ModelConfig:
             errors.append(
                 f"Temperature must be between 0 and 2, got {self.temperature}"
             )
-        if self.max_tokens <= 0 or self.max_tokens > 32768:
-            errors.append(
-                f"max_tokens must be between 1 and 32768, got {self.max_tokens}"
+        if self.max_tokens <= 0:
+            logger.warning(
+                "max_tokens=%d is invalid, falling back to default 65536",
+                self.max_tokens,
             )
+            self.max_tokens = 65536
         if errors:
             raise ValueError("; ".join(errors))
 
@@ -179,7 +181,7 @@ class Config:
             api_key=model_conf.get("api_key", "") or os.getenv("OPENAI_API_KEY", ""),
             api_base=model_conf.get("api_base", "") or os.getenv("OPENAI_API_BASE", ""),
             temperature=model_conf.get("temperature", 0.7),
-            max_tokens=model_conf.get("max_tokens", 2048),
+            max_tokens=model_conf.get("max_tokens", 65536),
         )
 
         # Create system config
@@ -350,7 +352,7 @@ class Config:
                 "api_key": "",
                 "api_base": "",
                 "temperature": 0.7,
-                "max_tokens": 2048,
+                "max_tokens": 65536,
             },
             "mcp_servers": {},
             "system": {

@@ -18,6 +18,7 @@ __all__ = [
     "SharedTaskList",
     "TeamTask",
     "TeamRunner",
+    "CooperativeResult",
     "DebateResult",
 ]
 
@@ -148,6 +149,21 @@ class DebateResult:
     termination_reason: str = "completed"
 
 
+@dataclass
+class CooperativeResult:
+    """Outcome of a cooperative (task-based) team execution."""
+
+    topic: str
+    tasks_completed: int
+    tasks_failed: int
+    tasks_total: int
+    task_outputs: dict[str, str]
+    mailbox_log: list[dict[str, str]]
+    summary: str
+    completed: bool = True
+    termination_reason: str = "completed"
+
+
 class TeamRunner:
     """Runs structured multi-agent debate-style interactions.
 
@@ -176,7 +192,9 @@ class TeamRunner:
             f"Partial debate summary for '{topic}' ({reason}).",
         ]
         if not transcript:
-            summary_parts.append("No agent completed a full turn before the budget was exhausted.")
+            summary_parts.append(
+                "No agent completed a full turn before the budget was exhausted."
+            )
             return "\n".join(summary_parts)
         summary_parts.append("Latest completed arguments:")
         for entry in transcript[-len(agents) :]:
@@ -226,7 +244,9 @@ class TeamRunner:
         )
         logger.info(
             "Debate started: topic=%r agents=%s max_rounds=%d",
-            topic, agent_ids, self._max_rounds,
+            topic,
+            agent_ids,
+            self._max_rounds,
         )
 
         for round_num in range(1, self._max_rounds + 1):
@@ -241,6 +261,7 @@ class TeamRunner:
             logger.info("Debate round %d/%d started", round_num, self._max_rounds)
             if on_round_start is not None:
                 import inspect as _inspect
+
                 _result = on_round_start(round_num, self._max_rounds)
                 if _inspect.isawaitable(_result):
                     await _result
@@ -287,7 +308,10 @@ class TeamRunner:
                     )
                 logger.info(
                     "Debate turn: round=%d agent=%s role=%s output_len=%d",
-                    round_num, agent["id"], agent["role"], len(output),
+                    round_num,
+                    agent["id"],
+                    agent["role"],
+                    len(output),
                 )
                 transcript.append(
                     {
@@ -301,6 +325,7 @@ class TeamRunner:
 
                 if on_turn is not None:
                     import inspect as _inspect
+
                     _result = on_turn(agent["id"], agent["role"], round_num, output)
                     if _inspect.isawaitable(_result):
                         await _result
@@ -311,7 +336,8 @@ class TeamRunner:
                 if converged:
                     logger.info(
                         "Debate converged at round %d: %s",
-                        round_num, reason[:200],
+                        round_num,
+                        reason[:200],
                     )
                     return DebateResult(
                         topic=topic,
@@ -325,7 +351,9 @@ class TeamRunner:
         # Max rounds reached -- summarize
         logger.info(
             "Debate completed: topic=%r rounds=%d total_turns=%d",
-            topic, self._max_rounds, len(transcript),
+            topic,
+            self._max_rounds,
+            len(transcript),
         )
         summary_parts = [
             f"Debate on '{topic}' completed after {self._max_rounds} rounds."
@@ -338,4 +366,232 @@ class TeamRunner:
             rounds=self._max_rounds,
             transcript=transcript,
             summary="\n".join(summary_parts),
+        )
+
+    async def run_cooperative(
+        self,
+        topic: str,
+        agents: list[dict[str, str]],
+        tasks: list[dict[str, Any]],
+        *,
+        on_task_complete: Any | None = None,
+    ) -> CooperativeResult:
+        """Run cooperative task-based execution.
+
+        Each agent claims tasks from a SharedTaskList and executes them.
+        Agents communicate results via Mailbox broadcasts so downstream
+        tasks (declared via ``deps``) can use upstream outputs.
+
+        Args:
+            topic: High-level goal description.
+            agents: Agent definitions (same format as ``run_debate``).
+            tasks: List of task dicts with ``task_id``, ``description``,
+                   and optional ``deps`` (list of upstream task_ids).
+            on_task_complete: Optional callback ``(agent_id, task_id, output)``
+                             invoked after each task finishes.
+        """
+        import inspect as _inspect
+
+        mailbox = Mailbox()
+        task_list = SharedTaskList()
+
+        for task_def in tasks:
+            task_list.add(
+                TeamTask(
+                    task_id=task_def["task_id"],
+                    description=task_def["description"],
+                    deps=list(task_def.get("deps") or []),
+                )
+            )
+
+        agent_ids = [a["id"] for a in agents]
+        loop = asyncio.get_running_loop()
+        deadline = (
+            loop.time() + float(self._policy.max_total_seconds)
+            if self._policy.max_total_seconds is not None
+            else None
+        )
+        mailbox_log: list[dict[str, str]] = []
+
+        logger.info(
+            "Cooperative started: topic=%r agents=%s tasks=%d",
+            topic,
+            agent_ids,
+            len(tasks),
+        )
+
+        async def _agent_worker(agent: dict[str, str]) -> None:
+            """Worker loop: claim → execute → broadcast result → repeat."""
+            aid = agent["id"]
+            agent_exec = agent.get("executor", self._executor)
+
+            while True:
+                if deadline is not None and loop.time() >= deadline:
+                    break
+
+                claimed = task_list.claim(aid)
+                if claimed is None:
+                    if task_list.all_done():
+                        break
+                    # No task available yet — wait a bit and retry.
+                    await asyncio.sleep(0.05)
+                    if task_list.all_done():
+                        break
+                    continue
+
+                # Build prompt with upstream context from mailbox + completed deps.
+                upstream_msgs = mailbox.receive(aid)
+                upstream_context = ""
+                # Combine mailbox messages with direct dep outputs from task list.
+                upstream_parts: list[str] = []
+                if upstream_msgs:
+                    upstream_parts.extend(
+                        f"  [{m.sender}]: {m.content[:300]}" for m in upstream_msgs
+                    )
+                # Also inject completed dep task outputs directly — this ensures
+                # context flows even when the same agent executed both tasks
+                # (broadcasts exclude the sender).
+                for dep_tid in claimed.deps:
+                    dep_task = task_list._tasks.get(dep_tid)
+                    if dep_task and dep_task.status == "completed" and dep_task.output:
+                        dep_snippet = dep_task.output[:300]
+                        dep_line = f"  [dep:{dep_tid}]: {dep_snippet}"
+                        if dep_line not in upstream_parts:
+                            upstream_parts.append(dep_line)
+                if upstream_parts:
+                    upstream_context = (
+                        "\n上游任务结果：\n" + "\n".join(upstream_parts) + "\n"
+                    )
+
+                prompt_parts = [
+                    f"Topic: {topic}",
+                    f"Your role: {agent['role']} — {agent['description']}",
+                    f"Task [{claimed.task_id}]: {claimed.description}",
+                ]
+                if upstream_context:
+                    prompt_parts.append(upstream_context)
+                prompt_parts.append("Execute the task and return results:")
+
+                prompt = "\n".join(prompt_parts)
+                exec_ctx: dict[str, Any] = {}
+                if agent.get("system_prompt"):
+                    exec_ctx["system_prompt"] = agent["system_prompt"]
+
+                try:
+                    if self._policy.max_turn_seconds is not None:
+                        output = await asyncio.wait_for(
+                            agent_exec(aid, prompt, exec_ctx),
+                            timeout=float(self._policy.max_turn_seconds),
+                        )
+                    else:
+                        output = await agent_exec(aid, prompt, exec_ctx)
+                except (asyncio.TimeoutError, Exception) as exc:
+                    error_msg = f"Task {claimed.task_id} failed: {exc}"
+                    logger.warning(
+                        "Cooperative task failed: agent=%s task=%s error=%s",
+                        aid,
+                        claimed.task_id,
+                        str(exc)[:200],
+                    )
+                    task_list.fail(claimed.task_id, error=error_msg)
+                    mailbox.broadcast(
+                        aid,
+                        agent_ids,
+                        f"[FAILED] task={claimed.task_id}: {error_msg[:200]}",
+                    )
+                    msg_entry = {
+                        "sender": aid,
+                        "type": "task_failed",
+                        "task_id": claimed.task_id,
+                        "content": error_msg[:200],
+                    }
+                    mailbox_log.append(msg_entry)
+                    continue
+
+                task_list.complete(claimed.task_id, output=output)
+                logger.info(
+                    "Cooperative task done: agent=%s task=%s output_len=%d",
+                    aid,
+                    claimed.task_id,
+                    len(output),
+                )
+
+                # Broadcast result to all agents so dependents can use it.
+                broadcast_content = f"[DONE] task={claimed.task_id}: {output[:500]}"
+                mailbox.broadcast(aid, agent_ids, broadcast_content)
+                msg_entry = {
+                    "sender": aid,
+                    "type": "task_completed",
+                    "task_id": claimed.task_id,
+                    "content": output[:500],
+                }
+                mailbox_log.append(msg_entry)
+
+                if on_task_complete is not None:
+                    _result = on_task_complete(aid, claimed.task_id, output)
+                    if _inspect.isawaitable(_result):
+                        await _result
+
+        # Run all agent workers concurrently.
+        max_agents = self._policy.max_agents or len(agents)
+        active_agents = agents[:max_agents]
+        worker_tasks = [
+            asyncio.create_task(_agent_worker(agent)) for agent in active_agents
+        ]
+
+        # Wait for all workers to finish or deadline.
+        if deadline is not None:
+            remaining = max(0.1, deadline - loop.time())
+            done, pending = await asyncio.wait(worker_tasks, timeout=remaining)
+            for p in pending:
+                p.cancel()
+        else:
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+        # Collect results.
+        status = task_list.get_status()
+        task_outputs = {
+            tid: t.output for tid, t in status.items() if t.status == "completed"
+        }
+        completed_count = sum(1 for t in status.values() if t.status == "completed")
+        failed_count = sum(1 for t in status.values() if t.status == "failed")
+        all_done = task_list.all_done()
+
+        termination_reason = "completed" if all_done else "deadline_exceeded"
+        if not all_done and any(t.status == "pending" for t in status.values()):
+            termination_reason = "deadline_exceeded"
+
+        summary_parts = [
+            f"Cooperative execution on '{topic}': "
+            f"{completed_count}/{len(tasks)} completed, {failed_count} failed.",
+        ]
+        for tid, t in status.items():
+            marker = {
+                "completed": "x",
+                "failed": "!",
+                "in_progress": ">",
+                "pending": " ",
+            }
+            summary_parts.append(
+                f"[{marker.get(t.status, '?')}] {tid}: {t.output[:150] if t.output else t.status}"
+            )
+
+        logger.info(
+            "Cooperative finished: topic=%r completed=%d failed=%d total=%d",
+            topic,
+            completed_count,
+            failed_count,
+            len(tasks),
+        )
+
+        return CooperativeResult(
+            topic=topic,
+            tasks_completed=completed_count,
+            tasks_failed=failed_count,
+            tasks_total=len(tasks),
+            task_outputs=task_outputs,
+            mailbox_log=mailbox_log,
+            summary="\n".join(summary_parts),
+            completed=all_done and failed_count == 0,
+            termination_reason=termination_reason,
         )

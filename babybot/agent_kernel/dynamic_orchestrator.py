@@ -142,16 +142,17 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
         "function": {
             "name": "dispatch_team",
             "description": (
-                "启动一组Agent进行多轮协作讨论（如辩论、评审、头脑风暴）。"
-                "Agent之间会交替发言，支持可选的judge函数来判断是否达成共识。"
-                "返回完整讨论记录和总结。"
+                "启动一组Agent进行协作。支持两种模式：\n"
+                "- debate（默认）：多轮辩论/评审/头脑风暴，Agent交替发言。\n"
+                "- cooperative：任务分工协作，Agent从共享任务列表中领取任务并行执行，"
+                "通过Mailbox广播结果给下游依赖。适用于可拆分为多个子任务的复杂工作。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "topic": {
                         "type": "string",
-                        "description": "讨论主题",
+                        "description": "协作主题/高层目标描述",
                     },
                     "agents": {
                         "type": "array",
@@ -172,11 +173,47 @@ _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
                             },
                             "required": ["id", "role", "description"],
                         },
-                        "description": "参与讨论的Agent列表，至少2个",
+                        "description": "参与协作的Agent列表，至少2个",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["debate", "cooperative"],
+                        "description": (
+                            "协作模式。debate=多轮辩论（默认），"
+                            "cooperative=任务分工（需配合 tasks 参数）"
+                        ),
+                        "default": "debate",
                     },
                     "max_rounds": {
                         "type": "integer",
-                        "description": "最大讨论轮数，默认5",
+                        "description": "debate模式下的最大讨论轮数，默认5",
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "description": "任务唯一标识",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "任务描述",
+                                },
+                                "deps": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "依赖的 task_id 列表",
+                                    "default": [],
+                                },
+                            },
+                            "required": ["task_id", "description"],
+                        },
+                        "description": (
+                            "cooperative模式下的任务列表。每个任务可声明依赖(deps)，"
+                            "Agent会自动领取可执行的任务并广播结果。"
+                        ),
                     },
                 },
                 "required": ["topic", "agents"],
@@ -200,7 +237,8 @@ _SYSTEM_PROMPT_ROLE = (
     "3. reply_to_user 必须单独调用且作为收尾；不能与其他工具混用。\n"
     "4. 禁止虚构结果；用户明确表达的执行限制与偏好必须优先遵守。\n"
     "5. 多资源任务优先在一次 dispatch_task 中用 resource_ids 组合能力；查看网页/仓库后创建或更新技能时，不要靠 create_worker 套娃补能力。\n"
-    "6. 需要多Agent协作讨论、辩论、评审或头脑风暴时，使用 dispatch_team。\n"
+    "6. 需要多Agent协作讨论、辩论、评审或头脑风暴时，使用 dispatch_team（debate模式）。\n"
+    "7. 需要多Agent并行分工执行可拆分的复杂任务时，使用 dispatch_team（cooperative模式，需提供tasks列表）。\n"
     "\n\n执行阶段协议：\n"
     "按以下四阶段有序推进，不允许跨阶段跳跃或在错误阶段执行动作：\n"
     "  [Research]     — 信息收集：仅读取、搜索、获取外部数据，不做修改或写入。\n"
@@ -1815,6 +1853,7 @@ class DynamicOrchestrator:
 
         topic = args.get("topic", "")
         agents = args.get("agents", [])
+        mode = str(args.get("mode", "debate") or "debate").strip().lower()
         task_contract = context.state.get("task_contract")
         execution_constraints = normalize_execution_constraints(
             context.state.get("execution_constraints")
@@ -1833,11 +1872,17 @@ class DynamicOrchestrator:
         if len(agents) < 2:
             return "error: dispatch_team requires at least 2 agents"
 
+        if mode == "cooperative":
+            tasks = args.get("tasks") or []
+            if not tasks:
+                return "error: cooperative mode requires a non-empty 'tasks' list"
+
         logger.info(
-            "Team dispatch: topic=%r agents=%d max_rounds=%d",
+            "Team dispatch: topic=%r agents=%d max_rounds=%d mode=%s",
             topic[:80],
             len(agents),
             max_rounds,
+            mode,
         )
 
         heartbeat = context.state.get("heartbeat")
@@ -1963,6 +2008,25 @@ class DynamicOrchestrator:
                 ea.get("resource_id", ""),
             )
 
+        # ── Cooperative mode: task-based parallel execution ──────────────
+        if mode == "cooperative":
+            return await self._run_team_cooperative(
+                args=args,
+                topic=topic,
+                enriched_agents=enriched_agents,
+                runner_executor=gateway_executor,
+                team_policy=team_policy,
+                max_rounds=max_rounds,
+                heartbeat=heartbeat,
+                send_intermediate=send_intermediate,
+                team_streaming=team_streaming,
+                reset_stream=reset_stream,
+                _emit_team_event=_emit_team_event,
+                context=context,
+            )
+
+        # ── Debate mode (default) ───────────────────────────────────────
+
         async def on_turn(agent_id: str, role: str, round_num: int, text: str) -> None:
             if heartbeat is not None:
                 heartbeat.beat()
@@ -2052,6 +2116,118 @@ class DynamicOrchestrator:
                     }
                     for e in result.transcript[-len(agents) :]
                 ],
+            },
+            ensure_ascii=False,
+        )
+
+    async def _run_team_cooperative(
+        self,
+        *,
+        args: dict[str, Any],
+        topic: str,
+        enriched_agents: list[dict[str, Any]],
+        runner_executor: Any,
+        team_policy: Any,
+        max_rounds: int,
+        heartbeat: Any,
+        send_intermediate: Any,
+        team_streaming: bool,
+        reset_stream: Any,
+        _emit_team_event: Any,
+        context: ExecutionContext,
+    ) -> str:
+        """Run team in cooperative (task-based) mode."""
+        from .team import TeamRunner
+
+        tasks = args.get("tasks") or []
+
+        logger.info(
+            "Team cooperative: topic=%r agents=%d tasks=%d",
+            topic[:80],
+            len(enriched_agents),
+            len(tasks),
+        )
+
+        async def notify_progress(text: str) -> None:
+            if team_streaming and send_intermediate is not None and text.strip():
+                await send_intermediate(text)
+
+        await _emit_team_event(
+            "progress",
+            state="planning",
+            message=(
+                f"已启动 {len(enriched_agents)} 位专家协作执行 {len(tasks)} 个任务。"
+            ),
+            progress=0.0,
+        )
+        await notify_progress(
+            f"已启动 {len(enriched_agents)} 位专家协作执行 {len(tasks)} 个任务。"
+        )
+
+        completed_count = {"n": 0}
+
+        async def on_task_complete(agent_id: str, task_id: str, output: str) -> None:
+            completed_count["n"] += 1
+            if heartbeat is not None:
+                heartbeat.beat()
+            progress = completed_count["n"] / max(1, len(tasks))
+            await _emit_team_event(
+                "progress",
+                state="running",
+                message=f"任务 {task_id} 已完成 ({completed_count['n']}/{len(tasks)})",
+                progress=progress,
+            )
+            await notify_progress(
+                f"任务 {task_id} 已完成 ({completed_count['n']}/{len(tasks)})"
+            )
+
+        if team_streaming and reset_stream is not None:
+            await reset_stream()
+
+        runner = TeamRunner(
+            executor=runner_executor,
+            max_rounds=max_rounds,
+            policy=team_policy,
+        )
+        result = await runner.run_cooperative(
+            topic=topic,
+            agents=enriched_agents,
+            tasks=tasks,
+            on_task_complete=on_task_complete,
+        )
+
+        logger.info(
+            "Team cooperative finished: topic=%r completed=%d/%d failed=%d",
+            result.topic[:80],
+            result.tasks_completed,
+            result.tasks_total,
+            result.tasks_failed,
+        )
+
+        if team_streaming and reset_stream is not None:
+            await reset_stream()
+
+        await _emit_team_event(
+            "completed" if result.completed else "failed",
+            state="completed" if result.completed else "repairing",
+            message=result.summary[:200] or "协作执行结束",
+            progress=1.0 if result.completed else None,
+        )
+
+        return json.dumps(
+            {
+                "mode": "cooperative",
+                "topic": result.topic,
+                "tasks_completed": result.tasks_completed,
+                "tasks_failed": result.tasks_failed,
+                "tasks_total": result.tasks_total,
+                "summary": result.summary,
+                "completed": result.completed,
+                "termination_reason": result.termination_reason,
+                "task_outputs": {
+                    tid: output[:500] for tid, output in result.task_outputs.items()
+                },
+                "mailbox_messages": len(result.mailbox_log),
             },
             ensure_ascii=False,
         )
