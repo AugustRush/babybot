@@ -721,3 +721,210 @@ def test_single_agent_executor_truncates_huge_tool_outputs_before_next_model_cal
     assert result.status == "succeeded"
     assert len(model.last_tool_content) < len(huge)
     assert "truncated" in model.last_tool_content.lower()
+
+
+# ── Structured event emission tests ──────────────────────────────────────
+
+
+def test_executor_emits_agent_start_and_agent_end_events() -> None:
+    """execute() emits agent_start at the beginning and agent_end at the end."""
+    registry = ToolRegistry()
+    model = TwoStepModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s-events")
+
+    seen_kinds: list[str] = []
+    context.on({"agent_start", "agent_end"}, lambda e: seen_kinds.append(e.kind))
+
+    asyncio.run(executor.execute(TaskContract(task_id="t1", description="go"), context))
+
+    assert seen_kinds[0] == "agent_start"
+    assert seen_kinds[-1] == "agent_end"
+
+
+def test_executor_emits_turn_start_and_turn_end_per_step() -> None:
+    """Each LLM loop iteration emits a turn_start / turn_end pair."""
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    model = TwoStepModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s-turns")
+
+    turns: list[tuple[str, int]] = []
+    context.on(
+        {"turn_start", "turn_end"},
+        lambda e: turns.append((e.kind, e.data.get("step", 0))),
+    )
+
+    asyncio.run(
+        executor.execute(TaskContract(task_id="t1", description="add"), context)
+    )
+
+    starts = [k for k, _ in turns if k == "turn_start"]
+    ends = [k for k, _ in turns if k == "turn_end"]
+    assert starts  # at least one turn started
+    assert ends  # and ended
+    assert len(starts) == len(ends)
+
+
+def test_executor_emits_llm_request_start_and_end_with_elapsed() -> None:
+    """Each model.generate() call is wrapped by llm_request_start / llm_request_end."""
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    model = TwoStepModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s-llm")
+
+    llm_events: list[dict] = []
+    context.on(
+        {"llm_request_start", "llm_request_end"},
+        lambda e: llm_events.append({"kind": e.kind, **e.data}),
+    )
+
+    asyncio.run(
+        executor.execute(TaskContract(task_id="t1", description="add"), context)
+    )
+
+    starts = [e for e in llm_events if e["kind"] == "llm_request_start"]
+    ends = [e for e in llm_events if e["kind"] == "llm_request_end"]
+    assert starts
+    assert ends
+    assert len(starts) == len(ends)
+    # end events carry elapsed_s
+    for end_event in ends:
+        assert "elapsed_s" in end_event
+        assert end_event["elapsed_s"] >= 0
+
+
+def test_executor_emits_tool_execution_start_and_end() -> None:
+    """Each tool invocation is wrapped by tool_execution_start / tool_execution_end."""
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    model = TwoStepModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s-tool-exec")
+
+    tool_events: list[dict] = []
+    context.on(
+        {"tool_execution_start", "tool_execution_end"},
+        lambda e: tool_events.append({"kind": e.kind, **e.data}),
+    )
+
+    asyncio.run(
+        executor.execute(TaskContract(task_id="t1", description="add"), context)
+    )
+
+    starts = [e for e in tool_events if e["kind"] == "tool_execution_start"]
+    ends = [e for e in tool_events if e["kind"] == "tool_execution_end"]
+    assert starts
+    assert ends
+    # end events include ok flag and elapsed_s
+    for end_event in ends:
+        assert "ok" in end_event
+        assert "elapsed_s" in end_event
+        assert end_event["elapsed_s"] >= 0
+
+
+# ── Hook tests ────────────────────────────────────────────────────────────
+
+
+def test_executor_calls_transform_context_hook_before_llm() -> None:
+    """transform_context hook is called before each LLM request; can modify messages."""
+
+    class SimpleTextModel(ModelProvider):
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            return ModelResponse(text="done")
+
+    registry = ToolRegistry()
+    model = SimpleTextModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s-transform")
+
+    transform_calls: list[int] = []
+
+    def _transform(messages, ctx):
+        transform_calls.append(len(messages))
+        return messages  # pass through unchanged
+
+    context.transform_context = _transform
+
+    asyncio.run(
+        executor.execute(TaskContract(task_id="t1", description="hello"), context)
+    )
+
+    assert len(transform_calls) >= 1, "transform_context should have been called"
+
+
+def test_executor_calls_before_and_after_tool_call_hooks() -> None:
+    """before_tool_call and after_tool_call hooks fire around each tool invocation."""
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    model = TwoStepModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s-hooks")
+
+    before_calls: list[str] = []
+    after_calls: list[tuple[str, bool]] = []
+
+    context.before_tool_call = lambda name, args, ctx: before_calls.append(name)
+    context.after_tool_call = lambda name, args, result, ctx: after_calls.append(
+        (name, result.ok)
+    )
+
+    asyncio.run(
+        executor.execute(TaskContract(task_id="t1", description="add"), context)
+    )
+
+    assert before_calls == ["add"]
+    assert after_calls == [("add", True)]
+
+
+def test_transform_context_hook_message_reduction_emits_context_transform_event() -> (
+    None
+):
+    """When transform_context reduces the message list, a context_transform event is emitted."""
+    from babybot.agent_kernel import SkillPack, ToolLease
+
+    class SimpleTextModel(ModelProvider):
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            return ModelResponse(text="done")
+
+    registry = ToolRegistry()
+    # Use a skill_resolver that returns a SkillPack with a non-empty system_prompt
+    # so the initial messages list has [system, user] (2 items).
+    # The transform then reduces to 1 item, triggering the context_transform event.
+    skill = SkillPack(
+        name="s", system_prompt="You are a helper.", tool_lease=ToolLease()
+    )
+    model = SimpleTextModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        skill_resolver=lambda task, ctx: skill,
+    )
+    context = ExecutionContext(session_id="s-ctx-event")
+
+    transform_events: list[dict] = []
+    context.on(
+        {"context_transform"},
+        lambda e: transform_events.append(e.data),
+    )
+
+    def _shrink(messages, ctx):
+        # Remove all but the last message to trigger the size-change detection
+        return messages[-1:]
+
+    context.transform_context = _shrink
+
+    asyncio.run(executor.execute(TaskContract(task_id="t1", description="hi"), context))
+
+    # context_transform only fires if the message list size actually changed
+    assert transform_events, (
+        "expected context_transform event when messages were reduced"
+    )
+    for ev in transform_events:
+        assert ev["messages_before"] > ev["messages_after"]

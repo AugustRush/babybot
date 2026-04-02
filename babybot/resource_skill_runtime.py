@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .agent_kernel import SkillPack, ToolLease
+from .agent_kernel import SkillPack, SystemPromptBuilder, ToolLease
 
 
 class ResourceSkillRuntime:
@@ -152,7 +152,64 @@ class ResourceSkillRuntime:
         selected_skill_packs: list[SkillPack],
         merged_lease: ToolLease | None = None,
     ) -> str:
+        """Build a worker system prompt from composable sections.
+
+        Uses SystemPromptBuilder so every logical block is a named, prioritized
+        section — enabling observability, caching, and future per-task
+        customization (Claude Code–style prompt-as-runtime).
+        """
+        builder = self._build_worker_prompt_sections(
+            agent_name=agent_name,
+            task_description=task_description,
+            tools_text=tools_text,
+            selected_skill_packs=selected_skill_packs,
+            merged_lease=merged_lease,
+        )
+        return builder.build()
+
+    def _build_worker_prompt_sections(
+        self,
+        agent_name: str,
+        task_description: str,
+        tools_text: str,
+        selected_skill_packs: list[SkillPack],
+        merged_lease: ToolLease | None = None,
+    ) -> SystemPromptBuilder:
+        """Assemble worker prompt as composable sections.
+
+        Returns the SystemPromptBuilder so callers can inspect individual
+        sections for observability, caching, or event emission.
+
+        Task-type differentiation is structural (based on which tools are
+        available), never keyword-matching on task content.
+        """
+        builder = SystemPromptBuilder()
+
+        # ── Detect task class from available tools (structural, not semantic) ──
+        task_class = _classify_task_from_tools(tools_text, merged_lease)
+
+        # ── Section: Identity & task (always first) ──────────────────
+        builder.add(
+            "identity",
+            f"你是 {agent_name}，请完成任务并直接输出最终答案。",
+            priority=0,
+            cacheable=True,
+        )
+        builder.add(
+            "task",
+            f"任务：{task_description}",
+            priority=10,
+        )
+
+        # ── Section: Activated skills ────────────────────────────────
         selected_names = ", ".join(skill.name for skill in selected_skill_packs) or "无"
+        builder.add(
+            "active_skills",
+            f"已激活技能（本次强相关）：{selected_names}",
+            priority=20,
+        )
+
+        # ── Section: Skill catalog ───────────────────────────────────
         if merged_lease is not None:
             skill_catalog = self.format_skill_catalog_for_lease(
                 merged_lease,
@@ -160,25 +217,48 @@ class ResourceSkillRuntime:
             )
         else:
             skill_catalog = self.format_skill_catalog(max_items=24)
-        lines = [
-            f"你是 {agent_name}，请完成任务并直接输出最终答案。",
-            f"任务：{task_description}",
-            f"已激活技能（本次强相关）：{selected_names}",
+        builder.add(
+            "skill_catalog",
             f"可用技能目录（按需选择）：\n{skill_catalog}",
+            priority=30,
+        )
+
+        # ── Section: Available tools ─────────────────────────────────
+        builder.add(
+            "tools",
             f"可用工具：{tools_text}",
-            "要求：",
-            "1. 如果任务是文本生成（写作、翻译、分析、总结、创意等），直接输出文本结果，不要调用任何工具。",
-            "2. 只有当任务明确需要外部操作（查询信息、生成图片、读写文件、执行代码等）时才调用工具。",
-            "3. 只执行任务说明中明确给出的目标，不要自行扩展目标或大范围探索。",
-            "4. 禁止编造工具执行结果、虚构文件路径，或把 output/ 当成技能源码目录。",
-            "5. 不要创建或派生新的 worker，不要把任务改写成讨论、评审或 team 流程。",
-            "6. 不要直接向用户发送消息；只把执行结果写入最终输出返回给主 agent。",
-            "7. 缺少输入、目标路径或权限时，立即返回失败原因，不要猜测。",
-            "8. 对代码或技能维护任务，优先使用明确目标的文件工具；少量定位后仍无目标时应立即停止并说明缺口。",
-            "9. 更新或删除现有 workspace 技能前，必须先检查目标技能是否存在，并查看 SKILL.md。",
-            "10. 修改完成后必须 reload_skill，确认技能可重新加载。",
-        ]
-        return "\n".join(lines)
+            priority=40,
+        )
+
+        # ── Section: Execution rules (static, cacheable) ─────────────
+        builder.add(
+            "execution_rules",
+            _EXECUTION_RULES,
+            priority=50,
+            cacheable=True,
+        )
+
+        # ── Section: Task-class-specific constraints ──────────────────
+        # Each task class gets targeted guidance.  This section is absent
+        # for pure text-gen workers (no tools → no extra constraints needed).
+        task_specific = _TASK_CLASS_RULES.get(task_class, "")
+        if task_specific:
+            builder.add(
+                f"task_class_rules:{task_class}",
+                task_specific,
+                priority=55,
+                cacheable=True,
+            )
+
+        # ── Section: Skill maintenance rules ─────────────────────────
+        builder.add(
+            "skill_maintenance_rules",
+            _SKILL_MAINTENANCE_RULES,
+            priority=60,
+            cacheable=True,
+        )
+
+        return builder
 
     def format_skill_catalog_for_lease(
         self,
@@ -238,3 +318,123 @@ class ResourceSkillRuntime:
                 f"- {skill.name}: {desc} [source={skill.source}, skill_md={skill_md}]"
             )
         return "\n".join(lines)
+
+
+# ── Static prompt section content ────────────────────────────────────────
+# Extracted as module constants so they are defined once, cacheable, and
+# easily testable in isolation.
+
+_EXECUTION_RULES = """\
+要求：
+1. 如果任务是文本生成（写作、翻译、分析、总结、创意等），直接输出文本结果，不要调用任何工具。
+2. 只有当任务明确需要外部操作（查询信息、生成图片、读写文件、执行代码等）时才调用工具。
+3. 只执行任务说明中明确给出的目标，不要自行扩展目标或大范围探索。
+4. 禁止编造工具执行结果、虚构文件路径，或把 output/ 当成技能源码目录。
+5. 不要创建或派生新的 worker，不要把任务改写成讨论、评审或 team 流程。
+6. 不要直接向用户发送消息；只把执行结果写入最终输出返回给主 agent。
+7. 缺少输入、目标路径或权限时，立即返回失败原因，不要猜测。"""
+
+_SKILL_MAINTENANCE_RULES = """\
+技能维护规则：
+8. 对代码或技能维护任务，优先使用明确目标的文件工具；少量定位后仍无目标时应立即停止并说明缺口。
+9. 更新或删除现有 workspace 技能前，必须先检查目标技能是否存在，并查看 SKILL.md、skill.yaml、config.yaml 等配置文件。
+10. 修改完成后必须 reload_skill，确认技能可重新加载。
+11. 不要将 output/ 目录当成技能源码目录；技能代码在技能目录下，output/ 仅用于运行时产出物。"""
+
+
+# ── Task-class-specific rules ─────────────────────────────────────────────
+# Each class gets focused guidance; absent for text_gen (no tools = no extra
+# constraints needed).  Classification is always structural (tool availability),
+# never keyword-based on task content.
+
+_TASK_CLASS_RULES: dict[str, str] = {
+    "code": """\
+代码执行约束：
+- 执行代码前确认输入存在且合法；执行后验证输出符合预期。
+- 不要在同一步骤中既执行又假设结果；每步等待实际返回值。
+- 捕获并上报代码运行错误，不要掩盖异常或假装成功。""",
+    "tool_action": """\
+工具操作约束：
+- 每次工具调用必须有明确目的；禁止探索性循环调用。
+- 在写入或删除前先读取/确认目标存在。
+- 工具失败时立即停止并将错误原因写入最终输出，不要重试无意义的相同调用。""",
+    "skill_maintenance": """\
+技能维护约束：
+- 操作前必须先读取 SKILL.md 和 skill.yaml，确认技能结构。
+- 修改后立即调用 reload_skill 验证技能可加载；验证失败时撤销或报告错误。
+- 不要在没有读取现有内容的情况下直接覆写文件。""",
+}
+
+
+# ── Task classification (structural, never keyword-based) ─────────────────
+
+
+# Tool name prefixes/suffixes that indicate code execution capability
+_CODE_TOOL_MARKERS: frozenset[str] = frozenset(
+    {
+        "execute_code",
+        "run_code",
+        "execute_shell",
+        "run_shell",
+        "run_python",
+        "execute_python",
+        "bash",
+        "shell",
+    }
+)
+
+# Tool name substrings that indicate skill maintenance
+_SKILL_MAINT_MARKERS: frozenset[str] = frozenset(
+    {
+        "reload_skill",
+        "delete_skill",
+        "workspace_write",
+        "_workspace_write",
+        "write_skill",
+    }
+)
+
+
+def _classify_task_from_tools(
+    tools_text: str,
+    merged_lease: ToolLease | None,
+) -> str:
+    """Return a task class string based purely on available tools.
+
+    Classes (in priority order):
+      skill_maintenance → code → tool_action → text_gen (no tools)
+
+    This is structural classification: we look at what tools the executor
+    has access to, not at the natural-language task description.  This
+    avoids fragile keyword matching while still enabling task-specific
+    prompt differentiation.
+    """
+    if not tools_text or tools_text.strip() in ("无", ""):
+        return "text_gen"
+
+    # Normalise: split by comma/space, strip, lowercase
+    tool_names_lower = {
+        t.strip().lower()
+        for part in tools_text.replace(",", " ").split()
+        if (t := part.strip())
+    }
+
+    # Also check tool names from lease if available
+    if merged_lease is not None:
+        tool_names_lower |= {t.lower() for t in merged_lease.include_tools}
+
+    # Skill maintenance tools take highest priority
+    if any(
+        marker in name for name in tool_names_lower for marker in _SKILL_MAINT_MARKERS
+    ):
+        return "skill_maintenance"
+
+    # Code execution tools
+    if any(
+        any(name.startswith(marker) or name == marker for marker in _CODE_TOOL_MARKERS)
+        for name in tool_names_lower
+    ):
+        return "code"
+
+    # Any non-trivial tool set → generic tool_action
+    return "tool_action"
