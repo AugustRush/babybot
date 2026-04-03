@@ -377,7 +377,7 @@ uv run gateway
       "reply_mode": "chat",
       "react_emoji": "THUMBSUP",
       "media_dir": "",
-      "stream_reply": false
+      "streaming": false
     },
     "weixin": {
       "enabled": false,
@@ -400,7 +400,7 @@ uv run gateway
 | `group_policy` | `mention` — 群聊中仅 @bot 时响应；`open` — 所有消息都响应 |
 | `reply_mode` | `chat` — 回复到当前会话；`p2p` — 按发送者 open_id 私聊回复 |
 | `media_dir` | 图片等媒体文件下载目录，为空则使用默认目录 |
-| `stream_reply` | `true` 启用模型生成期实时流式推送（边生成边 patch 卡片） |
+| `streaming` | `true` 启用模型生成期实时流式推送（边生成边 patch 同一张卡片） |
 
 **Weixin 字段**
 
@@ -544,7 +544,27 @@ BabyBot 会为每个 MCP 统一分配本地 artifact 根目录：`~/.babybot/wor
 
 - `basic`：worker 调度、定时任务、观测工具、技能热加载（`reload_skill`）
 - `code`：workspace 文件读写、Python / shell 执行
+- `web`：网页抓取与搜索（默认激活）
 - `channel_*`：由通道在运行时注册的发送类工具
+
+**web 工具组**
+
+| 工具 | 说明 |
+|------|------|
+| `web_fetch` | 抓取指定 URL 内容，支持 `markdown`（默认）/ `text` / `html` 三种输出格式，自动提取正文并截断 |
+| `web_search` | 通过 Tavily API 搜索互联网，支持 `basic` / `advanced` 深度和 `general` / `news` 话题，返回带 AI 摘要的结构化结果 |
+
+`web_fetch` 无需配置即可使用；`web_search` 需在配置中填写 Tavily API key：
+
+```json
+{
+  "web": {
+    "tavily_api_key": "tvly-xxxxxxxx"
+  }
+}
+```
+
+Tavily 免费账户每月提供 1000 次搜索额度，在 [tavily.com](https://tavily.com) 注册获取。
 
 其中新的只读观测工具包括：
 
@@ -807,16 +827,54 @@ query=继续语音任务
 
 ### 运行时进度反馈
 
-当前进度反馈已经切到规范化状态机，通道层只渲染 `RuntimeFeedbackEvent`：
+当前进度反馈已切到统一生命周期卡片设计，ACK、进度动画和最终回复全程复用同一张消息卡片：
 
-- `queued` / `planning` / `running` / `waiting_tool` / `waiting_user` / `repairing` 会统一显示为 `处理中：...`
-- `completed` 会显示为 `阶段完成：...`
-- `failed` / `cancelled` 会按失败或取消状态单独渲染，不再混进普通进度
-- MessageBus 会先按 runtime identity 去重；对同一 task 作用域内重复出现的相同展示文案，也会在事件交错时继续折叠，避免阶段反馈重复刷屏
-- 不再在阶段完成时把完整结果提前重复发一次，避免和最终回复重复
-- 飞书阶段反馈固定走 `post`；模型流式输出固定走 `interactive` patch，两条链路分开，不混用消息类型
+**消息流（以飞书为例）：**
+
+```
+[卡片] ⏳ 收到，正在处理…              ← ACK 即建卡
+[patch] ⌛ 正在调用 text-to-image…     ← 子任务开始，卡片内容更新
+[patch] ⚙ 正在调用 text-to-image…     ← �� 3 秒轮换 spinner 符号
+[patch] ✦ 正在调用 text-to-image…     ← 动画持续直至任务结束
+[patch] ✅ 子任务已完成               ← 终态事件
+[patch] 最终回复内容                   ← reply_to_user 原地替换卡片
+[新消] 📎 图片/文件（如有）           ← 媒体单独发送
+```
+
+关键设计：
+
+- 支持卡片 patch 的通道（飞书）全程只有一张卡片，不产生多条消息
+- 不支持卡片的通道（微信等）自动退化为纯文本 ACK + `send_response`，行为不受影响
+- 进度文案不再暴露内部 task ID（如 `task task_2_1527df succeeded`），改为自然语言（如"正在调用 weather"）
+- spinner 符号轮换：⏳ ⌛ ⚙ ✦ ◉ ◎
+- `started` 事件加入转发，子任务开始即可见，避免长任务执行期间卡片静止
+- `RuntimeFeedbackEvent` 的 message 字段不含 `description`（系统提示词），不泄露内部信息
+
+**通道扩展接入流式：**
+
+新 channel 只需实现三个方法即可获得完整统一卡片体验：
+
+```python
+class MyChannel(BaseChannel):
+    @property
+    def supports_streaming(self) -> bool:
+        return bool(self.config.streaming)
+
+    async def create_stream_message(self, chat_id, text, *, sender_id=None, metadata=None) -> str | None:
+        # 创建可 patch 的消息，返回消息 ID
+        ...
+
+    async def patch_stream_message(self, message_id: str, text: str) -> bool:
+        # 更新已有消息内容，成功返回 True
+        ...
+```
+
+其他反馈特性：
+
+- MessageBus 先按 runtime identity 去重；对同一 task 作用域内重复出现的相同展示文案，也会继续折叠
+- 编排层新增「结果充分即收敛」规则：专业 Skill 已成功返回结果后，不再用通用 web 工具重复验证
+- 资源目录按专业（skill/mcp）和通用（tool_group）两层展示，帮助模型做出更好的资源选择
 - 如果消息通道先超时，但任务已经创建了持久化作业，超时提示会附带 `job_id`，方便后续用 `@job status ...` 查询
-- runtime event 会反向更新 `RuntimeJob` 的 `state` / `flow_id` / 最近 stage，因此 `@job status` 不再只反映外层开始/结束两个阶段
 
 对于较慢的宿主 Python 技能脚本：
 
@@ -868,7 +926,7 @@ babybot/
 │   ├── resource_subagent_runtime.py # 子 agent 运行时 orchestration
 │   ├── resource_tool_loader.py  # 内置 / 通道工具注册加载
 │   ├── resource_workspace_tools.py # workspace 文件与代码工具
-│   ├── builtin_tools/           # 内置工具定义（worker/scheduler/code/observability）
+│   ├── builtin_tools/           # 内置工具定义（worker/scheduler/code/observability/web）
 │   ├── worker.py                # Worker 执行器工厂
 │   ├── model_gateway.py         # OpenAI 兼容网关
 │   ├── message_bus.py           # 异步消息总线
@@ -925,20 +983,22 @@ babybot/
 - **轻量内核** — 最小抽象、低耦合执行内核
 - **可插拔执行后端** — `ExecutorRegistry` 按 backend 名称路由，内置 `ResourceBridgeExecutor`（Gateway 链路）和 `ClaudeCodeExecutor`（claude CLI），实现 `ExecutorPort` 即可扩展
 - **多 Agent 团队协作** — `dispatch_team` + `TeamRunner` 支持结构化辩论模式，agent 可携带独立 executor 和 resource_id
-- **统一 Skill 模型** — SKILL.md 同时支持工具路由和团队角色定义，`dispatch_team` 通过 `skill_id` 引用 prompt-only skill
+- **统一 Skill 模型** — SKILL.md 同时支持工具路由和���队角色定义，`dispatch_team` 通过 `skill_id` 引用 prompt-only skill
 - **分层记忆** — Tape + Hybrid Memory + Hot/Warm/Cold 三层上下文
 - **多模态** — 图片从通道到 LLM 全链路支持（延迟 base64 编码）
 - **MCP 支持** — stdio / HTTP 两种传输，动态注册工具
+- **内置 Web 工具** — `web_fetch`（URL 抓取）和 `web_search`（Tavily API 搜索）开箱即用，归属 `web` 工具组
 - **技能路由** — 技能 prompt、工具脚本、lease 与 worker prompt 解耦
 - **技能热加载** — 创建或更新技能后调用 `reload_skill` 即时生效，无需重启进程
 - **宿主 Python fallback** — 技能脚本可在独立本地 Python 环境运行，并支持多级回退
 - **运行时可观测性** — flow / chat context 只读观测工具，稳定分段输出
-- **更轻量阶段反馈** — progress 去重、阶段完成摘要、stdout/stderr 驱动 heartbeat
+- **统一生命周期卡片** — ACK、进度动画（spinner 轮换）、最终回复全程复用同一张消息卡片；不支持卡片的通道自动退化为纯文本
+- **编排收敛优化** — 专业 Skill 优先于通用工具组；结果充分即收敛，不重复执行同语义子任务
 - **工具租约** — ToolLease 最小权限策略，技能间 UNION 语义合并
 - **主/子 Agent 边界清晰** — 只有主 agent 负责通道发送，子 agent 只返回结果与产物路径
 - **可配置执行轮数** — orchestrator / worker 的最大步数可配置
 - **并发控制** — 全局 + 单聊信号量，心跳空闲超时检测
-- **通道扩展** — 实现 `BaseChannel` 即可接入新平台（已支持飞书、微信）
+- **通道扩展** — 实现 `BaseChannel.supports_streaming` + `create/patch_stream_message` 即可接入新平台并获得完整卡片体验（已支持飞书、微信）
 
 ## License
 
