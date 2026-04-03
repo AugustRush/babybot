@@ -1709,8 +1709,8 @@ class DynamicOrchestrator:
         )
         return response
 
-    @staticmethod
     def _tool_schemas_for_context(
+        self,
         context: ExecutionContext,
     ) -> tuple[dict[str, Any], ...]:
         execution_plan = context.state.get("execution_plan")
