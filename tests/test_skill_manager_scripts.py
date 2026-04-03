@@ -12,7 +12,7 @@ quick_validate = importlib.import_module("quick_validate")
 
 
 def test_init_skill_creates_workspace_skill_at_default_root(tmp_path: Path) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "Demo Skill",
         target="workspace",
         workspace_skills_dir=tmp_path / "workspace" / "skills",
@@ -29,7 +29,7 @@ def test_init_skill_creates_workspace_skill_at_default_root(tmp_path: Path) -> N
 
 
 def test_init_skill_creates_builtin_skill_at_default_root(tmp_path: Path) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "builtin helper",
         target="builtin",
         workspace_skills_dir=tmp_path / "workspace" / "skills",
@@ -75,7 +75,7 @@ def test_parse_resources_accepts_common_resource_aliases() -> None:
 def test_init_skill_accepts_json_stringified_resource_array_items(
     tmp_path: Path,
 ) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "json-array-skill",
         target="workspace",
         workspace_skills_dir=tmp_path / "workspace" / "skills",
@@ -90,7 +90,7 @@ def test_init_skill_accepts_json_stringified_resource_array_items(
 def test_init_skill_treats_examples_resource_alias_as_include_examples(
     tmp_path: Path,
 ) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "glm ocr",
         target="workspace",
         workspace_skills_dir=tmp_path / "workspace" / "skills",
@@ -105,7 +105,7 @@ def test_init_skill_treats_examples_resource_alias_as_include_examples(
 def test_init_skill_removes_placeholder_examples_on_rerun_without_examples(
     tmp_path: Path,
 ) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "cleanup skill",
         target="workspace",
         workspace_skills_dir=tmp_path / "workspace" / "skills",
@@ -118,7 +118,7 @@ def test_init_skill_removes_placeholder_examples_on_rerun_without_examples(
     assert (skill_dir / "references" / "reference.md").exists()
     assert (skill_dir / "assets" / "example.txt").exists()
 
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "cleanup skill",
         target="workspace",
         workspace_skills_dir=tmp_path / "workspace" / "skills",
@@ -133,7 +133,7 @@ def test_init_skill_removes_placeholder_examples_on_rerun_without_examples(
 
 
 def test_validate_skill_accepts_generated_skill(tmp_path: Path) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "validator-skill",
         path=tmp_path,
         resources=[],
@@ -146,7 +146,7 @@ def test_validate_skill_accepts_generated_skill(tmp_path: Path) -> None:
 
 
 def test_init_skill_generates_guideline_aligned_skill_document(tmp_path: Path) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "validator-skill",
         path=tmp_path,
         resources=[],
@@ -168,7 +168,7 @@ def test_init_skill_generates_guideline_aligned_skill_document(tmp_path: Path) -
 def test_init_skill_supports_summary_examples_and_tool_kind_defaults(
     tmp_path: Path,
 ) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "receipt parser",
         path=tmp_path,
         resources=[],
@@ -195,7 +195,7 @@ def test_init_skill_supports_summary_examples_and_tool_kind_defaults(
 def test_init_skill_hybrid_kind_creates_scripts_and_references_by_default(
     tmp_path: Path,
 ) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "finance helper",
         path=tmp_path,
         resources=[],
@@ -245,7 +245,7 @@ def test_validate_skill_rejects_placeholder_skill_body(tmp_path: Path) -> None:
 
 
 def test_validate_skill_rejects_generated_placeholder_resources(tmp_path: Path) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "placeholder-resources",
         path=tmp_path,
         resources=["scripts", "references", "assets"],
@@ -380,7 +380,7 @@ def test_skill_manager_skill_forbids_workspace_output_artifacts() -> None:
 
 
 def test_validate_skill_rejects_public_cli_only_script(tmp_path: Path) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "cli-only-skill",
         path=tmp_path,
         resources=["scripts"],
@@ -407,7 +407,7 @@ def test_validate_skill_rejects_public_cli_only_script(tmp_path: Path) -> None:
 
 
 def test_validate_skill_accepts_public_callable_script(tmp_path: Path) -> None:
-    skill_dir = init_skill.init_skill(
+    skill_dir = init_skill._init_skill_dir(
         "callable-skill",
         path=tmp_path,
         resources=["scripts"],
@@ -421,3 +421,30 @@ def test_validate_skill_accepts_public_callable_script(tmp_path: Path) -> None:
     valid, message = quick_validate.validate_skill(skill_dir)
 
     assert valid, message
+
+
+def test_init_skill_returns_agent_guidance_string(tmp_path: Path) -> None:
+    """Public init_skill() returns a string with path and next-step instructions."""
+    result = init_skill.init_skill(
+        "my-tool",
+        path=str(tmp_path / "my-tool"),
+        tool_kind="scripts",
+        summary="run my tool",
+    )
+
+    assert isinstance(result, str)
+    assert "my-tool" in result
+    assert "_workspace_write_text_file" in result
+    assert "skill_manager__validate_skill" in result
+    assert "reload_skill" in result
+
+
+def test_init_skill_guidance_contains_correct_absolute_path(tmp_path: Path) -> None:
+    skill_path = str(tmp_path / "pdf-skill")
+    result = init_skill.init_skill(
+        "pdf-skill",
+        path=skill_path,
+        tool_kind="hybrid",
+        summary="parse PDF documents",
+    )
+    assert skill_path in result or str(Path(skill_path).resolve()) in result

@@ -74,7 +74,9 @@ Add detailed reference material for {skill_title}.
 EXAMPLE_ASSET = "Replace this placeholder with a real asset if needed.\n"
 
 
-def _example_resource_specs(skill_name: str, skill_title: str) -> dict[str, tuple[str, str]]:
+def _example_resource_specs(
+    skill_name: str, skill_title: str
+) -> dict[str, tuple[str, str]]:
     return {
         "scripts": ("_example.py", EXAMPLE_SCRIPT.format(skill_name=skill_name)),
         "references": (
@@ -103,7 +105,9 @@ def _title_case_skill_name(skill_name: str) -> str:
     return " ".join(part.capitalize() for part in skill_name.split("-"))
 
 
-def _resource_items(raw_resources: str | list[str] | tuple[str, ...] | None) -> list[str]:
+def _resource_items(
+    raw_resources: str | list[str] | tuple[str, ...] | None,
+) -> list[str]:
     def _flatten(value: object) -> list[str]:
         if value is None:
             return []
@@ -133,7 +137,9 @@ def _resource_items(raw_resources: str | list[str] | tuple[str, ...] | None) -> 
     return _flatten(raw_resources)
 
 
-def _parse_resources(raw_resources: str | list[str] | tuple[str, ...] | None) -> list[str]:
+def _parse_resources(
+    raw_resources: str | list[str] | tuple[str, ...] | None,
+) -> list[str]:
     resources = [
         RESOURCE_ALIASES.get(item, item)
         for item in _resource_items(raw_resources)
@@ -195,7 +201,9 @@ def _normalize_example_requests(
     skill_title: str,
     tool_kind: str,
 ) -> list[str]:
-    items = [str(item).strip() for item in (example_requests or ()) if str(item).strip()]
+    items = [
+        str(item).strip() for item in (example_requests or ()) if str(item).strip()
+    ]
     if items:
         return items
     return _default_example_requests(skill_title, tool_kind)
@@ -293,7 +301,10 @@ def _create_resource_dirs(
         if not include_examples:
             example_name, example_content = example_specs[resource]
             example_path = resource_dir / example_name
-            if example_path.exists() and example_path.read_text(encoding="utf-8") == example_content:
+            if (
+                example_path.exists()
+                and example_path.read_text(encoding="utf-8") == example_content
+            ):
                 example_path.unlink()
             continue
         example_name, example_content = example_specs[resource]
@@ -317,6 +328,55 @@ def init_skill(
     target: str = "workspace",
     workspace_skills_dir: str | Path | None = None,
     builtin_skills_dir: str | Path | None = None,
+) -> str:
+    """Initialize a babybot skill directory and return agent-facing guidance.
+
+    Returns a human-readable string with the skill directory path, the files
+    created, and explicit next-step instructions so the agent knows to use
+    _workspace_write_text_file with absolute paths.
+    """
+    skill_dir = _init_skill_dir(
+        skill_name=skill_name,
+        path=path,
+        resources=resources,
+        include_examples=include_examples,
+        summary=summary,
+        example_requests=example_requests,
+        tool_kind=tool_kind,
+        target=target,
+        workspace_skills_dir=workspace_skills_dir,
+        builtin_skills_dir=builtin_skills_dir,
+    )
+
+    created_files = sorted(str(p) for p in skill_dir.rglob("*") if p.is_file())
+    files_summary = (
+        "\n".join(f"  {f}" for f in created_files) if created_files else "  (none yet)"
+    )
+
+    return (
+        f"Skill directory ready: {skill_dir}\n\n"
+        f"Files created:\n{files_summary}\n\n"
+        f"Next steps:\n"
+        f"  1. Write skill files using _workspace_write_text_file with ABSOLUTE paths under: {skill_dir}/\n"
+        f'     Example: file_path="{skill_dir}/SKILL.md"\n'
+        f'     Example: file_path="{skill_dir}/scripts/my_tool.py"\n'
+        f'  2. Call skill_manager__validate_skill with skill_path="{skill_dir}"\n'
+        f'  3. Call reload_skill with skill_path="{skill_dir}"\n'
+    )
+
+
+def _init_skill_dir(
+    skill_name: str,
+    path: str | Path | None = None,
+    resources: str | list[str] | tuple[str, ...] | None = None,
+    include_examples: bool = False,
+    summary: str | None = None,
+    example_requests: list[str] | tuple[str, ...] | None = None,
+    tool_kind: str = "prompt",
+    *,
+    target: str = "workspace",
+    workspace_skills_dir: str | Path | None = None,
+    builtin_skills_dir: str | Path | None = None,
 ) -> Path:
     normalized_name = _normalize_skill_name(skill_name)
     skill_title = _title_case_skill_name(normalized_name)
@@ -328,7 +388,9 @@ def init_skill(
     include_examples = include_examples or any(
         item in EXAMPLE_RESOURCE_ALIASES for item in _resource_items(resources)
     )
-    parsed_resources = _merge_resources(_parse_resources(resources), normalized_tool_kind)
+    parsed_resources = _merge_resources(
+        _parse_resources(resources), normalized_tool_kind
+    )
     summary_text = _normalize_summary(summary, skill_title)
     example_request_items = _normalize_example_requests(
         example_requests,
@@ -361,9 +423,7 @@ def init_skill(
             SKILL_TEMPLATE.format(
                 skill_name=normalized_name,
                 skill_title=skill_title,
-                description=(
-                    f"Use when the request involves {summary_text}."
-                ),
+                description=(f"Use when the request involves {summary_text}."),
                 when_to_use_line=_when_to_use_line(summary_text),
                 example_requests_block=_example_requests_block(example_request_items),
                 workflow_block=_workflow_block(normalized_tool_kind),
@@ -385,7 +445,9 @@ def init_skill(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Initialize a babybot skill")
     parser.add_argument("skill_name")
-    parser.add_argument("--target", choices=("workspace", "builtin"), default="workspace")
+    parser.add_argument(
+        "--target", choices=("workspace", "builtin"), default="workspace"
+    )
     parser.add_argument("--path")
     parser.add_argument("--workspace-skills-dir")
     parser.add_argument("--builtin-skills-dir")
