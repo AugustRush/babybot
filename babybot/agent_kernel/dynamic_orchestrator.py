@@ -2072,11 +2072,13 @@ class DynamicOrchestrator:
         async def on_turn(agent_id: str, role: str, round_num: int, text: str) -> None:
             if heartbeat is not None:
                 heartbeat.beat()
-            if team_streaming:
-                await reset_stream()
-            elif send_intermediate is not None:
+            # Always send an intermediate message for each turn so the user
+            # sees individual agent outputs regardless of streaming mode.
+            if send_intermediate is not None:
                 header = f"**[{role} — Round {round_num}]**"
                 await send_intermediate(header + "\n" + text)
+            if team_streaming:
+                await reset_stream()
 
         logger.info(
             "Team streaming=%s intermediate=%s heartbeat=%s",

@@ -424,10 +424,18 @@ class MessageBus:
                 stream_message_id = None
                 stream_last_patched = ""
 
+        # Tracks all in-flight _send_intermediate_message tasks so we can
+        # await them before sending the final reply, ensuring stage messages
+        # always arrive before the final summary.
+        _stage_tasks: set[asyncio.Task[None]] = set()
+        _has_stage_messages: bool = False
+
         async def _send_intermediate_message(text: str) -> None:
             """Send an independent message card (not patching the stream card)."""
+            nonlocal _has_stage_messages
             if not text or not text.strip() or channel is None:
                 return
+            _has_stage_messages = True
             try:
                 send_kwargs: dict[str, Any] = {
                     "sender_id": msg.sender_id,
@@ -449,6 +457,14 @@ class MessageBus:
                     msg.chat_id,
                     exc_info=True,
                 )
+
+        async def _schedule_stage_message(text: str) -> None:
+            """Fire-and-forget a stage result message, tracked for later await."""
+            task: asyncio.Task[None] = asyncio.create_task(
+                _send_intermediate_message(text)
+            )
+            _stage_tasks.add(task)
+            task.add_done_callback(_stage_tasks.discard)
 
         process_kwargs: dict[str, Any] = {
             "chat_key": f"{msg.channel}:{msg.chat_id}",
@@ -597,17 +613,18 @@ class MessageBus:
             ):
                 return
             # For terminal subtask events that carry output or an error,
-            # send a separate stage result message so the user can see
-            # each stage's details independently (Scheme C).
-            # Only do this for task-level events (not job-level) to avoid
-            # duplicating the final orchestrator-level completion message.
+            # schedule a separate stage result message (fire-and-forget, tracked).
+            # Using _schedule_stage_message ensures these tasks are awaited
+            # before the final reply is sent, preserving display order.
+            # Only fire for task-level events to avoid duplicating the final
+            # orchestrator-level completion message.
             if (
                 normalized_event.state in {"completed", "failed"}
                 and normalized_event.stage == "task"
             ):
                 stage_text = render_stage_result(normalized_event)
                 if stage_text:
-                    await _send_intermediate_message(stage_text)
+                    await _schedule_stage_message(stage_text)
             await _patch_progress(progress_text)
 
         async def _interactive_output_callback(event: Any) -> None:
@@ -721,10 +738,18 @@ class MessageBus:
                 with contextlib.suppress(asyncio.CancelledError):
                     await ticker_task
 
+        # Flush all in-flight stage messages before sending the final reply.
+        # This guarantees that stage result messages always appear in the chat
+        # before the final summary, regardless of async timing.
+        if _stage_tasks:
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*list(_stage_tasks), return_exceptions=True)
+
         # Send actual response.
-        # Determine which card ID to try patching for the final reply.
-        # Prefer the stream card (for streaming scenarios), otherwise fall
-        # back to the lifecycle card created at ACK time.
+        # When stage messages were sent, always use a fresh send_response so
+        # the final reply appears after them in the channel's message timeline.
+        # Only patch the lifecycle card when there are no stage messages (simple
+        # tasks without intermediate output) or when streaming is active.
         final_card_id = stream_message_id or lifecycle_card_id
         if channel:
             try:
@@ -732,8 +757,10 @@ class MessageBus:
                 final_text = response.text.strip()
                 card_patched = False
 
-                if has_card and final_text:
-                    # Try to patch the final reply into the existing card.
+                # Patch the lifecycle card only when no stage messages were
+                # sent.  If stage messages exist we use send_response instead
+                # so the final reply appears after them in the timeline.
+                if has_card and final_text and not _has_stage_messages:
                     card_patched = bool(
                         await channel.patch_stream_message(  # type: ignore[attr-defined]
                             final_card_id,
@@ -742,7 +769,7 @@ class MessageBus:
                     )
 
                 if has_card and response.media_paths:
-                    # Media must be sent as separate messages.
+                    # Media must always be sent as separate messages.
                     await channel.send_response(
                         msg.chat_id,
                         TaskResponse(text="", media_paths=list(response.media_paths)),
@@ -750,7 +777,8 @@ class MessageBus:
                         metadata=msg.metadata,
                     )
                 elif not card_patched:
-                    # No card available or patch failed — send as new message.
+                    # No card, patch failed, or stage messages present —
+                    # send as a new message so ordering is preserved.
                     outbound_response = response
                     if final_text and final_text == interactive_last_sent_text:
                         outbound_response = TaskResponse(
