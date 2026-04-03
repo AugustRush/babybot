@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 
-SCRIPT_DIR = Path("skills/auto_skill_creator/scripts").resolve()
+SCRIPT_DIR = Path("skills/skill-manager/scripts").resolve()
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -49,7 +49,9 @@ def test_parse_resources_rejects_unknown_resource_types() -> None:
     except SystemExit as exc:
         assert exc.code == 1
     else:
-        raise AssertionError("Expected parse_resources to exit on invalid resource type")
+        raise AssertionError(
+            "Expected parse_resources to exit on invalid resource type"
+        )
 
 
 def test_parse_resources_ignores_examples_alias() -> None:
@@ -70,7 +72,9 @@ def test_parse_resources_accepts_common_resource_aliases() -> None:
     assert resources == ["scripts", "references", "assets"]
 
 
-def test_init_skill_accepts_json_stringified_resource_array_items(tmp_path: Path) -> None:
+def test_init_skill_accepts_json_stringified_resource_array_items(
+    tmp_path: Path,
+) -> None:
     skill_dir = init_skill.init_skill(
         "json-array-skill",
         target="workspace",
@@ -83,7 +87,9 @@ def test_init_skill_accepts_json_stringified_resource_array_items(tmp_path: Path
     assert (skill_dir / "scripts").is_dir()
 
 
-def test_init_skill_treats_examples_resource_alias_as_include_examples(tmp_path: Path) -> None:
+def test_init_skill_treats_examples_resource_alias_as_include_examples(
+    tmp_path: Path,
+) -> None:
     skill_dir = init_skill.init_skill(
         "glm ocr",
         target="workspace",
@@ -96,7 +102,9 @@ def test_init_skill_treats_examples_resource_alias_as_include_examples(tmp_path:
     assert (skill_dir / "scripts" / "_example.py").exists()
 
 
-def test_init_skill_removes_placeholder_examples_on_rerun_without_examples(tmp_path: Path) -> None:
+def test_init_skill_removes_placeholder_examples_on_rerun_without_examples(
+    tmp_path: Path,
+) -> None:
     skill_dir = init_skill.init_skill(
         "cleanup skill",
         target="workspace",
@@ -157,7 +165,9 @@ def test_init_skill_generates_guideline_aligned_skill_document(tmp_path: Path) -
     assert "- " in content
 
 
-def test_init_skill_supports_summary_examples_and_tool_kind_defaults(tmp_path: Path) -> None:
+def test_init_skill_supports_summary_examples_and_tool_kind_defaults(
+    tmp_path: Path,
+) -> None:
     skill_dir = init_skill.init_skill(
         "receipt parser",
         path=tmp_path,
@@ -173,13 +183,18 @@ def test_init_skill_supports_summary_examples_and_tool_kind_defaults(tmp_path: P
 
     content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "extracting structured fields from receipt photos and scanned invoices" in content
+    assert (
+        "extracting structured fields from receipt photos and scanned invoices"
+        in content
+    )
     assert "帮我提取这张小票里的商家、金额和日期" in content
     assert "Parse this receipt image into JSON" in content
     assert (skill_dir / "scripts").is_dir()
 
 
-def test_init_skill_hybrid_kind_creates_scripts_and_references_by_default(tmp_path: Path) -> None:
+def test_init_skill_hybrid_kind_creates_scripts_and_references_by_default(
+    tmp_path: Path,
+) -> None:
     skill_dir = init_skill.init_skill(
         "finance helper",
         path=tmp_path,
@@ -196,11 +211,7 @@ def test_validate_skill_rejects_todo_description(tmp_path: Path) -> None:
     skill_dir = tmp_path / "bad-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
-        "---\n"
-        "name: bad-skill\n"
-        'description: "[TODO: fill me in]"\n'
-        "---\n\n"
-        "# Bad Skill\n",
+        '---\nname: bad-skill\ndescription: "[TODO: fill me in]"\n---\n\n# Bad Skill\n',
         encoding="utf-8",
     )
 
@@ -247,7 +258,9 @@ def test_validate_skill_rejects_generated_placeholder_resources(tmp_path: Path) 
     assert "placeholder resource" in message.lower()
 
 
-def test_validate_skill_rejects_missing_example_requests_section(tmp_path: Path) -> None:
+def test_validate_skill_rejects_missing_example_requests_section(
+    tmp_path: Path,
+) -> None:
     skill_dir = tmp_path / "missing-examples-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
@@ -304,9 +317,9 @@ def test_validate_skill_rejects_unexpected_root_file(tmp_path: Path) -> None:
     assert "Unexpected file or directory" in message
 
 
-def test_validate_skill_accepts_current_auto_skill_creator_folder_naming() -> None:
+def test_validate_skill_accepts_current_skill_manager_folder_naming() -> None:
     valid, message = quick_validate.validate_skill(
-        Path("skills/auto_skill_creator").resolve()
+        Path("skills/skill-manager").resolve()
     )
 
     assert valid, message
@@ -358,11 +371,12 @@ def test_validate_skill_allows_common_noise_files_in_root(tmp_path: Path) -> Non
     assert valid, message
 
 
-def test_auto_skill_creator_skill_forbids_workspace_output_artifacts() -> None:
-    content = Path("skills/auto_skill_creator/SKILL.md").read_text(encoding="utf-8")
+def test_skill_manager_skill_forbids_workspace_output_artifacts() -> None:
+    content = Path("skills/skill-manager/SKILL.md").read_text(encoding="utf-8")
 
     assert "/workspace/output" in content
-    assert "do not leave generated skill files" in content.lower()
+    # The skill must explicitly forbid writing to workspace/output
+    assert "workspace/output" in content.lower()
 
 
 def test_validate_skill_rejects_public_cli_only_script(tmp_path: Path) -> None:
@@ -400,8 +414,7 @@ def test_validate_skill_accepts_public_callable_script(tmp_path: Path) -> None:
         include_examples=False,
     )
     (skill_dir / "scripts" / "generate_image.py").write_text(
-        "def generate_image(prompt: str) -> str:\n"
-        "    return f'img:{prompt}'\n",
+        "def generate_image(prompt: str) -> str:\n    return f'img:{prompt}'\n",
         encoding="utf-8",
     )
 

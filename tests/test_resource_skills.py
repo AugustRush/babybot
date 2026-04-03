@@ -23,9 +23,9 @@ from babybot.resource_subagent_runtime import ResourceSubagentRuntime
 from babybot.config import Config
 
 
-_AUTO_SKILL_CREATOR_SCRIPTS = Path("skills/auto_skill_creator/scripts").resolve()
-if str(_AUTO_SKILL_CREATOR_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_AUTO_SKILL_CREATOR_SCRIPTS))
+_SKILL_MANAGER_SCRIPTS = Path("skills/skill-manager/scripts").resolve()
+if str(_SKILL_MANAGER_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SKILL_MANAGER_SCRIPTS))
 auto_init_skill = importlib.import_module("init_skill")
 from babybot.builtin_tools.workers import (
     build_create_worker_tool,
@@ -247,7 +247,7 @@ def test_register_skill_tools_from_scripts(tmp_path: Path) -> None:
     assert any(name.endswith("__generate_image") for name in tools)
 
 
-def test_register_skill_tools_for_auto_skill_creator_exposes_only_agent_facing_tools() -> (
+def test_register_skill_tools_for_skill_manager_exposes_only_agent_facing_tools() -> (
     None
 ):
     manager = object.__new__(ResourceManager)
@@ -261,14 +261,14 @@ def test_register_skill_tools_for_auto_skill_creator_exposes_only_agent_facing_t
         {"resolve_workspace_path": staticmethod(lambda value: str(value))},
     )()
 
-    skill_dir = Path("skills/auto_skill_creator").resolve()
+    skill_dir = Path("skills/skill-manager").resolve()
 
-    group, tools = manager._register_skill_tools("auto-skill-creator", skill_dir)
+    group, tools = manager._register_skill_tools("skill-manager", skill_dir)
 
-    assert group == "skill_auto_skill_creator"
+    assert group == "skill_skill_manager"
     assert tools == (
-        "auto_skill_creator__init_skill",
-        "auto_skill_creator__validate_skill",
+        "skill_manager__init_skill",
+        "skill_manager__validate_skill",
     )
 
 
@@ -284,9 +284,10 @@ def test_agent_admin_skill_exists_and_guides_builtin_admin_workflows() -> None:
     assert meta["name"] == "agent-admin"
     assert set(meta["include_groups"]) >= {"admin", "basic"}
     assert "## Example Requests" in body
-    assert "list_admin_skills" in body
     assert "set_assistant_profile" in body
-    assert "delete_skill" in body
+    # agent-admin no longer handles skill lifecycle — that is skill-manager's job.
+    assert "delete_skill" not in body
+    assert "list_admin_skills" not in body
     assert "reload_skill" in body
 
 
@@ -1418,8 +1419,8 @@ def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
 
     lease_var = contextvars.ContextVar("current_task_lease_test", default=None)
     skill_ids_var = contextvars.ContextVar("current_skill_ids_test", default=None)
-    lease_var.set(ToolLease(include_groups=("basic", "skill_auto_skill_creator")))
-    skill_ids_var.set(("auto-skill-creator",))
+    lease_var.set(ToolLease(include_groups=("basic", "skill_skill_manager")))
+    skill_ids_var.set(("skill-manager",))
     manager._current_task_lease = lease_var
     manager._current_skill_ids = skill_ids_var
     manager._lease_to_dict = ResourceManager._lease_to_dict
@@ -1448,10 +1449,8 @@ def test_create_worker_tool_inherits_parent_scope_by_default() -> None:
     assert text == "done"
     assert captured["task_description"] == "inspect the project homepage"
     assert captured["agent_name"] == "Worker"
-    assert captured["lease"] == {
-        "include_groups": ["basic", "skill_auto_skill_creator"]
-    }
-    assert captured["skill_ids"] == ["auto-skill-creator"]
+    assert captured["lease"] == {"include_groups": ["basic", "skill_skill_manager"]}
+    assert captured["skill_ids"] == ["skill-manager"]
 
 
 def test_build_worker_prompt_returns_results_to_main_agent_instead_of_direct_delivery() -> (
