@@ -1000,6 +1000,8 @@ class InProcessChildTaskRuntime:
                                     message="子任务已完成",
                                     status=result.status,
                                     error=result.error,
+                                    output=result.output,
+                                    task_description=description,
                                 ),
                             )
                         )
@@ -1071,6 +1073,7 @@ class InProcessChildTaskRuntime:
                                 attempts=final_result.attempts,
                                 max_attempts=max_attempts,
                                 error_type=decision.error_type,
+                                task_description=description,
                             ),
                         )
                     )

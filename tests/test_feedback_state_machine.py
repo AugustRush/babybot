@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from babybot.feedback_events import (
     RuntimeFeedbackEvent,
+    _extract_task_label,
     _sanitize_message,
+    _truncate_output,
     feedback_dedupe_key,
     normalize_runtime_feedback_event,
     progress_spinner,
     render_runtime_feedback_event,
+    render_stage_result,
 )
 
 
@@ -131,8 +134,8 @@ def test_render_running_state_includes_spinner() -> None:
     # Should contain a spinner symbol followed by the message.
     assert "查询中" in rendered
     assert "…" in rendered
-    # The first spinner symbol is ⏳
-    assert rendered.startswith("⏳")
+    # The first spinner symbol is ⠋ (Braille frame 0)
+    assert rendered.startswith("⠋")
 
 
 def test_render_completed_state_has_checkmark() -> None:
@@ -211,3 +214,207 @@ def test_normalize_started_event_without_resource_id_falls_back_to_default() -> 
     # No resource_id → message is empty, render falls back to "执行中"
     rendered = render_runtime_feedback_event(normalized)
     assert "执行中" in rendered
+
+
+# ---------------------------------------------------------------------------
+# output_summary and task_label extraction
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_output_short_text_unchanged() -> None:
+    assert _truncate_output("hello") == "hello"
+
+
+def test_truncate_output_long_text_truncated() -> None:
+    long = "x" * 1000
+    result = _truncate_output(long)
+    assert len(result) < 900
+    assert "共 1000 字" in result
+
+
+def test_truncate_output_empty_returns_empty() -> None:
+    assert _truncate_output("") == ""
+    assert _truncate_output("   ") == ""
+
+
+def test_extract_task_label_first_line() -> None:
+    desc = "查询杭州天气\n详情: 获取今天的天气预报"
+    assert _extract_task_label(desc) == "查询杭州天气"
+
+
+def test_extract_task_label_strips_phase_prefix() -> None:
+    assert _extract_task_label("[Research] 搜索相关文档") == "搜索相关文档"
+    assert _extract_task_label("[执行] 生成图片") == "生成图片"
+    assert _extract_task_label("[Implementation] deploy") == "deploy"
+
+
+def test_extract_task_label_truncates_long_text() -> None:
+    long_desc = "a" * 200
+    result = _extract_task_label(long_desc)
+    assert len(result) <= 124  # 120 + "…"
+    assert result.endswith("…")
+
+
+def test_extract_task_label_empty_returns_empty() -> None:
+    assert _extract_task_label("") == ""
+    assert _extract_task_label("   ") == ""
+
+
+# ---------------------------------------------------------------------------
+# normalize: output_summary and task_label from payload
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_succeeded_event_extracts_output_summary() -> None:
+    normalized = normalize_runtime_feedback_event(
+        {
+            "job_id": "j1",
+            "flow_id": "f1",
+            "task_id": "t1",
+            "event": "succeeded",
+            "payload": {
+                "output": "杭州今日多云，气温 18-24°C，南风 3 级",
+                "task_description": "查询杭州天气",
+            },
+        }
+    )
+    assert normalized.output_summary == "杭州今日多云，气温 18-24°C，南风 3 级"
+    assert normalized.task_label == "查询杭州天气"
+
+
+def test_normalize_succeeded_event_with_long_output_truncates() -> None:
+    long_output = "结果 " * 300  # > 800 chars
+    normalized = normalize_runtime_feedback_event(
+        {
+            "job_id": "j1",
+            "flow_id": "f1",
+            "task_id": "t1",
+            "event": "succeeded",
+            "payload": {"output": long_output},
+        }
+    )
+    assert len(normalized.output_summary) < len(long_output)
+    assert "共" in normalized.output_summary
+
+
+def test_normalize_non_terminal_event_has_no_output_summary() -> None:
+    """output_summary should only be populated for terminal events."""
+    normalized = normalize_runtime_feedback_event(
+        {
+            "job_id": "j1",
+            "flow_id": "f1",
+            "task_id": "t1",
+            "event": "started",
+            "payload": {"output": "should not appear"},
+        }
+    )
+    assert normalized.output_summary == ""
+
+
+def test_normalize_task_description_not_leaked_as_message() -> None:
+    """task_description goes into task_label only, never into message."""
+    normalized = normalize_runtime_feedback_event(
+        {
+            "job_id": "j1",
+            "flow_id": "f1",
+            "task_id": "t1",
+            "event": "succeeded",
+            "payload": {
+                "task_description": "这是系统内部的任务描述",
+                "message": "",
+            },
+        }
+    )
+    assert "这是系统内部的任务描述" not in normalized.message
+    assert normalized.task_label == "这是系统内部的任务描述"
+
+
+# ---------------------------------------------------------------------------
+# render_stage_result
+# ---------------------------------------------------------------------------
+
+
+def test_render_stage_result_completed_with_output() -> None:
+    event = RuntimeFeedbackEvent(
+        job_id="j1",
+        flow_id="f1",
+        task_id="t1",
+        state="completed",
+        stage="task",
+        task_label="查询杭州天气",
+        output_summary="杭州多云，18-24°C",
+    )
+    result = render_stage_result(event)
+    assert "✅" in result
+    assert "查询杭州天气" in result
+    assert "杭州多云，18-24°C" in result
+
+
+def test_render_stage_result_completed_without_output_returns_empty() -> None:
+    """No output_summary → nothing to show as a separate message."""
+    event = RuntimeFeedbackEvent(
+        job_id="j1",
+        flow_id="f1",
+        task_id="t1",
+        state="completed",
+        stage="task",
+        task_label="某任务",
+        output_summary="",
+    )
+    assert render_stage_result(event) == ""
+
+
+def test_render_stage_result_failed_with_error() -> None:
+    event = RuntimeFeedbackEvent(
+        job_id="j1",
+        flow_id="f1",
+        task_id="t1",
+        state="failed",
+        stage="task",
+        task_label="生成图片",
+        error="API 超时",
+    )
+    result = render_stage_result(event)
+    assert "⚠" in result
+    assert "生成图片" in result
+    assert "API 超时" in result
+
+
+def test_render_stage_result_failed_without_error_shows_header() -> None:
+    event = RuntimeFeedbackEvent(
+        job_id="j1",
+        flow_id="f1",
+        task_id="t1",
+        state="failed",
+        stage="task",
+    )
+    result = render_stage_result(event)
+    assert "⚠" in result
+
+
+def test_render_stage_result_non_terminal_returns_empty() -> None:
+    event = RuntimeFeedbackEvent(
+        job_id="j1",
+        flow_id="f1",
+        task_id="t1",
+        state="running",
+        stage="task",
+        output_summary="some output",
+    )
+    assert render_stage_result(event) == ""
+
+
+def test_render_stage_result_strips_spinner_from_label() -> None:
+    """Spinner symbols in task_label (via message fallback) should be stripped."""
+    event = RuntimeFeedbackEvent(
+        job_id="j1",
+        flow_id="f1",
+        task_id="t1",
+        state="completed",
+        stage="task",
+        message="⠋ 正在调用 weather",
+        output_summary="天气结果",
+    )
+    result = render_stage_result(event)
+    assert "⠋" not in result
+    assert "天气结果" in result

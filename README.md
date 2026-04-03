@@ -832,10 +832,10 @@ query=继续语音任务
 **消息流（以飞书为例）：**
 
 ```
-[卡片] ⏳ 收到，正在处理…              ← ACK 即建卡
-[patch] ⌛ 正在调用 text-to-image…     ← 子任务开始，卡片内容更新
-[patch] ⚙ 正在调用 text-to-image…     ← �� 3 秒轮换 spinner 符号
-[patch] ✦ 正在调用 text-to-image…     ← 动画持续直至任务结束
+[卡片] ⠋ 收到，正在处理…              ← ACK 即建卡
+[patch] ⠙ 正在调用 text-to-image…     ← 子任务开始，卡片内容更新
+[patch] ⠹ 正在调用 text-to-image…     ← 每 3 秒轮换 spinner 帧
+[patch] ⠸ 正在调用 text-to-image…     ← 动画持续直至任务结束
 [patch] ✅ 子任务已完成               ← 终态事件
 [patch] 最终回复内容                   ← reply_to_user 原地替换卡片
 [新消] 📎 图片/文件（如有）           ← 媒体单独发送
@@ -846,7 +846,7 @@ query=继续语音任务
 - 支持卡片 patch 的通道（飞书）全程只有一张卡片，不产生多条消息
 - 不支持卡片的通道（微信等）自动退化为纯文本 ACK + `send_response`，行为不受影响
 - 进度文案不再暴露内部 task ID（如 `task task_2_1527df succeeded`），改为自然语言（如"正在调用 weather"）
-- spinner 符号轮换：⏳ ⌛ ⚙ ✦ ◉ ◎
+- spinner 帧序列（Braille 10帧，视觉连续旋转）：⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏
 - `started` 事件加入转发，子任务开始即可见，避免长任务执行期间卡片静止
 - `RuntimeFeedbackEvent` 的 message 字段不含 `description`（系统提示词），不泄露内部信息
 

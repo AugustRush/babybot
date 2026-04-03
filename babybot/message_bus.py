@@ -17,6 +17,7 @@ from .feedback_events import (
     feedback_dedupe_key,
     normalize_runtime_feedback_event,
     render_runtime_feedback_event,
+    render_stage_result,
     progress_spinner,
 )
 from .heartbeat import Heartbeat
@@ -595,6 +596,18 @@ class MessageBus:
                 and msg.channel != "feishu"
             ):
                 return
+            # For terminal subtask events that carry output or an error,
+            # send a separate stage result message so the user can see
+            # each stage's details independently (Scheme C).
+            # Only do this for task-level events (not job-level) to avoid
+            # duplicating the final orchestrator-level completion message.
+            if (
+                normalized_event.state in {"completed", "failed"}
+                and normalized_event.stage == "task"
+            ):
+                stage_text = render_stage_result(normalized_event)
+                if stage_text:
+                    await _send_intermediate_message(stage_text)
             await _patch_progress(progress_text)
 
         async def _interactive_output_callback(event: Any) -> None:

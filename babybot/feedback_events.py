@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# Maximum characters of subtask output shown in the stage result card.
+_OUTPUT_SUMMARY_MAX_CHARS = 800
+# Maximum characters of task_description shown as the stage label.
+_TASK_DESC_MAX_CHARS = 120
+
+
 @dataclass(frozen=True)
 class RuntimeFeedbackEvent:
     job_id: str
@@ -17,6 +23,12 @@ class RuntimeFeedbackEvent:
     message: str = ""
     error: str = ""
     progress: float | None = None
+    # output_summary: truncated result text of a completed subtask.
+    # Populated only for terminal events (succeeded / failed) that carry output.
+    output_summary: str = ""
+    # task_label: a short, user-facing description of what the subtask did.
+    # Derived from task_description payload field (first line, truncated).
+    task_label: str = ""
 
 
 _ACTIVE_FEEDBACK_STATES = frozenset(
@@ -26,7 +38,8 @@ _ACTIVE_FEEDBACK_STATES = frozenset(
 # Spinner symbols cycled across successive progress updates to give users
 # a sense of "alive" activity.  The caller passes a monotonically
 # increasing counter and we pick the symbol at ``counter % len``.
-_PROGRESS_SPINNERS = ("⏳", "⌛", "⚙", "✦", "◉", "◎")
+# Braille 10-frame sequence — visually continuous rotation effect.
+_PROGRESS_SPINNERS = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 # Regex that matches internal task-id patterns like "task task_0_abc123 succeeded".
 _TASK_ID_RE = re.compile(r"\btask[\s_]+[a-zA-Z0-9_]+\b")
@@ -66,6 +79,41 @@ def _sanitize_message(message: str) -> str:
     # Collapse multiple spaces
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
+
+
+def _extract_task_label(raw_description: str) -> str:
+    """Return a short, user-facing label from a raw task description.
+
+    Takes the first non-empty line and strips common phase prefixes like
+    ``[Research]``, ``[执行]``, etc., then truncates.
+    """
+    if not raw_description:
+        return ""
+    # Take the first non-blank line.
+    first_line = ""
+    for line in raw_description.splitlines():
+        stripped = line.strip()
+        if stripped:
+            first_line = stripped
+            break
+    if not first_line:
+        return ""
+    # Strip phase prefixes like "[Research]", "[执行]", "[Implementation]".
+    first_line = re.sub(r"^\[[^\]]{1,30}\]\s*", "", first_line).strip()
+    # Truncate.
+    if len(first_line) > _TASK_DESC_MAX_CHARS:
+        first_line = first_line[:_TASK_DESC_MAX_CHARS] + "…"
+    return first_line
+
+
+def _truncate_output(output: str) -> str:
+    """Truncate subtask output for display in a stage result card."""
+    if not output:
+        return ""
+    text = output.strip()
+    if len(text) > _OUTPUT_SUMMARY_MAX_CHARS:
+        return text[:_OUTPUT_SUMMARY_MAX_CHARS] + f"\n…（共 {len(text)} 字）"
+    return text
 
 
 def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
@@ -124,6 +172,20 @@ def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
         progress = max(0.0, min(1.0, float(progress)))
     else:
         progress = None
+
+    # output_summary: only populated for terminal events that carry output.
+    output_summary = ""
+    if event_name in {"succeeded", "completed"}:
+        raw_output = str(payload.get("output", "") or "").strip()
+        output_summary = _truncate_output(raw_output)
+
+    # task_label: user-readable description of what the subtask did.
+    # Read from the "task_description" payload field (not "description", which
+    # may contain the full system-prompt).
+    task_label = _extract_task_label(
+        str(payload.get("task_description", "") or "").strip()
+    )
+
     return RuntimeFeedbackEvent(
         job_id=job_id,
         flow_id=flow_id,
@@ -133,6 +195,8 @@ def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
         message=message,
         error=error,
         progress=progress,
+        output_summary=output_summary,
+        task_label=task_label,
     )
 
 
@@ -140,7 +204,11 @@ def render_runtime_feedback_event(
     event: RuntimeFeedbackEvent,
     spinner_counter: int = 0,
 ) -> str:
-    """Render a runtime event into user-facing text.
+    """Render a runtime event into user-facing progress text.
+
+    This is used for the unified lifecycle card (patch updates).
+    For terminal events with output, callers should use
+    ``render_stage_result`` to produce a separate stage result message.
 
     Args:
         event: The normalized feedback event.
@@ -176,3 +244,33 @@ def render_runtime_feedback_event(
             return f"⚠ {label}\n原因：{event.error}"
         return f"⚠ {label}"
     return ""
+
+
+def render_stage_result(event: RuntimeFeedbackEvent) -> str:
+    """Render a completed subtask as an independent stage result message.
+
+    Returns an empty string when there is no output worth showing
+    (e.g. the event has no output_summary and no meaningful error).
+    This text is sent as a separate message, not patched into the
+    lifecycle card.
+    """
+    if event.state not in {"completed", "failed"}:
+        return ""
+
+    # Build header line from task_label or fallback resource name from message.
+    label = event.task_label or event.message or ""
+    # Strip leading spinner / status symbols that may be in message.
+    # Covers Braille spinner frames, status icons, and legacy symbols.
+    label = re.sub(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✅⚠⊘]\s*", "", label).strip()
+
+    if event.state == "completed":
+        header = f"✅ {label}" if label else "✅ 阶段完成"
+        if event.output_summary:
+            return f"{header}\n\n{event.output_summary}"
+        return ""  # No output → nothing interesting to show separately.
+
+    # Failed state.
+    header = f"⚠ {label} 失败" if label else "⚠ 阶段失败"
+    if event.error:
+        return f"{header}\n\n原因：{event.error}"
+    return header
