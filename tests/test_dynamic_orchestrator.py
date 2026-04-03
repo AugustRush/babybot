@@ -1253,7 +1253,8 @@ def test_build_resource_catalog_hides_mcp_tool_previews() -> None:
             },
         ]
     )
-    assert "工具数: 8" in catalog
+    assert "gaode_map" in catalog
+    assert "8" in catalog
     assert "poi_search" not in catalog
 
 
@@ -1271,8 +1272,111 @@ def test_build_resource_catalog_hides_skill_tool_previews() -> None:
             },
         ]
     )
-    assert "工具数: 3" in catalog
+    assert "weather" in catalog
+    assert "3" in catalog
     assert "get_weather" not in catalog
+
+
+def test_build_resource_catalog_tiered_when_mixed_types() -> None:
+    """When both specialist and general resources exist with tier headers, display tiered."""
+    from babybot.agent_kernel.orchestrator_config import OrchestratorConfig
+
+    cfg = OrchestratorConfig(
+        resource_catalog_header="\n可用资源：\n",
+        resource_catalog_line="- {rid}: {name} — {purpose} (工具数: {tc}{preview_text})",
+        resource_catalog_preview_prefix="; 示例工具: ",
+        resource_catalog_specialist_header="  [专业能力] 优先使用：\n",
+        resource_catalog_general_header="  [通用工具] 无专业资源匹配时使用：\n",
+    )
+    catalog = _build_resource_catalog(
+        [
+            {
+                "id": "skill.weather",
+                "type": "skill",
+                "name": "weather",
+                "purpose": "天气查询",
+                "tool_count": 3,
+                "tools_preview": [],
+                "active": True,
+            },
+            {
+                "id": "group.web",
+                "type": "tool_group",
+                "name": "web",
+                "purpose": "Web tools",
+                "tool_count": 2,
+                "tools_preview": ["web_fetch", "web_search"],
+                "active": True,
+            },
+        ],
+        config=cfg,
+    )
+    assert "[专业能力]" in catalog
+    assert "[通用工具]" in catalog
+    # Specialist before general
+    specialist_pos = catalog.index("[专业能力]")
+    general_pos = catalog.index("[通用工具]")
+    assert specialist_pos < general_pos
+    assert "weather" in catalog
+    assert "web" in catalog
+
+
+def test_build_resource_catalog_flat_when_single_tier() -> None:
+    """When only one tier exists, fall back to flat list (no tier headers)."""
+    from babybot.agent_kernel.orchestrator_config import OrchestratorConfig
+
+    cfg = OrchestratorConfig(
+        resource_catalog_header="\n可用资源：\n",
+        resource_catalog_line="- {rid}: {name} — {purpose} (工具数: {tc}{preview_text})",
+        resource_catalog_specialist_header="  [专业能力]\n",
+        resource_catalog_general_header="  [通用工具]\n",
+    )
+    catalog = _build_resource_catalog(
+        [
+            {
+                "id": "skill.weather",
+                "type": "skill",
+                "name": "weather",
+                "purpose": "天气查询",
+                "tool_count": 3,
+                "tools_preview": [],
+                "active": True,
+            },
+        ],
+        config=cfg,
+    )
+    assert "[专业能力]" not in catalog
+    assert "weather" in catalog
+
+
+def test_resource_selection_addendum_generated_for_mixed_resources() -> None:
+    """Dynamic addendum is generated when both specialist and general resources exist."""
+    from babybot.orchestrator_prompts import _build_resource_selection_addendum
+
+    briefs = [
+        {"type": "skill", "name": "weather", "active": True},
+        {"type": "tool_group", "name": "web", "active": True},
+    ]
+    addendum = _build_resource_selection_addendum(briefs)
+    assert "资源选择提示" in addendum
+    assert "weather" in addendum
+    assert "web" in addendum
+    assert "优先" in addendum
+
+
+def test_resource_selection_addendum_empty_for_single_tier() -> None:
+    """No addendum when only one tier of resources exists."""
+    from babybot.orchestrator_prompts import _build_resource_selection_addendum
+
+    briefs_only_skill = [
+        {"type": "skill", "name": "weather", "active": True},
+    ]
+    assert _build_resource_selection_addendum(briefs_only_skill) == ""
+
+    briefs_only_group = [
+        {"type": "tool_group", "name": "web", "active": True},
+    ]
+    assert _build_resource_selection_addendum(briefs_only_group) == ""
 
 
 def test_runtime_event_callback_receives_child_task_lifecycle_events() -> None:

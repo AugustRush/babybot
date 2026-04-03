@@ -256,34 +256,61 @@ def _build_resource_catalog(
     config: OrchestratorConfig | None = None,
 ) -> str:
     cfg = config or OrchestratorConfig()
-    lines: list[str] = []
+
+    specialist_types = {"skill", "mcp"}
+    specialist_lines: list[str] = []
+    general_lines: list[str] = []
+
     for b in briefs:
-        if b.get("active"):
-            rid = b.get("id", "?")
-            resource_type = b.get("type", "")
-            name = b.get("name", "?")
-            purpose = b.get("purpose", "")
-            tc = b.get("tool_count", 0)
-            preview = (
-                ""
-                if resource_type in {"mcp", "skill"}
-                else ", ".join(b.get("tools_preview") or [])
-            )
-            preview_text = (
-                (cfg.resource_catalog_preview_prefix + preview) if preview else ""
-            )
-            lines.append(
-                cfg.resource_catalog_line.format(
-                    rid=rid,
-                    name=name,
-                    purpose=purpose,
-                    tc=tc,
-                    preview_text=preview_text,
-                )
-            )
-    if not lines:
+        if not b.get("active"):
+            continue
+        rid = b.get("id", "?")
+        resource_type = b.get("type", "")
+        name = b.get("name", "?")
+        purpose = b.get("purpose", "")
+        tc = b.get("tool_count", 0)
+        preview = (
+            ""
+            if resource_type in {"mcp", "skill"}
+            else ", ".join(b.get("tools_preview") or [])
+        )
+        preview_text = (
+            (cfg.resource_catalog_preview_prefix + preview) if preview else ""
+        )
+        line = cfg.resource_catalog_line.format(
+            rid=rid,
+            name=name,
+            purpose=purpose,
+            tc=tc,
+            preview_text=preview_text,
+        )
+        if resource_type in specialist_types:
+            specialist_lines.append(line)
+        else:
+            general_lines.append(line)
+
+    if not specialist_lines and not general_lines:
         return cfg.resource_catalog_empty
-    return cfg.resource_catalog_header + "\n".join(lines)
+
+    # When tier headers are configured and both tiers have content, display
+    # a tiered catalog; otherwise fall back to flat list.
+    use_tiers = bool(
+        cfg.resource_catalog_specialist_header
+        and cfg.resource_catalog_general_header
+        and specialist_lines
+        and general_lines
+    )
+
+    if use_tiers:
+        parts = [cfg.resource_catalog_header]
+        parts.append(cfg.resource_catalog_specialist_header)
+        parts.extend(f"  {line}" for line in specialist_lines)
+        parts.append(cfg.resource_catalog_general_header)
+        parts.extend(f"  {line}" for line in general_lines)
+        return "\n".join(parts)
+
+    all_lines = specialist_lines + general_lines
+    return cfg.resource_catalog_header + "\n".join(all_lines)
 
 
 def _needs_deferred_task_guidance(
@@ -970,7 +997,7 @@ class InProcessChildTaskRuntime:
                                 event="succeeded",
                                 payload=self._event_payload(
                                     resource_id=primary_resource_id,
-                                    message=f"task {task_id} succeeded",
+                                    message="子任务已完成",
                                     status=result.status,
                                     error=result.error,
                                 ),
@@ -1038,7 +1065,7 @@ class InProcessChildTaskRuntime:
                             event="dead_lettered",
                             payload=self._event_payload(
                                 resource_id=primary_resource_id,
-                                message=f"task {task_id} failed",
+                                message="子任务执行失败",
                                 status=final_result.status,
                                 error=final_result.error,
                                 attempts=final_result.attempts,
@@ -1500,6 +1527,15 @@ class DynamicOrchestrator:
             system_parts.insert(
                 1, self._config.deferred_task_guidance or _DEFERRED_TASK_GUIDANCE
             )
+        # Dynamic resource selection addendum — injected when the callable
+        # is configured and the current resource mix warrants guidance.
+        addendum_builder = getattr(
+            self._config, "build_resource_selection_addendum", None
+        )
+        if callable(addendum_builder):
+            addendum = addendum_builder(briefs)
+            if addendum:
+                system_parts.append(addendum)
         if history:
             system_parts.append(f"\n{history}")
         if deduped_policy_hints:
@@ -2226,9 +2262,10 @@ class DynamicOrchestrator:
         )
 
     # DAG task events that carry meaningful user-facing progress.
-    # queued/started are internal lifecycle noise; only terminal states matter.
+    # "started" is included so the progress card updates when a subtask
+    # begins executing, giving the user visible activity during long tasks.
     _FORWARD_EVENT_ALLOWLIST: frozenset[str] = frozenset(
-        {"succeeded", "failed", "dead_lettered", "stalled", "cancelled"}
+        {"started", "succeeded", "failed", "dead_lettered", "stalled", "cancelled"}
     )
 
     async def _forward_runtime_events(

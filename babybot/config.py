@@ -113,7 +113,7 @@ class FeishuConfig:
     reply_mode: Literal["chat", "p2p"] = "chat"
     react_emoji: str = "THUMBSUP"
     media_dir: str = ""
-    stream_reply: bool = False
+    streaming: bool = False
 
     def validate(self) -> None:
         """Validate Feishu configuration when enabled."""
@@ -126,6 +126,13 @@ class FeishuConfig:
             errors.append("app_secret is required when Feishu channel is enabled")
         if errors:
             raise ValueError("; ".join(errors))
+
+
+@dataclass
+class WebConfig:
+    """Web tools configuration."""
+
+    tavily_api_key: str = ""
 
 
 class Config:
@@ -241,6 +248,13 @@ class Config:
             self.raw_config.get("agent_skills") or _res.get("agent_skills") or {}
         )
 
+        # Web tools configuration
+        web_conf = self.raw_config.get("web", {})
+        self.web = WebConfig(
+            tavily_api_key=web_conf.get("tavily_api_key", "")
+            or os.getenv("TAVILY_API_KEY", ""),
+        )
+
         # Channel configuration
         channels_conf = self.raw_config.get("channels", {})
         feishu_conf = channels_conf.get("feishu", {})
@@ -254,7 +268,7 @@ class Config:
             reply_mode=feishu_conf.get("reply_mode", "chat"),
             react_emoji=feishu_conf.get("react_emoji", "THUMBSUP"),
             media_dir=feishu_conf.get("media_dir", ""),
-            stream_reply=feishu_conf.get("stream_reply", False),
+            streaming=feishu_conf.get("streaming", False),
         )
         weixin_conf = channels_conf.get("weixin", {})
         self.weixin = WeixinConfig(
@@ -398,7 +412,7 @@ class Config:
                     "reply_mode": "chat",
                     "react_emoji": "THUMBSUP",
                     "media_dir": "",
-                    "stream_reply": False,
+                    "streaming": False,
                 },
                 "weixin": {
                     "enabled": False,
@@ -410,6 +424,9 @@ class Config:
                     "poll_timeout": 35,
                     "allow_from": [],
                 },
+            },
+            "web": {
+                "tavily_api_key": "",
             },
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
@@ -511,7 +528,7 @@ class Config:
                     "reply_mode": self.feishu.reply_mode,
                     "react_emoji": self.feishu.react_emoji,
                     "media_dir": self.feishu.media_dir,
-                    "stream_reply": self.feishu.stream_reply,
+                    "streaming": self.feishu.streaming,
                 },
                 "weixin": {
                     "enabled": self.weixin.enabled,
@@ -525,6 +542,9 @@ class Config:
                 },
             },
             "scheduled_tasks_count": len(self.scheduled_tasks),
+            "web": {
+                "tavily_api_key": "***" if self.web.tavily_api_key else "",
+            },
         }
 
     def __repr__(self) -> str:

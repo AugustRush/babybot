@@ -92,7 +92,9 @@ class _DummyOwner:
     def _inspect_policy(self, chat_key: str = "", decision_kind: str = "") -> str:
         return decision_kind or chat_key or "policy"
 
-    def _inspect_tools(self, query: str = "", group: str = "", active_only: bool = False) -> str:
+    def _inspect_tools(
+        self, query: str = "", group: str = "", active_only: bool = False
+    ) -> str:
         return f"tools:{query}:{group}:{active_only}"
 
     def _inspect_skills(self, query: str = "", active_only: bool = False) -> str:
@@ -154,6 +156,8 @@ def test_iter_builtin_tool_registrations_exposes_expected_groups_and_names() -> 
         ("admin", "disable_skill"),
         ("admin", "delete_skill"),
         ("basic", "reload_skill"),
+        ("web", "web_fetch"),
+        ("web", "web_search"),
     ]
 
 
@@ -214,8 +218,12 @@ def test_worker_tool_is_blocked_when_policy_marks_worker_usage_high_risk() -> No
     class _Owner:
         def __init__(self) -> None:
             self.config = SimpleNamespace(system=SimpleNamespace(worker_max_depth=3))
-            self._lease_var = contextvars.ContextVar("lease_var_builtin_worker", default=None)
-            self._skill_ids_var = contextvars.ContextVar("skill_ids_var_builtin_worker", default=None)
+            self._lease_var = contextvars.ContextVar(
+                "lease_var_builtin_worker", default=None
+            )
+            self._skill_ids_var = contextvars.ContextVar(
+                "skill_ids_var_builtin_worker", default=None
+            )
             self._worker_depth_var = contextvars.ContextVar(
                 "worker_depth_var_builtin_worker", default=0
             )
@@ -244,7 +252,9 @@ def test_worker_tool_is_blocked_when_policy_marks_worker_usage_high_risk() -> No
     assert owner.called is False
 
 
-def test_dispatch_workers_tool_is_blocked_when_policy_marks_worker_usage_high_risk() -> None:
+def test_dispatch_workers_tool_is_blocked_when_policy_marks_worker_usage_high_risk() -> (
+    None
+):
     class _PolicyProvider:
         def choose_worker_policy(self, *, features):
             del features
@@ -252,9 +262,15 @@ def test_dispatch_workers_tool_is_blocked_when_policy_marks_worker_usage_high_ri
 
     class _Owner:
         def __init__(self) -> None:
-            self.config = SimpleNamespace(system=SimpleNamespace(worker_subtask_timeout=10))
-            self._lease_var = contextvars.ContextVar("lease_var_builtin_dispatch", default=None)
-            self._skill_ids_var = contextvars.ContextVar("skill_ids_var_builtin_dispatch", default=None)
+            self.config = SimpleNamespace(
+                system=SimpleNamespace(worker_subtask_timeout=10)
+            )
+            self._lease_var = contextvars.ContextVar(
+                "lease_var_builtin_dispatch", default=None
+            )
+            self._skill_ids_var = contextvars.ContextVar(
+                "skill_ids_var_builtin_dispatch", default=None
+            )
             self._observability_provider = _PolicyProvider()
             self.called = False
 

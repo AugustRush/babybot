@@ -57,6 +57,11 @@ class OrchestratorConfig:
     # Label prefix for the tools-preview part of a resource line.
     resource_catalog_preview_prefix: str = "; sample tools: "
 
+    # Section headers for tiered resource catalog display.
+    # When non-empty, the catalog groups resources by tier instead of flat list.
+    resource_catalog_specialist_header: str = ""
+    resource_catalog_general_header: str = ""
+
     # ── Policy hints section header ──────────────────────────────────────
     # Text prepended to the bullet list of policy hints in the system prompt.
     policy_hints_header: str = "\nPolicy hints:\n- "
@@ -139,3 +144,10 @@ class OrchestratorConfig:
     # Used only by the optional _provider_policy_hints path.
     multi_step_tokens: tuple[str, ...] = ()
     parallel_tokens: tuple[str, ...] = ()
+
+    # ── Dynamic resource selection addendum ──────────────────────────────
+    # Callable ``(briefs: list[dict[str, Any]]) -> str`` that builds a
+    # dynamic addendum for the system prompt based on the currently active
+    # resource composition.  Return ``""`` to skip.
+    # If ``None``, no addendum is generated.
+    build_resource_selection_addendum: Any = None  # Callable | None

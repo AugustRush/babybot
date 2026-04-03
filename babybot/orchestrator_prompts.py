@@ -26,6 +26,13 @@ _SYSTEM_PROMPT = (
     "6. 需要多Agent协作讨论、辩论、评审或头脑风暴时，使用 dispatch_team（debate模式）。\n"
     "7. 需要多Agent并行分工执行可拆分的复杂任务时，使用 dispatch_team（cooperative模式，需提供tasks列表）。\n"
     "8. 【发消息/通知用户/告知用户/发送报告】等动作无需子任务；reply_to_user 的内容即是发送给用户的消息，系统会自动投递到对应渠道。\n"
+    "\n\n收敛规则（极其重要）：\n"
+    "- 收到子任务结果后，先评估是否已充分回答用户问题。如果已充分，立即 reply_to_user，不要再 dispatch 新任务。\n"
+    "- 同一意图不要用不同资源重复执行。例如专业 Skill 已成功返回结果，不要再用通用搜索/网页工具重复验证或补充。\n"
+    "- 只有在结果明确不足、用户请求包含多个独立子目标、或当前结果无法满足用户需要时，才 dispatch 新任务。\n"
+    "\n\n资源选择优先级：\n"
+    "- 专业 Skill/MCP 优先于通用工具组。当资源列表中有与用户意图精确匹配的专业 Skill 或 MCP 时，优先使用；通用工具组（如 web、code）仅在无专业资源匹配时作为 fallback。\n"
+    "- 不要为同一个子目标同时 dispatch 专业资源和通用资源。\n"
     "\n\n执行阶段协议：\n"
     "按以下四阶段有序推进，不允许跨阶段跳跃或在错误阶段执行动作：\n"
     "  [Research]     — 信息收集：仅读取、搜索、获取外部数据，不做修改或写入。\n"
@@ -123,6 +130,8 @@ _RESOURCE_CATALOG_HEADER = "\n可用资源：\n"
 _RESOURCE_CATALOG_EMPTY = "\n可用资源：无"
 _RESOURCE_CATALOG_LINE = "- {rid}: {name} — {purpose} (工具数: {tc}{preview_text})"
 _RESOURCE_CATALOG_PREVIEW_PREFIX = "; 示例工具: "
+_RESOURCE_CATALOG_SPECIALIST_HEADER = "  [专业能力] 优先使用：\n"
+_RESOURCE_CATALOG_GENERAL_HEADER = "  [通用工具] 无专业资源匹配时使用：\n"
 
 # ── Policy hints header ───────────────────────────────────────────────────────
 
@@ -253,6 +262,52 @@ _MULTI_STEP_TOKENS: tuple[str, ...] = ("然后", "再", "并且", "同时", "先
 _PARALLEL_TOKENS: tuple[str, ...] = ("同时", "分别", "并行", "并且")
 
 
+# ── Dynamic resource selection addendum ──────────────────────────────────────
+
+
+def _build_resource_selection_addendum(briefs: list[dict[str, Any]]) -> str:
+    """Generate a context-aware resource selection hint.
+
+    Based on the mix of currently active specialist (skill/mcp) and general
+    (tool_group) resources, produce a short addendum that helps the
+    orchestrator make better dispatch decisions.
+
+    Returns an empty string when no special guidance is needed.
+    """
+    specialist_types = {"skill", "mcp"}
+    has_specialist = False
+    has_general = False
+    specialist_names: list[str] = []
+    general_names: list[str] = []
+
+    for b in briefs:
+        if not b.get("active"):
+            continue
+        rtype = b.get("type", "")
+        name = b.get("name", "?")
+        if rtype in specialist_types:
+            has_specialist = True
+            specialist_names.append(name)
+        else:
+            has_general = True
+            general_names.append(name)
+
+    if not has_specialist or not has_general:
+        # Only one tier present — no disambiguation needed.
+        return ""
+
+    parts = [
+        "\n资源选择提示：",
+        f"当前同时存在专业资源（{', '.join(specialist_names[:5])}）"
+        f"和通用工具组（{', '.join(general_names[:5])}）。",
+        "请严格遵守以下选择顺序：",
+        "1. 优先使用与用户意图匹配的专业 Skill 或 MCP 资源。",
+        "2. 仅当没有匹配的专业资源时，才使用通用工具组（web、code 等）。",
+        "3. 专业资源已成功返回结果后，禁止再用通用资源对同一子目标重复执行。",
+    ]
+    return "\n".join(parts)
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 
@@ -268,6 +323,8 @@ def build_orchestrator_config() -> OrchestratorConfig:
         resource_catalog_empty=_RESOURCE_CATALOG_EMPTY,
         resource_catalog_line=_RESOURCE_CATALOG_LINE,
         resource_catalog_preview_prefix=_RESOURCE_CATALOG_PREVIEW_PREFIX,
+        resource_catalog_specialist_header=_RESOURCE_CATALOG_SPECIALIST_HEADER,
+        resource_catalog_general_header=_RESOURCE_CATALOG_GENERAL_HEADER,
         policy_hints_header=_POLICY_HINTS_HEADER,
         execution_constraints_wrapper=_EXECUTION_CONSTRAINTS_WRAPPER,
         child_task_sentinel=_CHILD_TASK_SENTINEL,
@@ -286,4 +343,5 @@ def build_orchestrator_config() -> OrchestratorConfig:
         team_default_agent_system_prompt=_TEAM_DEFAULT_AGENT_SYSTEM_PROMPT,
         multi_step_tokens=_MULTI_STEP_TOKENS,
         parallel_tokens=_PARALLEL_TOKENS,
+        build_resource_selection_addendum=_build_resource_selection_addendum,
     )

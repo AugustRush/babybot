@@ -331,6 +331,13 @@ class FeishuChannel(BaseChannel):
                 / "feishu"
             )
 
+    # ── Streaming capability ──────────────────────────���──────────────
+
+    @property
+    def supports_streaming(self) -> bool:
+        """Return True when streaming replies are enabled in Feishu config."""
+        return bool(getattr(self.config, "streaming", False))
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -422,7 +429,9 @@ class FeishuChannel(BaseChannel):
                     if asyncio.iscoroutine(result):
                         await result
                 except Exception as exc:
-                    logger.warning("Error stopping Feishu resource %s: %s", method_name, exc)
+                    logger.warning(
+                        "Error stopping Feishu resource %s: %s", method_name, exc
+                    )
 
         self._client = None
 

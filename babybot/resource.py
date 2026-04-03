@@ -1121,6 +1121,12 @@ class ResourceManager:
             "search": ToolGroup("search", "Search tools", active=False),
             "analysis": ToolGroup("analysis", "Analysis tools", active=False),
             "browser": ToolGroup("browser", "Browser automation tools", active=False),
+            "web": ToolGroup(
+                "web",
+                "Web tools: fetch URLs and search the internet",
+                active=True,
+                notes="Requires tavily_api_key in config for web_search.",
+            ),
         }
         self.groups = defaults
         for name, conf in user_groups.items():
