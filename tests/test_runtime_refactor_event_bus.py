@@ -167,6 +167,71 @@ def test_dynamic_orchestrator_uses_in_memory_state_only_by_default() -> None:
     assert not hasattr(orchestrator, "_state_store")
 
 
+def test_resource_bridge_executor_preserves_failed_subagent_status() -> None:
+    class _DetailedRM(_DummyResourceManager):
+        async def run_subagent_task_result(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> TaskResult:
+            del (
+                task_description,
+                lease,
+                agent_name,
+                tape,
+                tape_store,
+                heartbeat,
+                media_paths,
+                skill_ids,
+            )
+            return TaskResult(
+                task_id="worker-1",
+                status="failed",
+                error="No progress after 3 consecutive tool-only turns.",
+                artifacts=("/tmp/demo.pdf",),
+            )
+
+    bridge = ResourceBridgeExecutor(
+        resource_manager=_DetailedRM(),  # type: ignore[arg-type]
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+    )
+
+    result = asyncio.run(
+        bridge.execute(
+            task=type(
+                "T",
+                (),
+                {
+                    "task_id": "task-1",
+                    "description": "generate a pdf",
+                    "lease": type(
+                        "L",
+                        (),
+                        {
+                            "include_groups": (),
+                            "include_tools": (),
+                            "exclude_tools": (),
+                        },
+                    )(),
+                    "metadata": {"resource_id": "skill.weather", "skill_ids": []},
+                    "deps": (),
+                },
+            )(),
+            context=ExecutionContext(session_id="flow-1", state={}),
+        )
+    )
+
+    assert result.status == "failed"
+    assert "No progress" in result.error
+    assert result.artifacts == ("/tmp/demo.pdf",)
+
+
 def test_runtime_retries_retryable_failures_before_succeeding() -> None:
     bus = InMemoryChildTaskBus()
     bridge = _ScriptedBridge([

@@ -5,7 +5,13 @@ import logging
 import time
 from typing import Any
 
-from .agent_kernel import ExecutionContext, SkillPack, TaskContract, ToolLease
+from .agent_kernel import (
+    ExecutionContext,
+    SkillPack,
+    TaskContract,
+    TaskResult,
+    ToolLease,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +133,35 @@ class ResourceSubagentRuntime:
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
     ) -> tuple[str, list[str]]:
+        result = await self.run_subagent_task_result(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+            tape=tape,
+            tape_store=tape_store,
+            memory_store=memory_store,
+            heartbeat=heartbeat,
+            media_paths=media_paths,
+            skill_ids=skill_ids,
+        )
+        text = result.output if result.status == "succeeded" else result.error
+        return (
+            text.strip() or "任务完成但没有文本输出。",
+            list(result.artifacts or ()),
+        )
+
+    async def run_subagent_task_result(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        tape: Any = None,
+        tape_store: Any = None,
+        memory_store: Any = None,
+        heartbeat: Any = None,
+        media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
+    ) -> TaskResult:
         from .channels.tools import ChannelToolContext
 
         channel_context = ChannelToolContext.get_current()
@@ -225,8 +260,20 @@ class ResourceSubagentRuntime:
                     exec_context.state.get("media_paths_collected", [])
                 )
                 fallback_media = self._owner._extract_media_from_text(text)
-                merged_media = list(dict.fromkeys(collected_media + fallback_media))
-                return text.strip() or "任务完成但没有文本输出。", merged_media
+                merged_media = tuple(
+                    dict.fromkeys(
+                        [*tuple(result.artifacts or ()), *collected_media, *fallback_media]
+                    )
+                )
+                return TaskResult(
+                    task_id=result.task_id,
+                    status=result.status,
+                    output=result.output,
+                    error=result.error,
+                    artifacts=merged_media,
+                    attempts=result.attempts,
+                    metadata=dict(result.metadata or {}),
+                )
             except Exception:
                 logger.exception("Run subagent crashed agent=%s", agent_name)
                 raise

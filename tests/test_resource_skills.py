@@ -2,6 +2,7 @@ import asyncio
 import ast
 import contextvars
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -1881,6 +1882,106 @@ def test_callable_tool_can_disable_implicit_artifact_collection(tmp_path: Path) 
     assert result.ok is True
     assert str(image_path) in result.content
     assert result.artifacts == []
+
+
+def test_register_builtin_tools_does_not_collect_workspace_text_mutation_outputs(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    workspace_dir = Path(tempfile.mkdtemp(prefix="babybot_artifacts_", dir="/tmp"))
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(workspace_dir=workspace_dir)
+    manager.registry = ToolRegistry()
+    manager.groups = {}
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_workspace_write_artifacts",
+        default=str(workspace_dir),
+    )
+    manager._setup_tool_groups({})
+    manager._register_builtin_tools()
+
+    tool = manager.registry.get("_workspace_write_text_file").tool
+
+    try:
+        result = asyncio.run(
+            tool.invoke(
+                {
+                    "file_path": "test_content.md",
+                    "content": "# PDF 测试内容\n\n用于生成最终 PDF。",
+                },
+                ToolContext(session_id="s1", state={}),
+            )
+        )
+
+        assert result.ok is True
+        assert result.artifacts == []
+        assert (workspace_dir / "test_content.md").read_text(
+            encoding="utf-8"
+        ).startswith("# PDF 测试内容")
+    finally:
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+
+
+def test_invoke_external_skill_function_preserves_stdout_when_result_is_empty(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "system": SimpleNamespace(
+                shell_command_timeout=300,
+                python_executable="",
+                python_fallback_executables=[],
+            ),
+            "workspace_dir": tmp_path,
+        },
+    )()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_external_skill_stdout",
+        default=str(tmp_path),
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "_get_python_candidates",
+        lambda skill_runtime=None: [
+            {"executable": "/primary/python", "required_modules": (), "source": "auto"},
+        ],
+    )
+    monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def communicate(self):
+            return (
+                b"Body PDF saved to /tmp/final.pdf\n"
+                b'__BABYBOT_RESULT__{"ok": true, "result": null}\n',
+                b"",
+            )
+
+        def kill(self) -> None:
+            return None
+
+    async def _fake_exec(program, *args, **kwargs):
+        del program, args, kwargs
+        return _Proc()
+
+    monkeypatch.setattr("babybot.resource.asyncio.create_subprocess_exec", _fake_exec)
+
+    result = asyncio.run(
+        manager._invoke_external_skill_function(
+            script_path=str(tmp_path / "tool.py"),
+            function_name="generate_body_pdf",
+            arguments={"input_file": "test_content.md", "output_file": "final.pdf"},
+        )
+    )
+
+    assert result == "Body PDF saved to /tmp/final.pdf"
 
 
 def test_callable_tool_relocates_external_artifact_into_workspace_output(

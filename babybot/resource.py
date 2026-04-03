@@ -21,6 +21,7 @@ from typing import (
 
 from .agent_kernel import (
     SkillPack,
+    TaskResult,
     register_mcp_tools,
     ToolLease,
     ToolRegistry,
@@ -390,6 +391,30 @@ class WorkerRuntime:
             skill_ids=skill_ids,
         )
 
+    async def run_subagent_task_result(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        tape: "Tape | None" = None,
+        tape_store: "TapeStore | None" = None,
+        memory_store: Any = None,
+        heartbeat: "Heartbeat | None" = None,
+        media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
+    ) -> TaskResult:
+        return await self._manager._run_subagent_task_result(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+            tape=tape,
+            tape_store=tape_store,
+            memory_store=memory_store,
+            heartbeat=heartbeat,
+            media_paths=media_paths,
+            skill_ids=skill_ids,
+        )
+
 
 class ResourceManager:
     """Centralized resource manager without external agent frameworks."""
@@ -463,10 +488,10 @@ class ResourceManager:
         return None
 
     def _catalog_view(self) -> ResourceCatalog:
-        return self.catalog
+        return self._lazy("catalog", lambda: ResourceCatalog(self))
 
     def _runtime_view(self) -> WorkerRuntime:
-        return self.runtime
+        return self._lazy("runtime", lambda: WorkerRuntime(self))
 
     def _lazy(self, attr: str, factory: Any) -> Any:
         """Return a lazily-initialised instance attribute, creating it on first access."""
@@ -1142,14 +1167,10 @@ class ResourceManager:
 
     def _register_builtin_tools(self) -> None:
         for func, group_name in iter_builtin_tool_registrations(self):
-            collect_artifacts = func.__name__ not in {
-                "_workspace_execute_python_code",
-                "_workspace_execute_shell_command",
-            }
             self.register_tool(
                 func,
                 group_name=group_name,
-                collect_artifacts=collect_artifacts,
+                collect_artifacts=not func.__name__.startswith("_workspace_"),
             )
 
     @staticmethod
@@ -1170,18 +1191,34 @@ class ResourceManager:
         return ResourceScopeHelper.lease_to_dict(lease)
 
     def _get_current_task_lease_var(self) -> contextvars.ContextVar[ToolLease | None]:
-        return self._current_task_lease
+        current = getattr(self, "_current_task_lease", None)
+        if current is None:
+            current = contextvars.ContextVar("current_task_lease", default=None)
+            self._current_task_lease = current
+        return current
 
     def _get_current_skill_ids_var(
         self,
     ) -> contextvars.ContextVar[tuple[str, ...] | None]:
-        return self._current_skill_ids
+        current = getattr(self, "_current_skill_ids", None)
+        if current is None:
+            current = contextvars.ContextVar("current_skill_ids", default=None)
+            self._current_skill_ids = current
+        return current
 
     def _get_current_worker_depth_var(self) -> contextvars.ContextVar[int]:
-        return self._current_worker_depth
+        current = getattr(self, "_current_worker_depth", None)
+        if current is None:
+            current = contextvars.ContextVar("current_worker_depth", default=0)
+            self._current_worker_depth = current
+        return current
 
     def _get_current_tool_context_var(self) -> contextvars.ContextVar[Any | None]:
-        return self._current_tool_context
+        current = getattr(self, "_current_tool_context", None)
+        if current is None:
+            current = contextvars.ContextVar("current_tool_context", default=None)
+            self._current_tool_context = current
+        return current
 
     def _get_current_task_heartbeat(self) -> Any:
         ctx = self._get_current_tool_context_var().get()
@@ -1584,6 +1621,30 @@ class ResourceManager:
             skill_ids=skill_ids,
         )
 
+    async def run_subagent_task_result(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        tape: "Tape | None" = None,
+        tape_store: "TapeStore | None" = None,
+        memory_store: Any = None,
+        heartbeat: "Heartbeat | None" = None,
+        media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
+    ) -> TaskResult:
+        return await self._runtime_view().run_subagent_task_result(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+            tape=tape,
+            tape_store=tape_store,
+            memory_store=memory_store,
+            heartbeat=heartbeat,
+            media_paths=media_paths,
+            skill_ids=skill_ids,
+        )
+
     async def _run_subagent_task(
         self,
         task_description: str,
@@ -1597,6 +1658,30 @@ class ResourceManager:
         skill_ids: list[str] | None = None,
     ) -> tuple[str, list[str]]:
         return await self._subagent_runtime_view().run_subagent_task(
+            task_description=task_description,
+            lease=lease,
+            agent_name=agent_name,
+            tape=tape,
+            tape_store=tape_store,
+            memory_store=memory_store,
+            heartbeat=heartbeat,
+            media_paths=media_paths,
+            skill_ids=skill_ids,
+        )
+
+    async def _run_subagent_task_result(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        tape: "Tape | None" = None,
+        tape_store: "TapeStore | None" = None,
+        memory_store: Any = None,
+        heartbeat: "Heartbeat | None" = None,
+        media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
+    ) -> TaskResult:
+        return await self._subagent_runtime_view().run_subagent_task_result(
             task_description=task_description,
             lease=lease,
             agent_name=agent_name,

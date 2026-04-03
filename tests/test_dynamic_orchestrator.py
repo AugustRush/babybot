@@ -210,9 +210,15 @@ def test_system_prompt_adds_multi_resource_guidance_for_skill_creation_with_url(
 
 
 def test_child_task_description_is_structured_for_execution_only() -> None:
+    from babybot.orchestrator_prompts import build_orchestrator_config
+
     gateway = DummyGateway([])
     rm = DummyResourceManager()
-    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    orch = DynamicOrchestrator(
+        resource_manager=rm,
+        gateway=gateway,
+        config=build_orchestrator_config(),
+    )
     context = ExecutionContext(
         state={
             "original_goal": "对比官方的skill文档进行查漏补缺 https://example.com/SKILL.md"
@@ -229,6 +235,8 @@ def test_child_task_description_is_structured_for_execution_only() -> None:
     assert "预期输出" in description
     assert "禁止事项" in description
     assert "不要直接向用户发送消息" in description
+    assert "绝对路径" in description
+    assert "无边界只读检查" in description
 
 
 def test_build_initial_messages_reuses_cached_resource_catalog() -> None:
@@ -1133,9 +1141,15 @@ def test_orchestrator_rejects_reply_tool_when_mixed_with_other_calls() -> None:
 
 
 def test_system_prompt_explains_reply_artifacts_are_auto_attached() -> None:
+    from babybot.orchestrator_prompts import build_orchestrator_config
+
     gateway = DummyGateway([])
     rm = DummyResourceManager()
-    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    orch = DynamicOrchestrator(
+        resource_manager=rm,
+        gateway=gateway,
+        config=build_orchestrator_config(),
+    )
 
     messages = orch._build_initial_messages(
         "写一首诗并生成语音发给我",
@@ -1146,6 +1160,50 @@ def test_system_prompt_explains_reply_artifacts_are_auto_attached() -> None:
     assert "reply_to_user" in system_prompt
     assert "自动附带" in system_prompt
     assert "不要再创建专门的发送子任务" in system_prompt
+
+
+def test_system_prompt_discourages_using_management_skills_as_execution_skills() -> None:
+    from babybot.orchestrator_prompts import build_orchestrator_config
+
+    class _RM(DummyResourceManager):
+        def get_resource_briefs(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "skill.skill-manager",
+                    "type": "skill",
+                    "name": "skill-manager",
+                    "purpose": "Use when creating, updating, installing, enabling, disabling, deleting, or reloading babybot skills.",
+                    "group": "skill_skill_manager",
+                    "tool_count": 2,
+                    "active": True,
+                },
+                {
+                    "id": "skill.minimax-pdf",
+                    "type": "skill",
+                    "name": "minimax-pdf",
+                    "purpose": "Generate PDF files from structured or markdown input.",
+                    "group": "skill_minimax_pdf",
+                    "tool_count": 4,
+                    "active": True,
+                },
+            ]
+
+    gateway = DummyGateway([])
+    orch = DynamicOrchestrator(
+        resource_manager=_RM(),
+        gateway=gateway,
+        config=build_orchestrator_config(),
+    )
+
+    messages = orch._build_initial_messages(
+        "使用这个技能生成一个pdf文件给我",
+        ExecutionContext(),
+    )
+
+    system_prompt = messages[0].content
+    assert "skill-manager" in system_prompt
+    assert "管理型技能" in system_prompt
+    assert "使用某个技能/能力完成任务" in system_prompt
 
 
 def test_system_prompt_includes_assistant_profile_markdown(tmp_path) -> None:

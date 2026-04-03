@@ -323,9 +323,19 @@ class SingleAgentExecutor:
                 tool_count=len(step_tools),
             )
             llm_start = time.perf_counter()
+            request_messages = tuple(messages)
+            if runtime_hint_messages:
+                if request_messages and request_messages[0].role == "system":
+                    request_messages = (
+                        request_messages[:1]
+                        + runtime_hint_messages
+                        + request_messages[1:]
+                    )
+                else:
+                    request_messages = runtime_hint_messages + request_messages
             response = await self.model.generate(
                 ModelRequest(
-                    messages=tuple([*messages, *runtime_hint_messages]),
+                    messages=request_messages,
                     tools=step_tools,
                     metadata={"task_id": task.task_id, "step": step},
                 ),
@@ -578,10 +588,19 @@ class SingleAgentExecutor:
                             return
                         bucket = context.state.setdefault("media_paths_collected", [])
                         existing = set(bucket)
+                        added: list[str] = []
                         for path in paths:
                             if path and path not in existing:
                                 bucket.append(path)
                                 existing.add(path)
+                                added.append(path)
+                        if added:
+                            context.state.setdefault("pending_runtime_hints", []).append(
+                                "Output artifacts detected:\n"
+                                + "\n".join(f"- {path}" for path in added)
+                                + "\nIf these satisfy the task, stop and return a concise final answer with the exact paths."
+                                " Do not spend more turns on read-only verification."
+                            )
 
                     async def _invoke_one(
                         tc: ModelToolCall,

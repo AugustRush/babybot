@@ -34,6 +34,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_orchestrator_config(
+    config: OrchestratorConfig | None,
+) -> OrchestratorConfig:
+    if config is not None:
+        return config
+    try:
+        from ..orchestrator_prompts import build_orchestrator_config
+
+        resolved = build_orchestrator_config()
+        if isinstance(resolved, OrchestratorConfig):
+            return resolved
+    except Exception:
+        logger.exception(
+            "Failed to load application orchestrator config; falling back to generic defaults"
+        )
+    return OrchestratorConfig()
+
+
 # ── Orchestration tool schemas (OpenAI function-calling format) ──────────
 
 _ORCHESTRATION_TOOLS: tuple[dict[str, Any], ...] = (
@@ -1307,7 +1325,7 @@ class DynamicOrchestrator:
         self._default_task_timeout_s = default_task_timeout_s
         self._resource_catalog_cache_key: tuple[str, ...] | None = None
         self._resource_catalog_cache_value = ""
-        self._config = config or OrchestratorConfig()
+        self._config = _resolve_orchestrator_config(config)
         self._orchestration_tools = self._build_orchestration_tools()
 
     @property
@@ -1354,6 +1372,14 @@ class DynamicOrchestrator:
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
+        context.state.setdefault(
+            "original_request_header",
+            self._config.original_request_header,
+        )
+        context.state.setdefault(
+            "upstream_results_header",
+            self._config.upstream_results_header,
+        )
         heartbeat = context.state.get("heartbeat")
         reply_text: str | None = None
         scheduler_handoff_created = False
@@ -1948,12 +1974,20 @@ class DynamicOrchestrator:
             progress: float | None = None,
             error: str = "",
         ) -> None:
+            text = str(message or "").strip()
+            if (
+                event_name == "progress"
+                and team_streaming
+                and send_intermediate is not None
+                and text
+            ):
+                await send_intermediate(text)
             if runtime_event_callback is None:
                 return
             payload: dict[str, Any] = {
                 "state": state,
                 "stage": "debate",
-                "message": message,
+                "message": text,
             }
             if plan_step_id:
                 payload["plan_step_id"] = plan_step_id
@@ -2270,7 +2304,15 @@ class DynamicOrchestrator:
     # "started" is included so the progress card updates when a subtask
     # begins executing, giving the user visible activity during long tasks.
     _FORWARD_EVENT_ALLOWLIST: frozenset[str] = frozenset(
-        {"started", "succeeded", "failed", "dead_lettered", "stalled", "cancelled"}
+        {
+            "queued",
+            "started",
+            "succeeded",
+            "failed",
+            "dead_lettered",
+            "stalled",
+            "cancelled",
+        }
     )
 
     async def _forward_runtime_events(

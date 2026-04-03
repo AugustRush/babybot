@@ -604,6 +604,75 @@ def test_single_agent_executor_injects_pending_runtime_hints_once() -> None:
     assert context.state.get("pending_runtime_hints") == []
 
 
+def test_single_agent_executor_injects_artifact_completion_hint() -> None:
+    image_path = Path("/tmp/generated-report.pdf")
+
+    class ArtifactTool(Tool):
+        @property
+        def name(self) -> str:
+            return "generate_report"
+
+        @property
+        def description(self) -> str:
+            return "Generate a report file."
+
+        @property
+        def schema(self) -> dict:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+            del args, context
+            return ToolResult(
+                ok=True,
+                content=f"done: {image_path}",
+                artifacts=[str(image_path)],
+            )
+
+    class ArtifactModel(ModelProvider):
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c1",
+                            name="generate_report",
+                            arguments={},
+                        ),
+                    )
+                )
+            return ModelResponse(text="done")
+
+    registry = ToolRegistry()
+    registry.register(ArtifactTool(), group="basic")
+    model = ArtifactModel()
+    executor = SingleAgentExecutor(model=model, tools=registry)
+    context = ExecutionContext(session_id="s1")
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="generate a pdf report"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    second_request = model.requests[1]
+    runtime_hints = [
+        msg.content
+        for msg in second_request.messages
+        if msg.role == "system" and str(image_path) in msg.content
+    ]
+    assert len(runtime_hints) == 1
+    assert "stop and return" in runtime_hints[0].lower()
+
+
 def test_single_agent_executor_batches_tape_store_writes_per_step() -> None:
     class RecordingTapeStore:
         def __init__(self) -> None:

@@ -510,10 +510,36 @@ class ExternalPythonRunner:
                     attempts.append(f"{candidate['executable']}: {detail}")
                     continue
                 return last_tool_error
-            return result_normalizer(payload.get("result"))
+            normalized_result = result_normalizer(payload.get("result"))
+            side_output = self._extract_side_output(out_text, err_text, marker=marker)
+            if self._should_prefer_side_output(normalized_result, side_output):
+                return side_output
+            return normalized_result
 
         if attempts:
             return "Tool error: no healthy Python runtime succeeded. " + " | ".join(
                 attempts[-3:]
             )
         return last_tool_error
+
+    @staticmethod
+    def _extract_side_output(
+        stdout_text: str,
+        stderr_text: str,
+        *,
+        marker: str,
+    ) -> str:
+        stdout_lines = [
+            line for line in stdout_text.splitlines() if not line.startswith(marker)
+        ]
+        parts = [
+            "\n".join(stdout_lines).strip(),
+            (stderr_text or "").strip(),
+        ]
+        return "\n".join(part for part in parts if part).strip()
+
+    @staticmethod
+    def _should_prefer_side_output(normalized_result: str, side_output: str) -> bool:
+        if not side_output:
+            return False
+        return normalized_result.strip().lower() in {"", "true", "false", "null"}

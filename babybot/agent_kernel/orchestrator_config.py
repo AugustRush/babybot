@@ -73,6 +73,12 @@ class OrchestratorConfig:
         "[Constraints]\n{constraints}\n\n[Request]\n{goal}"
     )
 
+    # ── Child-task enrichment section headers ───────────────────────────
+    # Used when downstream tasks inherit the original request or upstream
+    # task outputs outside the structured child-task prompt path.
+    original_request_header: str = "--- original_request ---"
+    upstream_results_header: str = "--- upstream_results ---"
+
     # ── Sub-task description template ────────────────────────────────────
     # Sentinel string: if already present in a child-task description the
     # normalisation step is skipped entirely.

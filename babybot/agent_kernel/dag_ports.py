@@ -247,6 +247,7 @@ class ResourceBridgeExecutor:
         media_paths = context.state.get("media_paths")
 
         run_subagent_task = self._rm.run_subagent_task
+        run_subagent_task_result = getattr(self._rm, "run_subagent_task_result", None)
         kwargs: dict[str, Any] = {
             "task_description": enriched,
             "lease": lease_dict,
@@ -261,6 +262,37 @@ class ResourceBridgeExecutor:
             run_subagent_task, "memory_store"
         ):
             kwargs["memory_store"] = memory_store
+
+        if callable(run_subagent_task_result):
+            detailed_kwargs = dict(kwargs)
+            if memory_store is not None and not _supports_kwarg(
+                run_subagent_task_result, "memory_store"
+            ):
+                detailed_kwargs.pop("memory_store", None)
+            try:
+                detailed_result = await run_subagent_task_result(**detailed_kwargs)
+            except Exception as exc:
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=str(exc),
+                )
+
+            artifacts = tuple(detailed_result.artifacts or ())
+            if detailed_result.status == "succeeded":
+                context.state.setdefault("upstream_results", {})[task.task_id] = (
+                    detailed_result.output
+                )
+            context.state.setdefault("media_paths_collected", []).extend(artifacts)
+            return TaskResult(
+                task_id=task.task_id,
+                status=detailed_result.status,
+                output=detailed_result.output,
+                error=detailed_result.error,
+                artifacts=artifacts,
+                attempts=detailed_result.attempts,
+                metadata=dict(detailed_result.metadata or {}),
+            )
 
         try:
             output, media = await run_subagent_task(**kwargs)
@@ -289,18 +321,26 @@ class ResourceBridgeExecutor:
             "upstream_results", {}
         )
         original_goal = str(context.state.get("original_goal", "") or "").strip()
+        original_request_header = str(
+            context.state.get("original_request_header", "--- original_request ---")
+            or "--- original_request ---"
+        ).strip()
+        upstream_results_header = str(
+            context.state.get("upstream_results_header", "--- upstream_results ---")
+            or "--- upstream_results ---"
+        ).strip()
         parts = [task.description]
         enriched = False
 
         if original_goal and original_goal != task.description.strip():
-            parts.append("\n\n--- original_request ---")
+            parts.append(f"\n\n{original_request_header}")
             parts.append(original_goal)
             enriched = True
 
         if not task.deps or not upstream:
             return "\n".join(parts) if enriched else task.description
 
-        parts.append("\n\n--- upstream_results ---")
+        parts.append(f"\n\n{upstream_results_header}")
         for dep_id in task.deps:
             result = upstream.get(dep_id)
             if result:

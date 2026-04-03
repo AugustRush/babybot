@@ -140,6 +140,8 @@ _POLICY_HINTS_HEADER = "\n策略建议：\n- "
 # ── Execution constraints wrapper ─────────────────────────────────────────────
 
 _EXECUTION_CONSTRAINTS_WRAPPER = "[执行约束]\n{constraints}\n\n[用户请求]\n{goal}"
+_ORIGINAL_REQUEST_HEADER = "--- 原始用户请求 ---"
+_UPSTREAM_RESULTS_HEADER = "--- 上游任务结果 ---"
 
 # ── Sub-task prompt ───────────────────────────────────────────────────────────
 
@@ -195,10 +197,12 @@ def _build_child_task_prompt(
 
     expected_output_lines = [
         "- 返回当前子任务的执行结果摘要。",
+        "- 若已生成文件/图片/音频/PDF 等产物，返回其绝对路径。",
         "- 如无法继续，明确说明缺少的输入、目标路径或阻塞原因。",
     ]
     done_when_lines = [
         "- 已完成当前子任务说明中的单一目标，或已明确指出无法继续的原因。",
+        "- 若产物已生成且路径明确，立即返回；不要继续做无边界只读检查。",
         "- 不再需要额外派生任务或向用户追问即可交回主 agent。",
     ]
     if maintenance_like:
@@ -291,20 +295,38 @@ def _build_resource_selection_addendum(briefs: list[dict[str, Any]]) -> str:
         else:
             has_general = True
             general_names.append(name)
+    management_skills = {
+        name
+        for name in specialist_names
+        if str(name).strip().lower() in {"skill-manager", "agent-admin"}
+    }
 
     if not has_specialist or not has_general:
         # Only one tier present — no disambiguation needed.
-        return ""
+        if not management_skills:
+            return ""
 
     parts = [
         "\n资源选择提示：",
-        f"当前同时存在专业资源（{', '.join(specialist_names[:5])}）"
-        f"和通用工具组（{', '.join(general_names[:5])}）。",
-        "请严格遵守以下选择顺序：",
-        "1. 优先使用与用户意图匹配的专业 Skill 或 MCP 资源。",
-        "2. 仅当没有匹配的专业资源时，才使用通用工具组（web、code 等）。",
-        "3. 专业资源已成功返回结果后，禁止再用通用资源对同一子目标重复执行。",
     ]
+    if has_specialist and has_general:
+        parts.extend(
+            [
+                f"当前同时存在专业资源（{', '.join(specialist_names[:5])}）"
+                f"和通用工具组（{', '.join(general_names[:5])}）。",
+                "请严格遵守以下选择顺序：",
+                "1. 优先使用与用户意图匹配的专业 Skill 或 MCP 资源。",
+                "2. 仅当没有匹配的专业资源时，才使用通用工具组（web、code 等）。",
+                "3. 专业资源已成功返回结果后，禁止再用通用资源对同一子目标重复执行。",
+            ]
+        )
+    if management_skills:
+        parts.extend(
+            [
+                "4. `skill-manager`、`agent-admin` 这类管理型技能，只用于创建/安装/更新/启用/禁用/删除/reload 技能或修改助手配置。",
+                "5. 用户说“使用某个技能/能力完成任务”时，是要调用目标领域能力，不是进入技能维护流程。",
+            ]
+        )
     return "\n".join(parts)
 
 
@@ -327,6 +349,8 @@ def build_orchestrator_config() -> OrchestratorConfig:
         resource_catalog_general_header=_RESOURCE_CATALOG_GENERAL_HEADER,
         policy_hints_header=_POLICY_HINTS_HEADER,
         execution_constraints_wrapper=_EXECUTION_CONSTRAINTS_WRAPPER,
+        original_request_header=_ORIGINAL_REQUEST_HEADER,
+        upstream_results_header=_UPSTREAM_RESULTS_HEADER,
         child_task_sentinel=_CHILD_TASK_SENTINEL,
         build_child_task_prompt=_build_child_task_prompt,
         is_maintenance_task=_is_maintenance_task,
