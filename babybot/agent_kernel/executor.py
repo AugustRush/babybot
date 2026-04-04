@@ -248,6 +248,7 @@ class SingleAgentExecutor:
         tool_failure_count = 0
         loop_guard_block_count = 0
         exploration_finish_required = False
+        exploration_grace_turn_used = False
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
@@ -383,9 +384,13 @@ class SingleAgentExecutor:
                     step,
                     [tc.name for tc in response.tool_calls],
                 )
-                if exploration_finish_required and all(
+                if (
+                    exploration_finish_required
+                    and exploration_grace_turn_used
+                    and all(
                     loop_guard.is_exploration_call(tc.name, tc.arguments)
                     for tc in response.tool_calls
+                    )
                 ):
                     error = (
                         f"No progress after {no_progress_turns} consecutive tool-only turns."
@@ -625,6 +630,7 @@ class SingleAgentExecutor:
                     else:
                         no_progress_turns = 0
                         exploration_finish_required = False
+                        exploration_grace_turn_used = False
 
                 # Phase 2: parallel execution of validated tool calls
                 if valid_calls:
@@ -798,9 +804,17 @@ class SingleAgentExecutor:
                 if no_progress_turns >= no_progress_limit:
                     if not exploration_finish_required:
                         exploration_finish_required = True
+                        exploration_grace_turn_used = False
                         context.state.setdefault("pending_runtime_hints", []).append(
                             "探索预算已耗尽。下一轮必须直接给出当前结论/缺口摘要，"
                             "或切换到编辑、写入、执行类工具。不要再调用读取、搜索、检查类工具。"
+                        )
+                    elif not exploration_grace_turn_used:
+                        exploration_grace_turn_used = True
+                        context.state.setdefault("pending_runtime_hints", []).append(
+                            "你已经在探索预算耗尽后继续探索了一轮。"
+                            "下一轮必须直接给出结论/缺口摘要，或改用编辑、写入、执行类工具；"
+                            "如果仍继续读取、搜索、检查，将直接失败。"
                         )
                     else:
                         error = (
@@ -893,6 +907,7 @@ class SingleAgentExecutor:
             text = text.strip()
             if text:
                 exploration_finish_required = False
+                exploration_grace_turn_used = False
                 logger.info(
                     "Executor final answer task=%s step=%d output_len=%d",
                     task.task_id,
