@@ -639,12 +639,12 @@ def test_follow_up_task_without_deps_receives_recent_success_output() -> None:
     assert "原始子任务：任务B" in rm.calls[1]["task_description"]
 
 
-def test_same_turn_overlapping_dispatches_must_be_merged_or_serialized() -> None:
+def test_maintenance_goal_coalesces_same_turn_dispatches_into_one_multi_resource_task() -> None:
     class SameTurnGateway(DummyGateway):
         def __init__(self) -> None:
             super().__init__([])
             self.first_task_id = ""
-            self.second_result = ""
+            self.task_result_ids: list[str] = []
 
         async def generate(
             self, request: ModelRequest, context: ExecutionContext
@@ -676,10 +676,10 @@ def test_same_turn_overlapping_dispatches_must_be_merged_or_serialized() -> None
                 )
             if self._call_idx == 1:
                 for msg in request.messages:
-                    if msg.role == "tool" and msg.tool_call_id == "c1":
-                        self.first_task_id = msg.content
-                    if msg.role == "tool" and msg.tool_call_id == "c2":
-                        self.second_result = msg.content
+                    if msg.role == "tool" and not msg.content.startswith("error:"):
+                        self.task_result_ids.append(msg.content)
+                assert len(self.task_result_ids) == 1
+                self.first_task_id = self.task_result_ids[0]
                 self._call_idx += 1
                 return ModelResponse(
                     text="",
@@ -702,9 +702,89 @@ def test_same_turn_overlapping_dispatches_must_be_merged_or_serialized() -> None
 
     assert result.conclusion == "收敛完成"
     assert len(rm.calls) == 1
-    assert "resource_ids" in gw.second_result
-    assert "deps" in gw.second_result
-    assert gw.second_result.startswith("error:")
+    assert "对照参考仓库和本地技能查漏补缺" in rm.calls[0]["task_description"]
+    assert "继续检查本地技能细节" in rm.calls[0]["task_description"]
+
+
+def test_maintenance_goal_serializes_follow_up_dispatch_onto_existing_live_task() -> None:
+    class RecordingResourceManager(DummyResourceManager):
+        async def run_subagent_task(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> tuple[str, list[str]]:
+            del lease, agent_name, tape, tape_store, heartbeat, media_paths, skill_ids
+            self.calls.append({"task_description": task_description})
+            if "原始子任务：任务A" in task_description:
+                await asyncio.sleep(0.05)
+                return "RESULT_A", []
+            return "RESULT_B", []
+
+    class SerialGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_a_id = ""
+            self._task_b_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务A", call_id="c1"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_a_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务B", call_id="c2"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 2:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c2":
+                        self._task_b_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_b_id], call_id="c3"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("串行维护完成", call_id="c4")
+
+    gw = SerialGateway()
+    rm = RecordingResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+
+    result = asyncio.run(
+        orch.run(
+            "参考仓库对本地 pdf 技能查漏补缺",
+            ExecutionContext(state={"original_goal": "参考仓库对本地 pdf 技能查漏补缺"}),
+        )
+    )
+
+    assert result.conclusion == "串行维护完成"
+    assert len(rm.calls) == 2
+    assert "原始子任务：任务B" in rm.calls[1]["task_description"]
+    assert "RESULT_A" in rm.calls[1]["task_description"]
 
 
 def test_max_steps_fallback() -> None:

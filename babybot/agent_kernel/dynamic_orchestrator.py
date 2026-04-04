@@ -419,6 +419,19 @@ def _goal_has_explicit_parallel_intent(
     return any(token in text for token in tokens)
 
 
+def _is_maintenance_goal(goal: str, config: OrchestratorConfig | None = None) -> bool:
+    text = str(goal or "").strip()
+    if not text:
+        return False
+    detector = config.is_maintenance_task if config else None
+    if callable(detector):
+        try:
+            return bool(detector(text))
+        except Exception:
+            logger.exception("maintenance task detector raised; falling back to False")
+    return False
+
+
 def _emit_policy_decision(
     context: ExecutionContext,
     *,
@@ -1432,6 +1445,15 @@ class DynamicOrchestrator:
                 messages = self._prune_messages_by_count(messages)
                 logger.debug("DynamicOrchestrator: step=%d calling model", step)
                 response = await self._call_model(messages, context, step=step)
+                response = ModelResponse(
+                    text=response.text,
+                    tool_calls=self._merge_dispatch_calls_for_maintenance(
+                        response.tool_calls,
+                        goal=str(context.state.get("original_goal", goal) or goal),
+                    ),
+                    finish_reason=response.finish_reason,
+                    metadata=dict(response.metadata),
+                )
 
                 # Model responded with plain text (no tool calls)
                 if not response.tool_calls:
@@ -1623,6 +1645,133 @@ class DynamicOrchestrator:
                 briefs, self._config
             )
         return self._resource_catalog_cache_value
+
+    def _merge_dispatch_calls_for_maintenance(
+        self,
+        tool_calls: tuple[ModelToolCall, ...],
+        *,
+        goal: str,
+    ) -> tuple[ModelToolCall, ...]:
+        if (
+            len(tool_calls) < 2
+            or not _is_maintenance_goal(goal, self._config)
+            or _goal_has_explicit_parallel_intent(goal, self._config)
+        ):
+            return tool_calls
+
+        mergeable_ids: list[str] = []
+        merged_resource_ids: list[str] = []
+        merged_descriptions: list[str] = []
+        timeout_candidates: list[float] = []
+
+        for tool_call in tool_calls:
+            if tool_call.name != "dispatch_task":
+                continue
+            resource_ids = _dispatch_resource_ids(tool_call.arguments)
+            if not resource_ids or "group.scheduler" in resource_ids:
+                continue
+            if tool_call.arguments.get("deps"):
+                continue
+            mergeable_ids.append(tool_call.call_id)
+            merged_resource_ids.extend(resource_ids)
+            description = str(tool_call.arguments.get("description", "") or "").strip()
+            if description and description not in merged_descriptions:
+                merged_descriptions.append(description)
+            raw_timeout = tool_call.arguments.get("timeout_s")
+            try:
+                if raw_timeout is not None:
+                    timeout_candidates.append(float(raw_timeout))
+            except (TypeError, ValueError):
+                pass
+
+        if len(mergeable_ids) < 2:
+            return tool_calls
+
+        merged_description = (
+            "\n".join(
+                [
+                    "同一维护目标的合并子任务：",
+                    *[f"- {item}" for item in merged_descriptions],
+                ]
+            )
+            if len(merged_descriptions) > 1
+            else (
+                merged_descriptions[0]
+                if merged_descriptions
+                else str(goal or "").strip()
+            )
+        )
+        merged_resources = list(dict.fromkeys(rid for rid in merged_resource_ids if rid))
+        first_call_id = mergeable_ids[0]
+        normalized_calls: list[ModelToolCall] = []
+        merged_inserted = False
+
+        for tool_call in tool_calls:
+            if tool_call.call_id not in mergeable_ids:
+                normalized_calls.append(tool_call)
+                continue
+            if merged_inserted:
+                continue
+            merged_args = dict(tool_call.arguments)
+            merged_args.pop("resource_id", None)
+            merged_args["resource_ids"] = merged_resources
+            merged_args["description"] = merged_description
+            merged_args.pop("deps", None)
+            if timeout_candidates:
+                merged_args["timeout_s"] = max(timeout_candidates)
+            normalized_calls.append(
+                ModelToolCall(
+                    call_id=first_call_id,
+                    name="dispatch_task",
+                    arguments=merged_args,
+                )
+            )
+            merged_inserted = True
+
+        logger.info(
+            "DynamicOrchestrator: coalesced %d maintenance dispatches into one task resources=%s",
+            len(mergeable_ids),
+            merged_resources,
+        )
+        return tuple(normalized_calls)
+
+    def _maintenance_serial_dependency_ids(
+        self,
+        runtime: InProcessChildTaskRuntime,
+        *,
+        prior_live_task_ids_this_turn: tuple[str, ...],
+    ) -> list[str]:
+        dependency_ids: list[str] = []
+
+        for task_id in prior_live_task_ids_this_turn:
+            normalized = str(task_id or "").strip()
+            if normalized and normalized not in dependency_ids:
+                dependency_ids.append(normalized)
+        if dependency_ids:
+            return dependency_ids
+
+        for task_id in runtime.pending_reply_blocking_task_ids():
+            normalized = str(task_id or "").strip()
+            if normalized and normalized not in dependency_ids:
+                dependency_ids.append(normalized)
+        if dependency_ids:
+            return dependency_ids
+
+        recent_success = self._recent_successful_upstream_results(
+            runtime.results,
+            limit=1,
+        )
+        if recent_success:
+            return list(recent_success.keys())
+
+        for task_id, result in reversed(list(runtime.results.items())):
+            resource_id = str(result.metadata.get("resource_id", "") or "").strip()
+            if resource_id == "group.scheduler":
+                continue
+            normalized = str(task_id or "").strip()
+            if normalized:
+                return [normalized]
+        return []
 
     def _normalize_child_task_description(
         self,
@@ -1855,6 +2004,25 @@ class DynamicOrchestrator:
             deps = list(dispatch_args.get("deps", []) or [])
             active_in_flight = len(runtime.in_flight)
             scheduler_dispatch = "group.scheduler" in resource_ids
+            maintenance_single_owner = (
+                not scheduler_dispatch
+                and _is_maintenance_goal(
+                    str(context.state.get("original_goal", "") or ""),
+                    self._config,
+                )
+                and not _goal_has_explicit_parallel_intent(
+                    str(context.state.get("original_goal", "") or ""),
+                    self._config,
+                )
+            )
+            if maintenance_single_owner and not deps:
+                serialized_deps = self._maintenance_serial_dependency_ids(
+                    runtime,
+                    prior_live_task_ids_this_turn=prior_live_task_ids_this_turn,
+                )
+                if serialized_deps:
+                    dispatch_args["deps"] = serialized_deps
+                    deps = list(serialized_deps)
             if (
                 not deps
                 and not scheduler_dispatch
