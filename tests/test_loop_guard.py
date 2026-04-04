@@ -170,6 +170,37 @@ def test_exploration_streak_counts_read_only_shell_commands() -> None:
     assert "exploration" in verdict.reason.lower()
 
 
+def test_exploration_streak_counts_web_fetch_and_search() -> None:
+    guard = LoopGuard(
+        LoopGuardConfig(
+            max_identical_calls=20,
+            per_tool_call_budget=20,
+            ping_pong_window=20,
+            max_exploration_streak=3,
+        )
+    )
+
+    verdict = guard.check_call(
+        "web_fetch",
+        {"url": "https://example.com/repo"},
+    )
+    assert not verdict.blocked
+
+    verdict = guard.check_call(
+        "web_search",
+        {"query": "MiniMax minimax-pdf"},
+    )
+    assert not verdict.blocked
+
+    verdict = guard.check_call(
+        "_workspace_view_text_file",
+        {"file_path": "skills/minimax-pdf/SKILL.md"},
+    )
+
+    assert verdict.blocked
+    assert "exploration" in verdict.reason.lower()
+
+
 def test_exploration_streak_does_not_block_shell_write_commands() -> None:
     guard = LoopGuard(
         LoopGuardConfig(

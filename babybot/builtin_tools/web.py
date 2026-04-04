@@ -127,7 +127,7 @@ def build_web_fetch_tool(owner: Any) -> Any:
             response = await client.get(url)
             response.raise_for_status()
         except Exception as exc:
-            return f"Failed to fetch {url}: {exc}"
+            raise RuntimeError(f"Failed to fetch {url}: {exc}") from exc
         finally:
             await client.aclose()
 
@@ -219,14 +219,14 @@ def build_web_search_tool(owner: Any) -> Any:
             )
             response.raise_for_status()
         except Exception as exc:
-            return f"Search request failed: {exc}"
+            raise RuntimeError(f"Search request failed: {exc}") from exc
         finally:
             await client.aclose()
 
         try:
             data = response.json()
-        except Exception:
-            return "Failed to parse search response."
+        except Exception as exc:
+            raise RuntimeError("Failed to parse search response.") from exc
 
         return _format_search_results(data, include_answer)
 

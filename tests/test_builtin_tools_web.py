@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
+import pytest
 
 from babybot.builtin_tools.web import (
     _extract_main_content,
@@ -223,8 +224,8 @@ class TestWebFetch:
             "babybot.builtin_tools.web._get_http_client",
             return_value=fake_client,
         ):
-            result = asyncio.run(tool(url="https://example.com/missing"))
-        assert "Failed to fetch" in result
+            with pytest.raises(RuntimeError, match="Failed to fetch"):
+                asyncio.run(tool(url="https://example.com/missing"))
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +281,8 @@ class TestWebSearch:
             "babybot.builtin_tools.web._get_http_client",
             return_value=fake_client,
         ):
-            result = asyncio.run(tool(query="test query"))
-        assert "failed" in result.lower()
+            with pytest.raises(RuntimeError, match="Search request failed"):
+                asyncio.run(tool(query="test query"))
 
     def test_clamps_max_results(self) -> None:
         response_data = {"results": []}

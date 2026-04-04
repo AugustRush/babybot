@@ -193,6 +193,8 @@ class LoopGuard:
         if normalized.endswith("execute_shell_command"):
             return True
         leaf = normalized.split("__")[-1]
+        if leaf in {"web_fetch", "web_search"}:
+            return True
         markers = (
             "view_",
             "read_",

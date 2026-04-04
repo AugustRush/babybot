@@ -557,6 +557,88 @@ def test_dependent_task_receives_upstream_output() -> None:
     assert "原始子任务：任务B" in rm.calls[1]["task_description"]
 
 
+def test_follow_up_task_without_deps_receives_recent_success_output() -> None:
+    class RecordingResourceManager(DummyResourceManager):
+        async def run_subagent_task(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> tuple[str, list[str]]:
+            del lease, agent_name, tape, tape_store, heartbeat, media_paths, skill_ids
+            self.calls.append({"task_description": task_description})
+            if "原始子任务：任务A" in task_description:
+                return "RESULT_A", []
+            return "RESULT_B", []
+
+    class FollowUpGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_a_id = ""
+            self._task_b_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务A", call_id="c1"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_a_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_a_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 2:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "任务B", call_id="c3"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 3:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c3":
+                        self._task_b_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_b_id], call_id="c4"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("顺序跟进完成", call_id="c5")
+
+    gw = FollowUpGateway()
+    rm = RecordingResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+
+    result = asyncio.run(orch.run("先做任务A，再继续任务B", ExecutionContext()))
+
+    assert result.conclusion == "顺序跟进完成"
+    assert len(rm.calls) == 2
+    assert "RESULT_A" in rm.calls[1]["task_description"]
+    assert "原始子任务：任务B" in rm.calls[1]["task_description"]
+
+
 def test_max_steps_fallback() -> None:
     """Model never calls reply_to_user; verify fallback after MAX_STEPS."""
     # Return a no-op tool call every step to exhaust MAX_STEPS

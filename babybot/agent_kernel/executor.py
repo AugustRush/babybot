@@ -243,9 +243,11 @@ class SingleAgentExecutor:
         loop_guard = LoopGuard(self.policy.loop_guard)
         blocked_tool_names: set[str] = set()
         no_progress_turns = 0
+        no_progress_limit = max(1, int(self.policy.max_no_progress_turns))
         tool_call_count = 0
         tool_failure_count = 0
         loop_guard_block_count = 0
+        exploration_finish_required = False
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
@@ -381,6 +383,44 @@ class SingleAgentExecutor:
                     step,
                     [tc.name for tc in response.tool_calls],
                 )
+                if exploration_finish_required and all(
+                    loop_guard.is_exploration_call(tc.name, tc.arguments)
+                    for tc in response.tool_calls
+                ):
+                    error = (
+                        f"No progress after {no_progress_turns} consecutive tool-only turns."
+                        " Exploration budget was exhausted and the model still chose "
+                        "read/search/check tools instead of finishing or taking action."
+                    )
+                    logger.warning(
+                        "Executor no-progress fail task=%s turns=%d mode=forced_finalize_ignored",
+                        task.task_id,
+                        no_progress_turns,
+                    )
+                    result = TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                        metadata=self._build_usage_metadata(
+                            usage_totals,
+                            extra={
+                                "no_progress_turns": no_progress_turns,
+                                "blocked_tools": sorted(blocked_tool_names),
+                                "tool_call_count": tool_call_count,
+                                "tool_failure_count": tool_failure_count,
+                                "loop_guard_block_count": loop_guard_block_count,
+                                "max_step_exhausted_count": 0,
+                            },
+                        ),
+                    )
+                    self._emit(
+                        context,
+                        "agent_end",
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                    )
+                    return result
                 if tape is not None:
                     tape_entries: list[Entry] = []
                     for tool_call in response.tool_calls:
@@ -527,9 +567,7 @@ class SingleAgentExecutor:
 
                 if not valid_calls:
                     no_progress_turns += 1
-                    if no_progress_turns >= max(
-                        1, int(self.policy.max_no_progress_turns)
-                    ):
+                    if no_progress_turns >= no_progress_limit:
                         last_issues = " | ".join(
                             err_output.splitlines()[0][:200]
                             for _, err_output in error_results[:3]
@@ -576,8 +614,17 @@ class SingleAgentExecutor:
                         for tc, _ in valid_calls
                     ):
                         no_progress_turns += 1
+                        warning_turn = max(1, no_progress_limit - 1)
+                        if no_progress_limit > 1 and no_progress_turns == warning_turn:
+                            context.state.setdefault("pending_runtime_hints", []).append(
+                                "你已经连续 "
+                                f"{no_progress_turns} 轮只使用读取/搜索/检查类工具。"
+                                " 下一轮必须收敛：要么直接给出当前结论/缺口摘要，"
+                                "要么切换到编辑、写入或执行类工具，不要继续无边界探索。"
+                            )
                     else:
                         no_progress_turns = 0
+                        exploration_finish_required = False
 
                 # Phase 2: parallel execution of validated tool calls
                 if valid_calls:
@@ -745,41 +792,50 @@ class SingleAgentExecutor:
                     if tool_call.call_id in tool_result_map:
                         messages.append(tool_result_map[tool_call.call_id])
 
-                # Fail fast when the agent is stuck in exploration-only loops
-                if no_progress_turns >= max(1, int(self.policy.max_no_progress_turns)):
-                    error = (
-                        f"No progress after {no_progress_turns} consecutive tool-only turns."
-                        " Only exploratory tools were used; switch to edit/write/action tools or finish."
-                    )
-                    logger.warning(
-                        "Executor no-progress fail task=%s turns=%d mode=exploration_only",
-                        task.task_id,
-                        no_progress_turns,
-                    )
-                    result = TaskResult(
-                        task_id=task.task_id,
-                        status="failed",
-                        error=error,
-                        metadata=self._build_usage_metadata(
-                            usage_totals,
-                            extra={
-                                "no_progress_turns": no_progress_turns,
-                                "blocked_tools": sorted(blocked_tool_names),
-                                "tool_call_count": tool_call_count,
-                                "tool_failure_count": tool_failure_count,
-                                "loop_guard_block_count": loop_guard_block_count,
-                                "max_step_exhausted_count": 0,
-                            },
-                        ),
-                    )
-                    self._emit(
-                        context,
-                        "agent_end",
-                        task_id=task.task_id,
-                        status="failed",
-                        error=error,
-                    )
-                    return result
+                # Allow one last convergence turn after the exploration budget
+                # is exhausted. If the next model response still only explores,
+                # the executor fails before running those tools.
+                if no_progress_turns >= no_progress_limit:
+                    if not exploration_finish_required:
+                        exploration_finish_required = True
+                        context.state.setdefault("pending_runtime_hints", []).append(
+                            "探索预算已耗尽。下一轮必须直接给出当前结论/缺口摘要，"
+                            "或切换到编辑、写入、执行类工具。不要再调用读取、搜索、检查类工具。"
+                        )
+                    else:
+                        error = (
+                            f"No progress after {no_progress_turns} consecutive tool-only turns."
+                            " Only exploratory tools were used; switch to edit/write/action tools or finish."
+                        )
+                        logger.warning(
+                            "Executor no-progress fail task=%s turns=%d mode=exploration_only",
+                            task.task_id,
+                            no_progress_turns,
+                        )
+                        result = TaskResult(
+                            task_id=task.task_id,
+                            status="failed",
+                            error=error,
+                            metadata=self._build_usage_metadata(
+                                usage_totals,
+                                extra={
+                                    "no_progress_turns": no_progress_turns,
+                                    "blocked_tools": sorted(blocked_tool_names),
+                                    "tool_call_count": tool_call_count,
+                                    "tool_failure_count": tool_failure_count,
+                                    "loop_guard_block_count": loop_guard_block_count,
+                                    "max_step_exhausted_count": 0,
+                                },
+                            ),
+                        )
+                        self._emit(
+                            context,
+                            "agent_end",
+                            task_id=task.task_id,
+                            status="failed",
+                            error=error,
+                        )
+                        return result
 
                 # ── Turn end event ───────────────────────────────
                 self._emit(
@@ -836,6 +892,7 @@ class SingleAgentExecutor:
 
             text = text.strip()
             if text:
+                exploration_finish_required = False
                 logger.info(
                     "Executor final answer task=%s step=%d output_len=%d",
                     task.task_id,

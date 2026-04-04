@@ -1655,6 +1655,31 @@ class DynamicOrchestrator:
         return built if built else raw_description
 
     @staticmethod
+    def _recent_successful_upstream_results(
+        results: dict[str, "TaskResult"],
+        *,
+        limit: int = 1,
+    ) -> dict[str, "TaskResult"] | None:
+        if not results or limit <= 0:
+            return None
+        selected: list[tuple[str, "TaskResult"]] = []
+        for task_id, result in reversed(list(results.items())):
+            if result.status != "succeeded":
+                continue
+            if str(result.output or "").strip() == "":
+                continue
+            resource_id = str(result.metadata.get("resource_id", "") or "").strip()
+            if resource_id == "group.scheduler":
+                continue
+            selected.append((task_id, result))
+            if len(selected) >= limit:
+                break
+        if not selected:
+            return None
+        selected.reverse()
+        return dict(selected)
+
+    @staticmethod
     def _prune_stale_wait_history(messages: list[ModelMessage]) -> list[ModelMessage]:
         wait_call_ids: list[str] = []
         for message in messages:
@@ -1814,19 +1839,28 @@ class DynamicOrchestrator:
             dispatch_args = dict(args)
             resource_ids = _dispatch_resource_ids(dispatch_args)
             deps = list(dispatch_args.get("deps", []) or [])
+            active_in_flight = len(runtime.in_flight)
             if "group.scheduler" not in resource_ids:
                 # Collect completed upstream results for dep tasks so the child task
                 # knows what its dependencies produced (break the black-box problem).
                 upstream_results = {
                     tid: runtime.results[tid] for tid in deps if tid in runtime.results
                 } or None
+                if (
+                    upstream_results is None
+                    and not deps
+                    and not prior_live_task_ids_this_turn
+                    and active_in_flight == 0
+                ):
+                    upstream_results = self._recent_successful_upstream_results(
+                        runtime.results
+                    )
                 dispatch_args["description"] = self._normalize_child_task_description(
                     description=str(dispatch_args.get("description", "") or ""),
                     resource_ids=resource_ids,
                     context=context,
                     upstream_results=upstream_results,
                 )
-            active_in_flight = len(runtime.in_flight)
             scheduling_action = (
                 "parallel_dispatch"
                 if not deps and (prior_live_task_ids_this_turn or active_in_flight > 0)

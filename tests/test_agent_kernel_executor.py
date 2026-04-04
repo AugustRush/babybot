@@ -282,8 +282,22 @@ def test_single_agent_executor_fails_fast_on_exploration_only_turns() -> None:
         async def generate(
             self, request: ModelRequest, context: ExecutionContext
         ) -> ModelResponse:
-            del request, context
             self.calls += 1
+            del context
+            if any(
+                msg.role == "system" and "探索预算已耗尽" in msg.content
+                for msg in request.messages
+            ):
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id=f"call-{self.calls}",
+                            name="_workspace_view_text_file",
+                            arguments={"file_path": "skills/still_ignoring_hint.md"},
+                        ),
+                    ),
+                )
             return ModelResponse(
                 text="",
                 tool_calls=(
@@ -314,10 +328,11 @@ def test_single_agent_executor_fails_fast_on_exploration_only_turns() -> None:
 
     assert result.status == "failed"
     assert "No progress" in result.error
-    # With exploration-only no-progress detection restored, the executor
-    # fails after max_no_progress_turns (3) consecutive exploration-only rounds.
+    # The executor allows one forced finalize turn after the exploration
+    # budget is exhausted, then fails before executing any further tools
+    # if the model keeps exploring instead of finishing.
     assert tool.calls == 3
-    assert model.calls == 3
+    assert model.calls == 4
 
 
 def test_single_agent_executor_allows_short_exploration_burst_before_finishing() -> (
@@ -366,6 +381,120 @@ def test_single_agent_executor_allows_short_exploration_burst_before_finishing()
     assert result.status == "succeeded"
     assert result.output == "done"
     assert tool.calls == 2
+
+
+def test_single_agent_executor_warns_before_exploration_budget_is_exhausted() -> None:
+    class ExploringWithHintAwareModel(ModelProvider):
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.requests.append(request)
+            if any(
+                msg.role == "system"
+                and "连续 2 轮只使用读取/搜索/检查类工具" in msg.content
+                for msg in request.messages
+            ):
+                return ModelResponse(text="已确认当前差异，停止继续探索并返回缺口摘要。")
+            call_id = f"call-{len(self.requests)}"
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=call_id,
+                        name="_workspace_view_text_file",
+                        arguments={"file_path": f"skills/demo_{call_id}.md"},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    tool = CountingViewTool()
+    registry.register(tool, group="code")
+    model = ExploringWithHintAwareModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="对照参考仓库查漏补缺"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert "缺口摘要" in result.output
+    assert tool.calls == 2
+    warning_messages = [
+        msg.content
+        for msg in model.requests[-1].messages
+        if msg.role == "system"
+        and "连续 2 轮只使用读取/搜索/检查类工具" in msg.content
+    ]
+    assert len(warning_messages) == 1
+
+
+def test_single_agent_executor_grants_one_finalize_turn_after_exploration_budget() -> (
+    None
+):
+    class ExploringUntilForcedToFinishModel(ModelProvider):
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.requests.append(request)
+            if any(
+                msg.role == "system" and "探索预算已耗尽" in msg.content
+                for msg in request.messages
+            ):
+                return ModelResponse(text="基于现有证据给出最终差异摘要。")
+            call_id = f"call-{len(self.requests)}"
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=call_id,
+                        name="_workspace_view_text_file",
+                        arguments={"file_path": f"skills/demo_{call_id}.md"},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    tool = CountingViewTool()
+    registry.register(tool, group="code")
+    model = ExploringUntilForcedToFinishModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="继续对照参考仓库查漏补缺"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert "最终差异摘要" in result.output
+    assert tool.calls == 3
+    hard_stop_messages = [
+        msg.content
+        for msg in model.requests[-1].messages
+        if msg.role == "system" and "探索预算已耗尽" in msg.content
+    ]
+    assert len(hard_stop_messages) == 1
 
 
 def test_single_agent_executor_collects_usage_metadata() -> None:
