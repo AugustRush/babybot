@@ -323,8 +323,8 @@ def test_answer_with_dag_passes_stream_callback_into_context() -> None:
     seen: dict[str, Any] = {}
 
     class _FakeDynamicOrchestrator:
-        def __init__(self, resource_manager: Any, gateway: Any) -> None:
-            del resource_manager, gateway
+        def __init__(self, resource_manager: Any, gateway: Any, **kwargs: Any) -> None:
+            del resource_manager, gateway, kwargs
 
         async def run(self, goal: str, context: ExecutionContext):
             del goal
@@ -418,8 +418,8 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
     seen: dict[str, Any] = {}
 
     class _FakeDynamicOrchestrator:
-        def __init__(self, resource_manager: Any, gateway: Any) -> None:
-            del resource_manager, gateway
+        def __init__(self, resource_manager: Any, gateway: Any, **kwargs: Any) -> None:
+            del resource_manager, gateway, kwargs
 
         async def run(self, goal: str, context: ExecutionContext):
             del goal
@@ -438,6 +438,10 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
     assert constraints["hard_limits"]["max_total_seconds"] == 600.0
     assert isinstance(seen["execution_plan"], ExecutionPlan)
     assert seen["execution_plan"].round_budget == 1
+    notebook = seen["plan_notebook"]
+    assert notebook.goal == "两个专家讨论，一轮定胜负，总时长不超过10分钟。"
+    assert seen["plan_notebook_id"] == notebook.notebook_id
+    assert seen["current_notebook_node_id"] == notebook.root_node_id
     contract = seen["task_contract"]
     assert contract == TaskContract(
         chat_key="",
@@ -453,6 +457,63 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
     )
     assert contract.metadata["execution_constraints"] == constraints
     assert contract.metadata["routing_decision"]["route_mode"] == "debate"
+
+
+def test_answer_with_dag_persists_notebook_completion_for_future_context(tmp_path: Path) -> None:
+    from babybot.agent_kernel.plan_notebook_store import PlanNotebookStore
+    from babybot.runtime_job_store import RuntimeJobStore
+
+    rm = _FakeResourceManager()
+    agent = _make_agent(_FakeGateway([]), rm)
+    agent.memory_store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    agent.memory_store.ensure_bootstrap()
+    agent.config.model = type("M", (), {"model_name": ""})()
+    agent._policy_store = OrchestrationPolicyStore(tmp_path / "policy.db")
+    agent._runtime_job_store = RuntimeJobStore(tmp_path / "jobs.db")
+    agent._plan_notebook_store = PlanNotebookStore(tmp_path / "notebooks.db")
+    agent._recent_policy_decisions_by_flow = {}
+    seen: dict[str, Any] = {}
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, resource_manager: Any, gateway: Any, **kwargs: Any) -> None:
+            del resource_manager, gateway, kwargs
+
+        async def run(self, goal: str, context: ExecutionContext):
+            del goal
+            notebook = context.state["plan_notebook"]
+            child = notebook.add_child_node(
+                parent_id=notebook.root_node_id,
+                kind="child_task",
+                title="Inspect reference",
+                objective="检查参考仓库",
+                owner="worker",
+            )
+            notebook.transition_node(
+                child.node_id,
+                "completed",
+                summary="已检查参考仓库",
+                detail="远端存在 design/design.md，本地缺失。",
+            )
+            seen["notebook_id"] = notebook.notebook_id
+            return type("R", (), {"conclusion": "本地 pdf 技能已补齐"})()
+
+    tape = Tape("feishu:chat-1")
+    with patch("babybot.orchestrator.DynamicOrchestrator", _FakeDynamicOrchestrator):
+        text, media = asyncio.run(agent._answer_with_dag("补齐本地 pdf 技能", tape=tape))
+
+    assert text == "本地 pdf 技能已补齐"
+    assert media == []
+    saved = agent._plan_notebook_store.load_notebook(seen["notebook_id"])
+    assert saved is not None
+    assert saved.completion_summary["final_summary"] == "本地 pdf 技能已补齐"
+    assert "Inspect reference" in " ".join(saved.completion_summary["node_summaries"])
+    records = agent.memory_store.list_memories(chat_id="feishu:chat-1")
+    notebook_types = {record.memory_type for record in records}
+    assert "notebook_summary" in notebook_types
+    assert "notebook_index" in notebook_types
 
 
 def test_answer_with_dag_uses_router_decision_to_override_contract() -> None:

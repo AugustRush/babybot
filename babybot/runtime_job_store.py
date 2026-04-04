@@ -25,6 +25,7 @@ class RuntimeJobStore:
         chat_key: str,
         goal: str,
         plan_id: str = "",
+        notebook_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> RuntimeJob:
         normalized_metadata = dict(metadata or {})
@@ -33,6 +34,7 @@ class RuntimeJobStore:
             chat_key=str(chat_key or ""),
             goal=str(goal or ""),
             plan_id=str(plan_id or ""),
+            notebook_id=str(notebook_id or ""),
             state="queued",
             created_at=self._utc_now(),
             updated_at=self._utc_now(),
@@ -42,15 +44,16 @@ class RuntimeJobStore:
         db.execute(
             """
             INSERT INTO runtime_jobs (
-                job_id, chat_key, goal, plan_id, state, progress_message,
+                job_id, chat_key, goal, plan_id, notebook_id, state, progress_message,
                 result_text, error, metadata_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.job_id,
                 job.chat_key,
                 job.goal,
                 job.plan_id,
+                job.notebook_id,
                 job.state,
                 job.progress_message,
                 job.result_text,
@@ -79,6 +82,7 @@ class RuntimeJobStore:
             chat_key=current.chat_key,
             goal=current.goal,
             plan_id=str(fields.get("plan_id", current.plan_id) or ""),
+            notebook_id=str(fields.get("notebook_id", current.notebook_id) or ""),
             state=normalized_state,  # type: ignore[arg-type]
             progress_message=str(
                 fields.get("progress_message", current.progress_message) or ""
@@ -93,12 +97,13 @@ class RuntimeJobStore:
         db.execute(
             """
             UPDATE runtime_jobs
-            SET plan_id=?, state=?, progress_message=?, result_text=?, error=?,
+            SET plan_id=?, notebook_id=?, state=?, progress_message=?, result_text=?, error=?,
                 metadata_json=?, updated_at=?
             WHERE job_id=?
             """,
             (
                 next_job.plan_id,
+                next_job.notebook_id,
                 next_job.state,
                 next_job.progress_message,
                 next_job.result_text,
@@ -114,7 +119,7 @@ class RuntimeJobStore:
     def get(self, job_id: str) -> RuntimeJob | None:
         row = self._ensure_db().execute(
             """
-            SELECT job_id, chat_key, goal, plan_id, state, progress_message,
+            SELECT job_id, chat_key, goal, plan_id, notebook_id, state, progress_message,
                    result_text, error, metadata_json, created_at, updated_at
             FROM runtime_jobs
             WHERE job_id=?
@@ -128,7 +133,7 @@ class RuntimeJobStore:
     def latest_for_chat(self, chat_key: str) -> RuntimeJob | None:
         row = self._ensure_db().execute(
             """
-            SELECT job_id, chat_key, goal, plan_id, state, progress_message,
+            SELECT job_id, chat_key, goal, plan_id, notebook_id, state, progress_message,
                    result_text, error, metadata_json, created_at, updated_at
             FROM runtime_jobs
             WHERE chat_key=?
@@ -159,7 +164,7 @@ class RuntimeJobStore:
 
     def list_jobs(self, *, chat_key: str | None = None) -> list[RuntimeJob]:
         sql = """
-            SELECT job_id, chat_key, goal, plan_id, state, progress_message,
+            SELECT job_id, chat_key, goal, plan_id, notebook_id, state, progress_message,
                    result_text, error, metadata_json, created_at, updated_at
             FROM runtime_jobs
         """
@@ -221,6 +226,7 @@ class RuntimeJobStore:
                 chat_key TEXT NOT NULL,
                 goal TEXT NOT NULL,
                 plan_id TEXT NOT NULL DEFAULT '',
+                notebook_id TEXT NOT NULL DEFAULT '',
                 state TEXT NOT NULL,
                 progress_message TEXT NOT NULL DEFAULT '',
                 result_text TEXT NOT NULL DEFAULT '',
@@ -231,6 +237,14 @@ class RuntimeJobStore:
             )
             """
         )
+        columns = {
+            str(row["name"] or "")
+            for row in db.execute("PRAGMA table_info(runtime_jobs)").fetchall()
+        }
+        if "notebook_id" not in columns:
+            db.execute(
+                "ALTER TABLE runtime_jobs ADD COLUMN notebook_id TEXT NOT NULL DEFAULT ''"
+            )
         db.commit()
         self._db = db
         return db
@@ -249,6 +263,7 @@ class RuntimeJobStore:
             chat_key=str(row["chat_key"] or ""),
             goal=str(row["goal"] or ""),
             plan_id=str(row["plan_id"] or ""),
+            notebook_id=str(row["notebook_id"] or ""),
             state=str(row["state"] or "queued"),  # type: ignore[arg-type]
             progress_message=str(row["progress_message"] or ""),
             result_text=str(row["result_text"] or ""),

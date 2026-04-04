@@ -96,6 +96,30 @@ class CountingViewTool(Tool):
         return ToolResult(ok=True, content=f"view:{args['file_path']}")
 
 
+class RepeatedActionModel(ModelProvider):
+    def __init__(self, rounds: int = 4) -> None:
+        self.calls = 0
+        self.rounds = rounds
+
+    async def generate(
+        self, request: ModelRequest, context: ExecutionContext
+    ) -> ModelResponse:
+        del request, context
+        self.calls += 1
+        if self.calls <= self.rounds:
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=f"call-{self.calls}",
+                        name="add",
+                        arguments={"a": self.calls, "b": 1},
+                    ),
+                ),
+            )
+        return ModelResponse(text="action rounds completed")
+
+
 def test_single_agent_executor_runs_tool_then_returns_final_text() -> None:
     registry = ToolRegistry()
     registry.register(AddTool(), group="math")
@@ -888,6 +912,167 @@ def test_single_agent_executor_batches_tape_store_writes_per_step() -> None:
 
     assert result.status == "succeeded"
     assert tape_store.saved_batches == [["tool_call"], ["tool_result"]]
+
+
+def test_single_agent_executor_logs_turns_and_tool_events_to_notebook() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    executor = SingleAgentExecutor(model=TwoStepModel(), tools=registry)
+    notebook = create_root_notebook(goal="compute", flow_id="flow-exec-notebook")
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Compute numbers",
+        objective="run add tool and summarize",
+        owner="worker",
+    )
+    context = ExecutionContext(
+        session_id="s1",
+        state={
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": node.node_id,
+        },
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="compute"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    logged_node = notebook.get_node(node.node_id)
+    assert logged_node.status == "completed"
+    assert logged_node.result_text == "final=3"
+    assert any(
+        event.kind == "observation" and event.metadata.get("stage") == "turn_start"
+        for event in logged_node.events
+    )
+    assert any(event.kind == "tool_call" and event.summary == "add" for event in logged_node.events)
+    assert any(
+        event.kind == "tool_result" and event.metadata.get("tool_name") == "add"
+        for event in logged_node.events
+    )
+    assert result.metadata["notebook_node_id"] == node.node_id
+    assert "final=3" in result.metadata["notebook_summary"]
+
+
+def test_single_agent_executor_uses_notebook_progress_for_action_loops() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    registry = ToolRegistry()
+    registry.register(AddTool(), group="math")
+    model = RepeatedActionModel(rounds=4)
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=10, max_no_progress_turns=3),
+    )
+    notebook = create_root_notebook(goal="perform several actions", flow_id="flow-progress")
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Action worker",
+        objective="run several action steps",
+        owner="worker",
+    )
+    context = ExecutionContext(
+        session_id="s1",
+        state={
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": node.node_id,
+        },
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="loop through actions"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert result.output == "action rounds completed"
+    assert model.calls == 5
+    assert notebook.progress_marker_count(node.node_id) >= 4
+
+
+def test_single_agent_executor_records_artifacts_in_notebook(tmp_path: Path) -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    artifact_path = tmp_path / "report.pdf"
+    artifact_path.write_bytes(b"%PDF-1.4")
+
+    class ArtifactTool(Tool):
+        @property
+        def name(self) -> str:
+            return "generate_report"
+
+        @property
+        def description(self) -> str:
+            return "Generate a report file."
+
+        @property
+        def schema(self) -> dict:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+            del args, context
+            return ToolResult(ok=True, content="report created", artifacts=[str(artifact_path)])
+
+    class ArtifactModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del request, context
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(call_id="c1", name="generate_report", arguments={}),
+                    )
+                )
+            return ModelResponse(text="report ready")
+
+    registry = ToolRegistry()
+    registry.register(ArtifactTool(), group="basic")
+    notebook = create_root_notebook(goal="generate report", flow_id="flow-artifacts")
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Generate report",
+        objective="produce a pdf",
+        owner="worker",
+    )
+    context = ExecutionContext(
+        session_id="s1",
+        state={
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": node.node_id,
+        },
+    )
+    executor = SingleAgentExecutor(model=ArtifactModel(), tools=registry)
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="generate report"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    logged_node = notebook.get_node(node.node_id)
+    assert [artifact.path for artifact in logged_node.artifacts] == [str(artifact_path)]
+    assert any(event.kind == "artifact" for event in logged_node.events)
 
 
 def test_single_agent_executor_enforces_token_budget() -> None:

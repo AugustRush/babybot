@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from .agent_kernel.plan_notebook import PlanNotebook, create_root_notebook
 from .task_contract import TaskContract
 
 
@@ -62,3 +63,35 @@ def build_execution_plan(contract: TaskContract) -> ExecutionPlan:
         round_budget=contract.round_budget,
         stopping_condition=contract.termination_rule,
     )
+
+
+def compile_execution_plan_to_notebook(
+    plan: ExecutionPlan,
+    *,
+    flow_id: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> PlanNotebook:
+    notebook = create_root_notebook(
+        goal=plan.contract.goal,
+        flow_id=flow_id,
+        plan_id=plan.plan_id,
+        metadata={
+            "deliverable": plan.contract.deliverable,
+            "termination_rule": plan.stopping_condition,
+            **dict(metadata or {}),
+        },
+    )
+    for step in plan.steps:
+        notebook.add_child_node(
+            parent_id=notebook.root_node_id,
+            kind="plan_step",
+            title=step.title,
+            objective=step.title,
+            owner="planner",
+            metadata={
+                "step_id": step.step_id,
+                "step_kind": step.kind,
+                "payload": dict(step.payload),
+            },
+        )
+    return notebook

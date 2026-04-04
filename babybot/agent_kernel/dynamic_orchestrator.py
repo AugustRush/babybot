@@ -23,6 +23,11 @@ from .execution_constraints import (
 )
 from .model import ModelMessage, ModelRequest, ModelResponse, ModelToolCall
 from .orchestrator_config import OrchestratorConfig
+from .plan_notebook import PlanNotebook, create_root_notebook
+from .plan_notebook_context import (
+    build_completion_context_view,
+    build_orchestrator_context_view,
+)
 from .types import ExecutionContext, FinalResult, TaskContract, TaskResult, ToolLease
 
 if TYPE_CHECKING:
@@ -869,6 +874,7 @@ class InProcessChildTaskRuntime:
 
         task_id = f"task_{task_counter}_{uuid.uuid4().hex[:6]}"
         flow_id = self._flow_id
+        task_kind = str(args.get("__task_kind", "child_task") or "child_task")
         include_groups: set[str] = set()
         include_tools: set[str] = set()
         exclude_tools: set[str] = set()
@@ -889,6 +895,48 @@ class InProcessChildTaskRuntime:
             exclude_tools=tuple(sorted(exclude_tools)),
         )
         primary_resource_id = resource_ids[0]
+        notebook_node_id = ""
+        notebook = context.state.get("plan_notebook")
+        if isinstance(notebook, PlanNotebook):
+            parent_id = str(
+                context.state.get("current_notebook_node_id", "") or notebook.root_node_id
+            )
+            if parent_id not in notebook.nodes:
+                parent_id = notebook.root_node_id
+            task_map = context.state.setdefault("notebook_task_map", {})
+            dep_node_ids = tuple(
+                task_map[dep_id]
+                for dep_id in deps
+                if isinstance(task_map, dict)
+                and dep_id in task_map
+                and str(task_map[dep_id]).strip()
+            )
+            node = notebook.add_child_node(
+                parent_id=parent_id,
+                kind=task_kind,
+                title=DynamicOrchestrator._task_title_from_description(description),
+                objective=str(description or "").strip(),
+                owner="subagent",
+                resource_ids=tuple(resource_ids),
+                deps=dep_node_ids,
+                metadata={
+                    "task_id": task_id,
+                    "dispatch_deps": list(deps),
+                },
+            )
+            notebook.transition_node(
+                node.node_id,
+                "running",
+                summary="已派发子任务",
+                detail=task_id,
+                metadata={
+                    "task_id": task_id,
+                    "resource_ids": list(resource_ids),
+                },
+            )
+            if isinstance(task_map, dict):
+                task_map[task_id] = node.node_id
+            notebook_node_id = node.node_id
         contract = TaskContract(
             task_id=task_id,
             description=description,
@@ -901,11 +949,14 @@ class InProcessChildTaskRuntime:
                 "resource_ids": list(resource_ids),
                 "skill_ids": merged_skill_ids,
                 "description": description,
+                "notebook_node_id": notebook_node_id,
             },
         )
         child_context = ContextManager(context).fork(
             session_id=f"{context.session_id}:{task_id}",
         )
+        if notebook_node_id:
+            child_context.state["current_notebook_node_id"] = notebook_node_id
         child_context.state["upstream_results"] = context.state.setdefault(
             "upstream_results", {}
         )
@@ -914,6 +965,37 @@ class InProcessChildTaskRuntime:
             task_id,
             parent=context.state.get("heartbeat"),
         )
+
+        def _notebook_feedback_payload() -> dict[str, Any]:
+            if not isinstance(notebook, PlanNotebook):
+                return {}
+            if not notebook_node_id or notebook_node_id not in notebook.nodes:
+                return {}
+            node = notebook.get_node(notebook_node_id)
+            completed_steps = [
+                candidate.title
+                for candidate in notebook.nodes.values()
+                if candidate.parent_id == node.parent_id and candidate.status == "completed"
+            ][-3:]
+            blockers = [
+                checkpoint.message
+                for checkpoint in node.checkpoints
+                if checkpoint.status == "open"
+            ]
+            blockers.extend(
+                issue.title for issue in node.issues if issue.status == "open"
+            )
+            return {
+                "notebook_phase": node.status,
+                "notebook_owner": node.owner,
+                "notebook_completed_steps": completed_steps,
+                "notebook_blockers": blockers[:2],
+                "notebook_next_action": (
+                    node.objective
+                    if node.status not in {"completed", "failed", "cancelled"}
+                    else ""
+                ),
+            }
 
         await self._child_task_bus.publish(
             ChildTaskEvent(
@@ -925,6 +1007,7 @@ class InProcessChildTaskRuntime:
                     resource_ids=list(resource_ids),
                     description=description,
                     deps=list(deps),
+                    **_notebook_feedback_payload(),
                 ),
             )
         )
@@ -962,6 +1045,7 @@ class InProcessChildTaskRuntime:
                             payload=self._event_payload(
                                 resource_id=primary_resource_id,
                                 description=description,
+                                **_notebook_feedback_payload(),
                             ),
                         )
                     )
@@ -1046,6 +1130,7 @@ class InProcessChildTaskRuntime:
                                     error=result.error,
                                     output=result.output,
                                     task_description=description,
+                                    **_notebook_feedback_payload(),
                                 ),
                             )
                         )
@@ -1089,6 +1174,7 @@ class InProcessChildTaskRuntime:
                                     max_attempts=max_attempts,
                                     error=result.error,
                                     error_type=decision.error_type,
+                                    **_notebook_feedback_payload(),
                                 ),
                             )
                         )
@@ -1118,6 +1204,7 @@ class InProcessChildTaskRuntime:
                                 max_attempts=max_attempts,
                                 error_type=decision.error_type,
                                 task_description=description,
+                                **_notebook_feedback_payload(),
                             ),
                         )
                     )
@@ -1399,6 +1486,7 @@ class DynamicOrchestrator:
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
         context.state.setdefault("original_goal", goal)
+        self._ensure_plan_notebook(goal, context)
         context.state.setdefault(
             "original_request_header",
             self._config.original_request_header,
@@ -1547,7 +1635,11 @@ class DynamicOrchestrator:
                     )
 
             await runtime.cancel_all(grace_period_s=5.0)
-            return self._build_fallback_result(goal, runtime.results)
+            return self._build_fallback_result(
+                goal,
+                runtime.results,
+                notebook=context.state.get("plan_notebook"),
+            )
         finally:
             if forwarder_task is not None:
                 forwarder_task.cancel()
@@ -1601,6 +1693,20 @@ class DynamicOrchestrator:
             addendum = addendum_builder(briefs)
             if addendum:
                 system_parts.append(addendum)
+        notebook = context.state.get("plan_notebook")
+        if isinstance(notebook, PlanNotebook):
+            notebook_context_budget = int(
+                context.state.get("notebook_context_budget", 2400) or 2400
+            )
+            notebook_view = build_orchestrator_context_view(
+                notebook,
+                token_budget=notebook_context_budget,
+                current_node_id=str(
+                    context.state.get("current_notebook_node_id", "") or ""
+                ),
+            )
+            if notebook_view.text:
+                system_parts.append("\n[Notebook Context]\n" + notebook_view.text)
         if history:
             system_parts.append(f"\n{history}")
         if deduped_policy_hints:
@@ -1645,6 +1751,227 @@ class DynamicOrchestrator:
                 briefs, self._config
             )
         return self._resource_catalog_cache_value
+
+    def _ensure_plan_notebook(
+        self,
+        goal: str,
+        context: ExecutionContext,
+    ) -> PlanNotebook:
+        notebook = context.state.get("plan_notebook")
+        if isinstance(notebook, PlanNotebook):
+            context.state.setdefault("plan_notebook_id", notebook.notebook_id)
+            context.state.setdefault("current_notebook_node_id", notebook.root_node_id)
+            context.state.setdefault("notebook_context_budget", 2400)
+            return notebook
+        notebook = create_root_notebook(
+            goal=goal,
+            flow_id=context.session_id,
+            plan_id=str(
+                getattr(context.state.get("execution_plan"), "plan_id", "") or ""
+            ),
+            metadata={"original_goal": str(context.state.get("original_goal", goal) or goal)},
+        )
+        context.state["plan_notebook"] = notebook
+        context.state["plan_notebook_id"] = notebook.notebook_id
+        context.state["current_notebook_node_id"] = notebook.root_node_id
+        context.state.setdefault("notebook_context_budget", 2400)
+        return notebook
+
+    @staticmethod
+    def _notebook_task_map(context: ExecutionContext) -> dict[str, str]:
+        mapping = context.state.get("notebook_task_map")
+        if isinstance(mapping, dict):
+            return mapping
+        context.state["notebook_task_map"] = {}
+        return context.state["notebook_task_map"]
+
+    @staticmethod
+    def _task_title_from_description(description: str) -> str:
+        for line in str(description or "").splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped[:120]
+        return "Child task"
+
+    def _record_dispatch_in_notebook(
+        self,
+        *,
+        context: ExecutionContext,
+        task_id: str,
+        description: str,
+        resource_ids: tuple[str, ...],
+        deps: list[str],
+        task_kind: str = "child_task",
+    ) -> None:
+        notebook = self._ensure_plan_notebook(
+            str(context.state.get("original_goal", "") or description),
+            context,
+        )
+        parent_id = str(
+            context.state.get("current_notebook_node_id", "") or notebook.root_node_id
+        )
+        if parent_id not in notebook.nodes:
+            parent_id = notebook.root_node_id
+        task_map = self._notebook_task_map(context)
+        dep_node_ids = tuple(
+            task_map[dep_id] for dep_id in deps if dep_id in task_map and task_map[dep_id]
+        )
+        node = notebook.add_child_node(
+            parent_id=parent_id,
+            kind=task_kind,
+            title=self._task_title_from_description(description),
+            objective=str(description or "").strip(),
+            owner="subagent",
+            resource_ids=resource_ids,
+            deps=dep_node_ids,
+            metadata={
+                "task_id": task_id,
+                "dispatch_deps": list(deps),
+            },
+        )
+        notebook.transition_node(
+            node.node_id,
+            "running",
+            summary="已派发子任务",
+            detail=task_id,
+            metadata={
+                "task_id": task_id,
+                "resource_ids": list(resource_ids),
+            },
+        )
+        task_map[task_id] = node.node_id
+
+    def _update_notebook_from_task_payloads(
+        self,
+        *,
+        context: ExecutionContext,
+        runtime: InProcessChildTaskRuntime,
+        task_ids: list[str],
+    ) -> None:
+        notebook = self._ensure_plan_notebook(
+            str(context.state.get("original_goal", "") or ""),
+            context,
+        )
+        task_map = self._notebook_task_map(context)
+        candidate_task_ids = list(dict.fromkeys(list(task_ids) + list(runtime.results.keys())))
+        for task_id in candidate_task_ids:
+            node_id = task_map.get(task_id)
+            if not node_id or node_id not in notebook.nodes:
+                continue
+            result = runtime.results.get(task_id)
+            if result is None:
+                continue
+            if result.status == "succeeded":
+                notebook.transition_node(
+                    node_id,
+                    "completed",
+                    summary="子任务完成",
+                    detail=str(result.output or ""),
+                )
+                for artifact in getattr(result, "artifacts", ()) or ():
+                    if str(artifact).strip():
+                        notebook.add_artifact(
+                            node_id=node_id,
+                            path=str(artifact),
+                            label="runtime artifact",
+                        )
+            elif result.status == "failed":
+                notebook.transition_node(
+                    node_id,
+                    "failed",
+                    summary="子任务失败",
+                    detail=str(result.error or ""),
+                )
+                node = notebook.get_node(node_id)
+                task_error = str(result.error or "")
+                issue_exists = any(
+                    issue.status == "open"
+                    and issue.title == "子任务失败"
+                    and issue.detail == task_error
+                    for issue in node.issues
+                )
+                if not issue_exists:
+                    notebook.add_issue(
+                        node_id=node_id,
+                        title="子任务失败",
+                        detail=task_error,
+                        severity="high",
+                    )
+                repair_message = task_error or "子任务失败，需要修复"
+                repair_checkpoint_exists = any(
+                    checkpoint.status == "open"
+                    and checkpoint.kind == "needs_repair"
+                    and checkpoint.message == repair_message
+                    and str(checkpoint.metadata.get("task_id", "") or "") == task_id
+                    for checkpoint in node.checkpoints
+                )
+                if not repair_checkpoint_exists:
+                    notebook.mark_needs_repair(
+                        node_id,
+                        message=repair_message,
+                        metadata={"task_id": task_id},
+                    )
+
+    def _notebook_blocking_node_ids(
+        self,
+        notebook: PlanNotebook,
+    ) -> list[str]:
+        blocking: list[str] = []
+        for node_id, node in notebook.nodes.items():
+            if node.kind in {"root", "plan_step", "scheduled_task"}:
+                continue
+            if node.status in {"completed", "failed", "cancelled"}:
+                continue
+            blocking.append(node_id)
+        return blocking
+
+    @staticmethod
+    def _notebook_reply_blocking_checkpoints(
+        notebook: PlanNotebook,
+    ) -> list[str]:
+        blocking_kinds = {"needs_human_input", "verification_failed"}
+        return [
+            f"{checkpoint.node_id}:{checkpoint.kind}"
+            for checkpoint in notebook.open_checkpoints()
+            if checkpoint.kind in blocking_kinds
+        ]
+
+    def _finalize_notebook_for_reply(
+        self,
+        *,
+        context: ExecutionContext,
+        reply_text: str,
+    ) -> None:
+        notebook = self._ensure_plan_notebook(
+            str(context.state.get("original_goal", "") or reply_text),
+            context,
+        )
+        if not notebook.completion_summary:
+            notebook.set_completion_summary(
+                {
+                    "final_summary": str(reply_text or "").strip(),
+                    "decision_register": [
+                        decision.summary
+                        for node in notebook.nodes.values()
+                        for decision in node.decisions[-3:]
+                    ],
+                    "artifact_manifest": [
+                        artifact.path
+                        for node in notebook.nodes.values()
+                        for artifact in node.artifacts
+                    ],
+                }
+            )
+        for node_id, node in notebook.nodes.items():
+            if node.status in {"completed", "failed", "cancelled"}:
+                continue
+            if node.kind in {"root", "plan_step"}:
+                notebook.transition_node(
+                    node_id,
+                    "completed",
+                    summary="编排收尾完成",
+                    detail=str(reply_text or ""),
+                )
 
     def _merge_dispatch_calls_for_maintenance(
         self,
@@ -2115,9 +2442,14 @@ class DynamicOrchestrator:
                     "error: scheduled handoff is being created for a later stage; "
                     "do not mix new live tasks into the same turn"
                 )
-            return await runtime.dispatch(
-                dispatch_args, task_counter=task_counter, context=context
+            runtime_dispatch_args = dict(dispatch_args)
+            runtime_dispatch_args["__task_kind"] = (
+                "scheduled_task" if scheduler_dispatch else "child_task"
             )
+            task_id = await runtime.dispatch(
+                runtime_dispatch_args, task_counter=task_counter, context=context
+            )
+            return task_id
         if name == "wait_for_tasks":
             _emit_policy_decision(
                 context,
@@ -2127,9 +2459,23 @@ class DynamicOrchestrator:
                     "task_count": len(args.get("task_ids", []) or []),
                 },
             )
-            return await runtime.wait_for_tasks(args.get("task_ids", []))
+            task_ids = list(args.get("task_ids", []) or [])
+            payload = await runtime.wait_for_tasks(task_ids)
+            self._update_notebook_from_task_payloads(
+                context=context,
+                runtime=runtime,
+                task_ids=task_ids,
+            )
+            return payload
         if name == "get_task_result":
-            return runtime.get_task_result(args.get("task_id", ""))
+            task_id = args.get("task_id", "")
+            payload = runtime.get_task_result(task_id)
+            self._update_notebook_from_task_payloads(
+                context=context,
+                runtime=runtime,
+                task_ids=[task_id],
+            )
+            return payload
         if name == "reply_to_user":
             pending = runtime.pending_reply_blocking_task_ids()
             if pending:
@@ -2137,26 +2483,43 @@ class DynamicOrchestrator:
                     "error: reply_to_user called before child tasks finished; "
                     f"pending tasks: {', '.join(pending)}"
                 )
+            self._update_notebook_from_task_payloads(
+                context=context,
+                runtime=runtime,
+                task_ids=list(runtime.results.keys()),
+            )
+            notebook = self._ensure_plan_notebook(
+                str(context.state.get("original_goal", "") or ""),
+                context,
+            )
             all_dead, dead_ids = runtime.all_tasks_dead_lettered_with_no_success()
+            blocking_nodes = self._notebook_blocking_node_ids(notebook)
+            if blocking_nodes:
+                return (
+                    "error: reply_to_user called before notebook frontier converged; "
+                    f"blocking notebook nodes: {', '.join(blocking_nodes)}"
+                )
+            open_checkpoints = self._notebook_reply_blocking_checkpoints(notebook)
+            if open_checkpoints:
+                return (
+                    "error: reply_to_user called before notebook checkpoints were resolved; "
+                    f"open notebook checkpoints: {', '.join(open_checkpoints)}"
+                )
             if all_dead:
-                # All child tasks failed — inject an explicit honesty reminder into the
-                # tool result so the model cannot silently fabricate success.
                 errors = "; ".join(
                     str(runtime.results[tid].error or "unknown error")[:120]
                     for tid in dead_ids
                 )
                 logger.warning(
                     "reply_to_user after all tasks dead-lettered (%s); "
-                    "injecting honesty reminder. errors: %s",
+                    "allowing direct failure reply. errors: %s",
                     ", ".join(dead_ids),
                     errors,
                 )
-                dead_reminder = self._config.all_tasks_failed_reminder.format(
-                    dead_ids=", ".join(dead_ids),
-                    errors=errors,
-                )
-                user_text = args.get("text", "")
-                return f"{dead_reminder}\n\nProvided reply text:\n{user_text}"
+            self._finalize_notebook_for_reply(
+                context=context,
+                reply_text=str(args.get("text", "") or ""),
+            )
             return args.get("text", "")
         if name == "dispatch_team":
             return await self._run_team(args, context)
@@ -2578,9 +2941,15 @@ class DynamicOrchestrator:
         self,
         goal: str,
         results: dict[str, TaskResult],
+        *,
+        notebook: PlanNotebook | None = None,
     ) -> FinalResult:
         del goal
         parts = [self._config.step_budget_exhausted_header]
+        if notebook is not None:
+            completion_view = build_completion_context_view(notebook, token_budget=1200)
+            if completion_view.text:
+                parts.append(completion_view.text)
         for task_id, r in results.items():
             if r.status == "succeeded":
                 parts.append(

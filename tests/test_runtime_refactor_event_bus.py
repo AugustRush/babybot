@@ -132,6 +132,37 @@ class _ScriptedBridge:
         )
 
 
+class _CapturingResourceManager(_DummyResourceManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_task_description = ""
+
+    async def run_subagent_task_result(
+        self,
+        task_description: str,
+        lease: dict[str, Any] | None = None,
+        agent_name: str = "Worker",
+        tape: Any = None,
+        tape_store: Any = None,
+        heartbeat: Any = None,
+        media_paths: list[str] | None = None,
+        skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
+    ) -> TaskResult:
+        del lease, agent_name, tape, tape_store, heartbeat, media_paths, skill_ids
+        self.last_task_description = task_description
+        return TaskResult(
+            task_id=notebook_node_id or "worker-1",
+            status="succeeded",
+            output=f"done: {task_description}",
+            metadata={
+                "received_notebook_id": getattr(plan_notebook, "notebook_id", ""),
+                "received_node_id": notebook_node_id,
+            },
+        )
+
+
 def test_dynamic_orchestrator_emits_child_task_lifecycle_events() -> None:
     bus = InMemoryChildTaskBus()
     orchestrator = DynamicOrchestrator(
@@ -230,6 +261,85 @@ def test_resource_bridge_executor_preserves_failed_subagent_status() -> None:
     assert result.status == "failed"
     assert "No progress" in result.error
     assert result.artifacts == ("/tmp/demo.pdf",)
+
+
+def test_resource_bridge_executor_builds_worker_prompt_from_notebook_context() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    rm = _CapturingResourceManager()
+    bridge = ResourceBridgeExecutor(
+        resource_manager=rm,  # type: ignore[arg-type]
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+    )
+    notebook = create_root_notebook(goal="repair local pdf skill", flow_id="flow-notebook")
+    dep = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Inspect reference",
+        objective="collect upstream gaps",
+        owner="worker",
+    )
+    notebook.transition_node(
+        dep.node_id,
+        "completed",
+        summary="reference inspected",
+        detail="Missing design/design.md and README examples.",
+        metadata={"progress": True},
+    )
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Apply fixes",
+        objective="patch local skill",
+        owner="worker",
+        deps=(dep.node_id,),
+    )
+
+    result = asyncio.run(
+        bridge.execute(
+            task=type(
+                "T",
+                (),
+                {
+                    "task_id": "task-1",
+                    "description": "apply the local fixes",
+                    "lease": type(
+                        "L",
+                        (),
+                        {
+                            "include_groups": (),
+                            "include_tools": (),
+                            "exclude_tools": (),
+                        },
+                    )(),
+                    "metadata": {
+                        "resource_id": "skill.weather",
+                        "skill_ids": [],
+                        "notebook_node_id": node.node_id,
+                        "upstream_results": {"legacy-dep": "legacy blob that should not be injected"},
+                    },
+                    "deps": ("legacy-dep",),
+                },
+            )(),
+            context=ExecutionContext(
+                session_id="flow-1",
+                state={
+                    "plan_notebook": notebook,
+                    "plan_notebook_id": notebook.notebook_id,
+                    "current_notebook_node_id": node.node_id,
+                    "original_goal": "参考仓库对本地 pdf 技能查漏补缺",
+                },
+            ),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert "[Current Step]" in rm.last_task_description
+    assert "[Direct Dependencies]" in rm.last_task_description
+    assert "Missing design/design.md" in rm.last_task_description
+    assert "--- upstream_results ---" not in rm.last_task_description
+    assert result.metadata["received_notebook_id"] == notebook.notebook_id
+    assert result.metadata["received_node_id"] == node.node_id
 
 
 def test_runtime_retries_retryable_failures_before_succeeding() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field
@@ -423,20 +424,37 @@ async def route_task(
         "- explain: 中文一句话，不超过40字\n\n"
         f"上下文快照：{json.dumps(snapshot.to_prompt_payload(), ensure_ascii=False)}"
     )
+    kwargs: dict[str, Any] = {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "model_cls": RoutingDecision,
+        "heartbeat": heartbeat,
+    }
     try:
-        structured = await complete_structured(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model_cls=RoutingDecision,
-            heartbeat=heartbeat,
-            model_name=str(model_name or "").strip() or None,
-            timeout=max(0.5, float(timeout or 0.0)),
-            expected_timeout=True,
+        parameters = inspect.signature(complete_structured).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters
+    )
+    if accepts_kwargs or any(parameter.name == "model_name" for parameter in parameters):
+        kwargs["model_name"] = str(model_name or "").strip() or None
+    bounded_timeout = max(0.5, float(timeout or 0.0))
+    if accepts_kwargs or any(parameter.name == "timeout" for parameter in parameters):
+        kwargs["timeout"] = bounded_timeout
+    if accepts_kwargs or any(
+        parameter.name == "expected_timeout" for parameter in parameters
+    ):
+        kwargs["expected_timeout"] = True
+    try:
+        structured = await asyncio.wait_for(
+            complete_structured(**kwargs),
+            timeout=bounded_timeout,
         )
     except (asyncio.TimeoutError, TimeoutError):
         logger.info(
             "Routing decision timed out after %.2fs; falling back to default contract",
-            max(0.5, float(timeout or 0.0)),
+            bounded_timeout,
         )
         return None
     except Exception:

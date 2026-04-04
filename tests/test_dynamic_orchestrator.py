@@ -787,6 +787,228 @@ def test_maintenance_goal_serializes_follow_up_dispatch_onto_existing_live_task(
     assert "RESULT_A" in rm.calls[1]["task_description"]
 
 
+def test_notebook_tracks_dispatch_wait_and_completion() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    class NotebookGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call("skill.weather", "检查并修复技能", call_id="c1"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("done", call_id="c3")
+
+    notebook = create_root_notebook(goal="检查并修复技能", flow_id="flow-nb")
+    context = ExecutionContext(
+        session_id="flow-nb",
+        state={
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": notebook.root_node_id,
+            "notebook_context_budget": 400,
+        },
+    )
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(),
+        gateway=NotebookGateway(),
+    )
+
+    result = asyncio.run(orch.run("检查并修复技能", context))
+
+    assert result.conclusion == "done"
+    child_nodes = [
+        node
+        for node in context.state["plan_notebook"].nodes.values()
+        if node.parent_id == notebook.root_node_id and node.kind == "child_task"
+    ]
+    assert len(child_nodes) == 1
+    assert child_nodes[0].status == "completed"
+    assert "result for:" in child_nodes[0].result_text
+    assert child_nodes[0].metadata["task_id"].startswith("task_0_")
+
+
+def test_build_initial_messages_uses_notebook_context_view_when_present() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    notebook = create_root_notebook(goal="补齐本地技能", flow_id="flow-view")
+    child = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Inspect",
+        objective="检查远端差异",
+        owner="worker",
+        resource_ids=("web",),
+    )
+    notebook.record_event(
+        node_id=child.node_id,
+        kind="observation",
+        summary="远端存在 design 文档",
+        detail="skills/minimax-pdf/design/design.md",
+    )
+
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=DummyGateway([]))
+    messages = orch._build_initial_messages(
+        "补齐本地技能",
+        ExecutionContext(
+            state={
+                "plan_notebook": notebook,
+                "plan_notebook_id": notebook.notebook_id,
+                "current_notebook_node_id": child.node_id,
+                "notebook_context_budget": 240,
+            }
+        ),
+    )
+
+    assert "[Notebook Context]" in messages[0].content
+    assert "skills/minimax-pdf/design/design.md" in messages[0].content
+
+
+def test_build_fallback_result_prefers_notebook_completion_summary() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    notebook = create_root_notebook(goal="补齐本地技能", flow_id="flow-fallback")
+    notebook.set_completion_summary(
+        {
+            "final_summary": "Notebook fallback: 本地技能已补齐 design 文档。",
+            "decision_register": ["先补齐文档，再执行校验"],
+        }
+    )
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=DummyGateway([]))
+
+    result = orch._build_fallback_result("补齐本地技能", {}, notebook=notebook)  # type: ignore[arg-type]
+
+    assert "Notebook fallback: 本地技能已补齐 design 文档。" in result.conclusion
+
+
+def test_failed_task_updates_notebook_with_repair_checkpoint() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+    from babybot.agent_kernel.dynamic_orchestrator import InProcessChildTaskRuntime
+
+    notebook = create_root_notebook(goal="补齐本地技能", flow_id="flow-repair")
+    child = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Inspect",
+        objective="检查远端差异",
+        owner="worker",
+    )
+    context = ExecutionContext(
+        session_id="flow-repair",
+        state={
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": notebook.root_node_id,
+            "notebook_task_map": {"task-1": child.node_id},
+        },
+    )
+    runtime = type(
+        "RuntimeStub",
+        (),
+        {
+            "results": {
+                "task-1": TaskResult(
+                    task_id="task-1",
+                    status="failed",
+                    error="缺少 design 文档",
+                )
+            }
+        },
+    )()
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=DummyGateway([]))
+
+    orch._update_notebook_from_task_payloads(  # type: ignore[attr-defined]
+        context=context,
+        runtime=runtime,  # type: ignore[arg-type]
+        task_ids=["task-1"],
+    )
+
+    updated = notebook.get_node(child.node_id)
+    assert updated.status == "failed"
+    assert any(
+        checkpoint.kind == "needs_repair" and checkpoint.status == "open"
+        for checkpoint in updated.checkpoints
+    )
+
+
+def test_reply_to_user_blocks_when_notebook_has_open_checkpoint() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    notebook = create_root_notebook(goal="等待用户确认", flow_id="flow-feedback")
+    child = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Request input",
+        objective="请求用户上传 PDF",
+        owner="worker",
+    )
+    notebook.transition_node(child.node_id, "completed", summary="子任务已暂停")
+    notebook.mark_needs_human_input(child.node_id, message="需要用户上传示例 PDF")
+    context = ExecutionContext(
+        session_id="flow-feedback",
+        state={
+            "original_goal": "等待用户确认",
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": notebook.root_node_id,
+        },
+    )
+
+    class RuntimeStub:
+        results: dict[str, TaskResult] = {}
+
+        @staticmethod
+        def pending_reply_blocking_task_ids() -> list[str]:
+            return []
+
+        @staticmethod
+        def all_tasks_dead_lettered_with_no_success() -> tuple[bool, list[str]]:
+            return (False, [])
+
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=DummyGateway([]))
+
+    result = asyncio.run(
+        orch._dispatch_tool(  # type: ignore[attr-defined]
+            ModelToolCall(
+                call_id="reply",
+                name="reply_to_user",
+                arguments={"text": "done"},
+            ),
+            RuntimeStub(),  # type: ignore[arg-type]
+            context,
+            task_counter=0,
+            scheduler_handoff_created=False,
+            scheduler_dispatch_present_this_turn=False,
+            scheduler_dispatch_seen_before_call=False,
+            prior_live_task_ids_this_turn=(),
+        )
+    )
+
+    assert "open notebook checkpoints" in result
+
+
 def test_max_steps_fallback() -> None:
     """Model never calls reply_to_user; verify fallback after MAX_STEPS."""
     # Return a no-op tool call every step to exhaust MAX_STEPS

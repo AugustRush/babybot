@@ -54,6 +54,7 @@ class RuntimeJob:
     chat_key: str
     goal: str
     plan_id: str = ""
+    notebook_id: str = ""
     state: JobState = "queued"
     progress_message: str = ""
     result_text: str = ""

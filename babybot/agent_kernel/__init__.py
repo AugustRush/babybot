@@ -20,6 +20,16 @@ from .model import (
     ModelToolCall,
 )
 from .mcp import MCPClientPort, MCPToolAdapter, MCPToolDescriptor, register_mcp_tools
+from .plan_notebook import (
+    NotebookArtifact,
+    NotebookCheckpoint,
+    NotebookDecision,
+    NotebookEvent,
+    NotebookIssue,
+    NotebookNode,
+    PlanNotebook,
+    create_root_notebook,
+)
 from .protocols import ExecutorPort
 from .skills import SkillPack
 from .tools import RegisteredTool, Tool, ToolContext, ToolRegistry, ToolResult
@@ -31,6 +41,7 @@ from .types import (
     ExecutionContext,
     ExecutionPlan,
     FinalResult,
+    NotebookState,
     OrchestratorState,
     RunPolicy,
     SystemPromptBuilder,
@@ -66,7 +77,15 @@ __all__ = [
     "ModelResponse",
     "ModelToolCall",
     "MCPToolDescriptor",
+    "NotebookArtifact",
+    "NotebookCheckpoint",
+    "NotebookDecision",
+    "NotebookEvent",
+    "NotebookIssue",
+    "NotebookNode",
+    "NotebookState",
     "OrchestratorState",
+    "PlanNotebook",
     "RegisteredTool",
     "ResourceBridgeExecutor",
     "RunPolicy",
@@ -82,5 +101,6 @@ __all__ = [
     "TaskResult",
     "ToolLease",
     "WorkerState",
+    "create_root_notebook",
     "register_mcp_tools",
 ]

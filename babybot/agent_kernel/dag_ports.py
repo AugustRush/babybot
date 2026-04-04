@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from .executor import _build_history_messages
 from .model import ModelMessage
+from .plan_notebook import PlanNotebook
+from .plan_notebook_context import build_worker_context_view
 from .types import (
     ExecutionContext,
     TaskContract,
@@ -262,6 +264,12 @@ class ResourceBridgeExecutor:
             run_subagent_task, "memory_store"
         ):
             kwargs["memory_store"] = memory_store
+        notebook = context.state.get("plan_notebook")
+        notebook_node_id = str(
+            task.metadata.get("notebook_node_id")
+            or context.state.get("current_notebook_node_id", "")
+            or ""
+        ).strip()
 
         if callable(run_subagent_task_result):
             detailed_kwargs = dict(kwargs)
@@ -269,6 +277,16 @@ class ResourceBridgeExecutor:
                 run_subagent_task_result, "memory_store"
             ):
                 detailed_kwargs.pop("memory_store", None)
+            if isinstance(notebook, PlanNotebook) and _supports_kwarg(
+                run_subagent_task_result,
+                "plan_notebook",
+            ):
+                detailed_kwargs["plan_notebook"] = notebook
+            if notebook_node_id and _supports_kwarg(
+                run_subagent_task_result,
+                "notebook_node_id",
+            ):
+                detailed_kwargs["notebook_node_id"] = notebook_node_id
             try:
                 detailed_result = await run_subagent_task_result(**detailed_kwargs)
             except Exception as exc:
@@ -295,6 +313,16 @@ class ResourceBridgeExecutor:
             )
 
         try:
+            if isinstance(notebook, PlanNotebook) and _supports_kwarg(
+                run_subagent_task,
+                "plan_notebook",
+            ):
+                kwargs["plan_notebook"] = notebook
+            if notebook_node_id and _supports_kwarg(
+                run_subagent_task,
+                "notebook_node_id",
+            ):
+                kwargs["notebook_node_id"] = notebook_node_id
             output, media = await run_subagent_task(**kwargs)
         except Exception as exc:
             return TaskResult(
@@ -317,6 +345,18 @@ class ResourceBridgeExecutor:
     @staticmethod
     def _enrich_with_upstream(task: TaskContract, context: ExecutionContext) -> str:
         """Append runtime context needed by downstream tasks."""
+        notebook = context.state.get("plan_notebook")
+        notebook_node_id = str(
+            task.metadata.get("notebook_node_id")
+            or context.state.get("current_notebook_node_id", "")
+            or ""
+        ).strip()
+        notebook_bound = (
+            isinstance(notebook, PlanNotebook)
+            and notebook_node_id
+            and notebook_node_id in notebook.nodes
+        )
+        notebook_task_map = context.state.get("notebook_task_map", {})
         upstream = task.metadata.get("upstream_results") or context.state.get(
             "upstream_results", {}
         )
@@ -337,13 +377,35 @@ class ResourceBridgeExecutor:
             parts.append(original_goal)
             enriched = True
 
-        if not task.deps or not upstream:
-            return "\n".join(parts) if enriched else task.description
+        if task.deps and upstream:
+            dep_lines: list[str] = []
+            dep_enriched = False
+            for dep_id in task.deps:
+                if notebook_bound and not (
+                    str(dep_id).startswith("task_")
+                    or (
+                        isinstance(notebook_task_map, dict)
+                        and dep_id in notebook_task_map
+                    )
+                ):
+                    continue
+                result = upstream.get(dep_id)
+                if result:
+                    dep_lines.append(f"\n[{dep_id}]:\n{result}")
+                    dep_enriched = True
+            if dep_enriched:
+                parts.append(f"\n\n{upstream_results_header}")
+                parts.extend(dep_lines)
+            enriched = enriched or dep_enriched
 
-        parts.append(f"\n\n{upstream_results_header}")
-        for dep_id in task.deps:
-            result = upstream.get(dep_id)
-            if result:
-                parts.append(f"\n[{dep_id}]:\n{result}")
+        if notebook_bound:
+            token_budget = int(context.state.get("notebook_context_budget", 2200) or 2200)
+            view = build_worker_context_view(
+                notebook,
+                notebook_node_id,
+                token_budget=token_budget,
+            )
+            if view.text:
                 enriched = True
+                parts.append(f"\n\n[Notebook Context]\n{view.text}")
         return "\n".join(parts) if enriched else task.description

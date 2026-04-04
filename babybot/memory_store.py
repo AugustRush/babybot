@@ -587,6 +587,80 @@ class HybridMemoryStore:
             )
         )
 
+    def observe_notebook_completion(
+        self,
+        *,
+        chat_id: str,
+        notebook_id: str,
+        completion_summary: dict[str, Any],
+    ) -> None:
+        self.ensure_bootstrap()
+        normalized_summary = dict(completion_summary or {})
+        final_summary = str(normalized_summary.get("final_summary", "") or "").strip()
+        decision_register = [
+            str(item).strip()
+            for item in (normalized_summary.get("decision_register") or ())
+            if str(item).strip()
+        ]
+        artifact_manifest = [
+            str(item).strip()
+            for item in (normalized_summary.get("artifact_manifest") or ())
+            if str(item).strip()
+        ]
+        search_terms = [
+            str(item).strip()
+            for item in (normalized_summary.get("search_terms") or ())
+            if str(item).strip()
+        ]
+        node_summaries = [
+            str(item).strip()
+            for item in (normalized_summary.get("node_summaries") or ())
+            if str(item).strip()
+        ]
+        now = time.time()
+
+        if final_summary:
+            self._insert_or_merge(
+                MemoryRecord(
+                    memory_type="notebook_summary",
+                    key=f"completion:{notebook_id}",
+                    value={
+                        "notebook_id": notebook_id,
+                        "final_summary": final_summary,
+                        "decision_register": decision_register,
+                        "artifact_manifest": artifact_manifest,
+                    },
+                    summary=f"Notebook summary: {final_summary}",
+                    tier="soft",
+                    scope="chat",
+                    scope_id=chat_id,
+                    confidence=0.95,
+                    last_observed_at=now,
+                    tags=("notebook", "completion"),
+                )
+            )
+
+        index_parts = search_terms + node_summaries
+        if index_parts:
+            self._insert_or_merge(
+                MemoryRecord(
+                    memory_type="notebook_index",
+                    key=f"index:{notebook_id}",
+                    value={
+                        "notebook_id": notebook_id,
+                        "search_terms": search_terms,
+                        "node_summaries": node_summaries,
+                    },
+                    summary="Notebook index: " + ", ".join(index_parts[:6]),
+                    tier="soft",
+                    scope="chat",
+                    scope_id=chat_id,
+                    confidence=0.88,
+                    last_observed_at=now,
+                    tags=("notebook", "index"),
+                )
+            )
+
 
 def _extract_brief_phrase(text: str, *, prefix: str) -> str:
     if prefix not in text:

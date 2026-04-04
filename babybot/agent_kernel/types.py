@@ -329,6 +329,15 @@ class OrchestratorState(TypedDict, total=False):
     heartbeat: NotRequired[Any]
 
 
+class NotebookState(TypedDict, total=False):
+    """Keys written/read by notebook runtime and context builders."""
+
+    plan_notebook: NotRequired[Any]
+    plan_notebook_id: NotRequired[str]
+    current_notebook_node_id: NotRequired[str]
+    notebook_context_budget: NotRequired[int]
+
+
 # ── Execution Context ────────────────────────────────────────────────────
 
 
@@ -371,6 +380,11 @@ class ExecutionContext:
     def orchestrator_state(self) -> OrchestratorState:
         """Typed view of state keys used by orchestrator/policy layer."""
         return cast(OrchestratorState, self.state)
+
+    @property
+    def notebook_state(self) -> NotebookState:
+        """Typed view of state keys used by notebook runtime."""
+        return cast(NotebookState, self.state)
 
     def emit(self, event: str, **payload: Any) -> None:
         """Legacy dict-based event emission — also bridges to EventBus."""

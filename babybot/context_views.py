@@ -35,6 +35,9 @@ def build_context_view(
 
     for record in records:
         score = _memory_score(record, query_keywords)
+        if record.memory_type in {"notebook_summary", "notebook_index"}:
+            hot_records.append((score, record.summary))
+            continue
         if record.tier == "hard":
             hot_records.append((score, record.summary))
             continue
@@ -141,6 +144,10 @@ def _memory_score(record: MemoryRecord, query_keywords: list[str]) -> float:
     }.get(record.tier, 10.0)
     if record.memory_type == "task_state":
         base += 10.0
+    if record.memory_type == "notebook_summary":
+        base += 18.0
+    if record.memory_type == "notebook_index":
+        base += 12.0
     if record.memory_type == "task_decision":
         base += 6.0
     if record.memory_type in {"relationship_policy", "user_profile"}:

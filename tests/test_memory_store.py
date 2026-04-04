@@ -307,3 +307,33 @@ def test_hybrid_memory_store_close_logs_db_close_failures(tmp_path, monkeypatch,
         store.close()
 
     assert "Failed to close memory store DB" in caplog.text
+
+
+def test_hybrid_memory_store_observe_notebook_completion_writes_summary_and_index(tmp_path) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    store.ensure_bootstrap()
+
+    store.observe_notebook_completion(
+        chat_id="feishu:chat-1",
+        notebook_id="nb-1",
+        completion_summary={
+            "final_summary": "本地 minimax-pdf 技能已补齐 design 文档并完成校验。",
+            "decision_register": ["先补齐 design 文档，再执行校验"],
+            "artifact_manifest": ["/tmp/design.md"],
+            "search_terms": ["minimax-pdf", "design"],
+            "node_summaries": ["Inspect reference: 发现缺少 design/design.md"],
+        },
+    )
+
+    records = store.list_memories(chat_id="feishu:chat-1")
+    summaries = [record for record in records if record.memory_type == "notebook_summary"]
+    indexes = [record for record in records if record.memory_type == "notebook_index"]
+
+    assert len(summaries) == 1
+    assert "本地 minimax-pdf 技能已补齐 design 文档并完成校验。" in summaries[0].summary
+    assert len(indexes) == 1
+    assert "minimax-pdf" in indexes[0].summary
+    assert "Inspect reference" in indexes[0].summary

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from babybot.execution_plan import ExecutionPlan, PlanStep, build_execution_plan
+from babybot.execution_plan import (
+    ExecutionPlan,
+    PlanStep,
+    build_execution_plan,
+    compile_execution_plan_to_notebook,
+)
 from babybot.task_contract import TaskContract
 
 
@@ -71,3 +76,40 @@ def test_build_execution_plan_for_single_answer_bypasses_debate() -> None:
         "get_task_result",
         "reply_to_user",
     ]
+
+
+def test_compile_execution_plan_to_notebook_creates_root_and_step_nodes() -> None:
+    contract = TaskContract(
+        chat_key="feishu:c1",
+        goal="今天天气怎么样",
+        mode="answer",
+        deliverable="final_answer",
+        round_budget=None,
+        termination_rule="final_answer",
+        allow_clarification=True,
+        allowed_tools=(
+            "dispatch_task",
+            "wait_for_tasks",
+            "get_task_result",
+            "reply_to_user",
+        ),
+        allowed_agents=(),
+        metadata={},
+    )
+    plan = build_execution_plan(contract)
+
+    notebook = compile_execution_plan_to_notebook(
+        plan,
+        flow_id="flow-plan",
+        metadata={"chat_key": contract.chat_key},
+    )
+
+    assert notebook.goal == contract.goal
+    assert notebook.plan_id == plan.plan_id
+    assert notebook.root_node_id in notebook.nodes
+    step_nodes = [
+        node for node in notebook.nodes.values() if node.parent_id == notebook.root_node_id
+    ]
+    assert len(step_nodes) == 1
+    assert step_nodes[0].kind == "plan_step"
+    assert step_nodes[0].title == "Tool-guided answer"

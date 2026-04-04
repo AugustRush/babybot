@@ -100,6 +100,8 @@ class ResourceSubagentRuntime:
         memory_store: Any = None,
         media_paths: list[str] | None = None,
         channel_context: Any = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> ExecutionContext:
         return ExecutionContext(
             session_id=agent_name,
@@ -116,6 +118,12 @@ class ResourceSubagentRuntime:
                     ),
                     ("media_paths", media_paths),
                     ("channel_context", channel_context),
+                    ("plan_notebook", plan_notebook),
+                    (
+                        "plan_notebook_id",
+                        getattr(plan_notebook, "notebook_id", "") if plan_notebook is not None else None,
+                    ),
+                    ("current_notebook_node_id", notebook_node_id),
                 ]
                 if value is not None
             },
@@ -132,6 +140,8 @@ class ResourceSubagentRuntime:
         heartbeat: Any = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> tuple[str, list[str]]:
         result = await self.run_subagent_task_result(
             task_description=task_description,
@@ -143,6 +153,8 @@ class ResourceSubagentRuntime:
             heartbeat=heartbeat,
             media_paths=media_paths,
             skill_ids=skill_ids,
+            plan_notebook=plan_notebook,
+            notebook_node_id=notebook_node_id,
         )
         text = result.output if result.status == "succeeded" else result.error
         return (
@@ -161,6 +173,8 @@ class ResourceSubagentRuntime:
         heartbeat: Any = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> TaskResult:
         from .channels.tools import ChannelToolContext
 
@@ -230,6 +244,8 @@ class ResourceSubagentRuntime:
                     memory_store=memory_store,
                     media_paths=media_paths,
                     channel_context=channel_context,
+                    plan_notebook=plan_notebook,
+                    notebook_node_id=notebook_node_id,
                 )
                 result = await executor.execute(
                     TaskContract(

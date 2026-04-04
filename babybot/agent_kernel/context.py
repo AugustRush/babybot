@@ -64,6 +64,7 @@ class ContextManager:
             "tape_store",
             "memory_store",
             "upstream_results",
+            "plan_notebook",
         )
     )
     _OMITTED_STATE_KEYS = frozenset(("heartbeat",))

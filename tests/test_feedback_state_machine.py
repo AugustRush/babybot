@@ -329,6 +329,55 @@ def test_normalize_task_description_not_leaked_as_message() -> None:
     assert normalized.task_label == "这是系统内部的任务描述"
 
 
+def test_normalize_runtime_feedback_event_prefers_notebook_summary_fields() -> None:
+    normalized = normalize_runtime_feedback_event(
+        {
+            "job_id": "j1",
+            "flow_id": "f1",
+            "task_id": "t1",
+            "event": "progress",
+            "payload": {
+                "description": "内部系统 prompt，不应该泄露",
+                "notebook_phase": "repairing",
+                "notebook_owner": "skill-manager",
+                "notebook_completed_steps": ["读取参考仓库", "定位缺失文件"],
+                "notebook_blockers": ["等待用户提供示例 PDF"],
+                "notebook_next_action": "补齐 README 与 design 文档",
+            },
+        }
+    )
+
+    assert "当前阶段：repairing" in normalized.message
+    assert "当前负责人：skill-manager" in normalized.message
+    assert "已完成：读取参考仓库；定位缺失文件" in normalized.message
+    assert "阻塞：等待用户提供示例 PDF" in normalized.message
+    assert "下一步：补齐 README 与 design 文档" in normalized.message
+    assert "内部系统 prompt" not in normalized.message
+
+
+def test_render_runtime_feedback_event_keeps_notebook_feedback_concise() -> None:
+    event = RuntimeFeedbackEvent(
+        job_id="j1",
+        flow_id="f1",
+        task_id="t1",
+        state="running",
+        stage="task",
+        message=(
+            "当前阶段：repairing\n"
+            "当前负责人：skill-manager\n"
+            "已完成：读取参考仓库；定位缺失文件\n"
+            "阻塞：等待用户提供示例 PDF\n"
+            "下一步：补齐 README 与 design 文档"
+        ),
+    )
+
+    rendered = render_runtime_feedback_event(event, spinner_counter=1)
+
+    assert rendered.startswith("⠙")
+    assert "当前阶段：repairing" in rendered
+    assert "下一步：补齐 README 与 design 文档" in rendered
+
+
 # ---------------------------------------------------------------------------
 # render_stage_result
 # ---------------------------------------------------------------------------

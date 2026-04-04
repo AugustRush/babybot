@@ -106,6 +106,31 @@ def _extract_task_label(raw_description: str) -> str:
     return first_line
 
 
+def _build_notebook_feedback_message(payload: dict[str, Any]) -> str:
+    phase = str(payload.get("notebook_phase", "") or "").strip()
+    owner = str(payload.get("notebook_owner", "") or "").strip()
+    next_action = str(payload.get("notebook_next_action", "") or "").strip()
+    completed_steps = payload.get("notebook_completed_steps") or ()
+    blockers = payload.get("notebook_blockers") or ()
+
+    parts: list[str] = []
+    if phase:
+        parts.append(f"当前阶段：{phase}")
+    if owner:
+        parts.append(f"当前负责人：{owner}")
+    if isinstance(completed_steps, (list, tuple)):
+        cleaned = [str(item).strip() for item in completed_steps if str(item).strip()]
+        if cleaned:
+            parts.append(f"已完成：{'；'.join(cleaned[:3])}")
+    if isinstance(blockers, (list, tuple)):
+        cleaned = [str(item).strip() for item in blockers if str(item).strip()]
+        if cleaned:
+            parts.append(f"阻塞：{'；'.join(cleaned[:2])}")
+    if next_action:
+        parts.append(f"下一步：{next_action}")
+    return " | ".join(parts)
+
+
 def _truncate_output(output: str) -> str:
     """Truncate subtask output for display in a stage result card."""
     if not output:
@@ -150,6 +175,9 @@ def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
     # Use only "message" or "status" — never "description", which may contain
     # the full task system-prompt and must not be shown to end users.
     message = str(payload.get("message", "") or payload.get("status", "") or "").strip()
+    notebook_feedback = _build_notebook_feedback_message(payload)
+    if notebook_feedback:
+        message = notebook_feedback
     # For "started" events that carry no user-facing message, derive one from
     # resource_id (e.g. "skill.weather" → "正在调用 weather") so the progress
     # card updates visibly when a subtask begins executing.
