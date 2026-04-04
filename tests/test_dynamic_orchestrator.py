@@ -639,6 +639,74 @@ def test_follow_up_task_without_deps_receives_recent_success_output() -> None:
     assert "原始子任务：任务B" in rm.calls[1]["task_description"]
 
 
+def test_same_turn_overlapping_dispatches_must_be_merged_or_serialized() -> None:
+    class SameTurnGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.first_task_id = ""
+            self.second_result = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="c1",
+                            name="dispatch_task",
+                            arguments={
+                                "resource_ids": ["skill.weather", "skill.image"],
+                                "description": "对照参考仓库和本地技能查漏补缺",
+                            },
+                        ),
+                        ModelToolCall(
+                            call_id="c2",
+                            name="dispatch_task",
+                            arguments={
+                                "resource_id": "skill.weather",
+                                "description": "继续检查本地技能细节",
+                            },
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self.first_task_id = msg.content
+                    if msg.role == "tool" and msg.tool_call_id == "c2":
+                        self.second_result = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self.first_task_id], call_id="c3"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("收敛完成", call_id="c4")
+
+    gw = SameTurnGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+
+    result = asyncio.run(
+        orch.run(
+            "参考仓库链接，检查本地 minimax-pdf 技能并查漏补缺",
+            ExecutionContext(state={"original_goal": "参考仓库链接，检查本地 minimax-pdf 技能并查漏补缺"}),
+        )
+    )
+
+    assert result.conclusion == "收敛完成"
+    assert len(rm.calls) == 1
+    assert "resource_ids" in gw.second_result
+    assert "deps" in gw.second_result
+    assert gw.second_result.startswith("error:")
+
+
 def test_max_steps_fallback() -> None:
     """Model never calls reply_to_user; verify fallback after MAX_STEPS."""
     # Return a no-op tool call every step to exhaust MAX_STEPS

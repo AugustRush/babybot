@@ -409,6 +409,16 @@ def _provider_policy_hints(
     return hints
 
 
+def _goal_has_explicit_parallel_intent(
+    goal: str, config: OrchestratorConfig | None = None
+) -> bool:
+    text = str(goal or "").strip()
+    if not text:
+        return False
+    tokens = (config.parallel_tokens if config else None) or _PARALLEL_TOKENS
+    return any(token in text for token in tokens)
+
+
 def _emit_policy_decision(
     context: ExecutionContext,
     *,
@@ -534,6 +544,9 @@ class InProcessChildTaskRuntime:
     @property
     def results(self) -> dict[str, TaskResult]:
         return self._results
+
+    def task_state_snapshot(self, task_id: str) -> dict[str, Any]:
+        return dict(self._task_state.get(task_id, {}))
 
     def pending_task_ids(self) -> list[str]:
         return sorted(
@@ -1372,6 +1385,7 @@ class DynamicOrchestrator:
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
+        context.state.setdefault("original_goal", goal)
         context.state.setdefault(
             "original_request_header",
             self._config.original_request_header,
@@ -1840,6 +1854,38 @@ class DynamicOrchestrator:
             resource_ids = _dispatch_resource_ids(dispatch_args)
             deps = list(dispatch_args.get("deps", []) or [])
             active_in_flight = len(runtime.in_flight)
+            scheduler_dispatch = "group.scheduler" in resource_ids
+            if (
+                not deps
+                and not scheduler_dispatch
+                and prior_live_task_ids_this_turn
+                and not _goal_has_explicit_parallel_intent(
+                    str(context.state.get("original_goal", "") or ""),
+                    self._config,
+                )
+            ):
+                current_resources = {rid for rid in resource_ids if rid}
+                for prior_task_id in prior_live_task_ids_this_turn:
+                    prior_state = runtime.task_state_snapshot(prior_task_id)
+                    prior_resources = {
+                        str(item).strip()
+                        for item in (prior_state.get("resource_ids") or [])
+                        if str(item).strip()
+                    }
+                    if not current_resources or not prior_resources:
+                        continue
+                    if (
+                        current_resources & prior_resources
+                        and (
+                            len(current_resources) > 1
+                            or len(prior_resources) > 1
+                        )
+                    ):
+                        return (
+                            "error: overlapping sibling dispatches in the same turn "
+                            "must be merged into one dispatch_task with resource_ids, "
+                            "or the later task must declare deps for serial execution"
+                        )
             if "group.scheduler" not in resource_ids:
                 # Collect completed upstream results for dep tasks so the child task
                 # knows what its dependencies produced (break the black-box problem).
@@ -1876,7 +1922,6 @@ class DynamicOrchestrator:
                     "resource_count": len(resource_ids),
                 },
             )
-            scheduler_dispatch = "group.scheduler" in resource_ids
             if (
                 scheduler_dispatch
                 and not dispatch_args.get("deps")
