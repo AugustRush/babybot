@@ -352,10 +352,68 @@ def test_single_agent_executor_fails_fast_on_exploration_only_turns() -> None:
 
     assert result.status == "failed"
     assert "No progress" in result.error
-    # The executor allows one extra exploration turn after the budget is
-    # exhausted, then rejects another exploration-only round before running it.
-    assert tool.calls == 4
-    assert model.calls == 5
+    assert tool.calls == 3
+    assert model.calls == 4
+
+
+def test_single_agent_executor_blocks_exploration_tools_once_finalize_is_required() -> (
+    None
+):
+    class ExploringAndIgnoringFinalizeModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            self.calls += 1
+            del context
+            if any(
+                msg.role == "system" and "探索预算已耗尽" in msg.content
+                for msg in request.messages
+            ):
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id=f"call-{self.calls}",
+                            name="_workspace_view_text_file",
+                            arguments={"file_path": "skills/still_ignoring_hint.md"},
+                        ),
+                    ),
+                )
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=f"call-{self.calls}",
+                        name="_workspace_view_text_file",
+                        arguments={"file_path": f"skills/demo_{self.calls}.md"},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    tool = CountingViewTool()
+    registry.register(tool, group="code")
+    model = ExploringAndIgnoringFinalizeModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="find and edit a skill"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "failed"
+    assert "No progress" in result.error
+    assert tool.calls == 3
+    assert model.calls == 4
 
 
 def test_single_agent_executor_allows_short_exploration_burst_before_finishing() -> (
@@ -520,7 +578,7 @@ def test_single_agent_executor_grants_one_finalize_turn_after_exploration_budget
     assert len(hard_stop_messages) == 1
 
 
-def test_single_agent_executor_allows_one_extra_exploration_turn_before_finishing() -> (
+def test_single_agent_executor_blocks_extra_exploration_turn_before_finishing() -> (
     None
 ):
     class ExploringOnceMoreThenFinishingModel(ModelProvider):
@@ -563,13 +621,13 @@ def test_single_agent_executor_allows_one_extra_exploration_turn_before_finishin
         )
     )
 
-    assert result.status == "succeeded"
-    assert "最终差异摘要" in result.output
-    assert tool.calls == 4
-    assert len(model.requests) == 5
+    assert result.status == "failed"
+    assert "No progress" in result.error
+    assert tool.calls == 3
+    assert len(model.requests) == 4
     hard_stop_messages = [
         msg.content
-        for msg in model.requests[3].messages
+        for msg in model.requests[-1].messages
         if msg.role == "system" and "探索预算已耗尽" in msg.content
     ]
     assert len(hard_stop_messages) == 1

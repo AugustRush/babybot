@@ -45,6 +45,9 @@ _EXECUTION_NODE_KINDS = {
     "plan_step",
 }
 _TEAM_NODE_KINDS = {"team_debate", "team_cooperative"}
+_FORCE_CONVERGE_TOOL_NAMES = frozenset(
+    {"wait_for_tasks", "get_task_result", "reply_to_user"}
+)
 
 
 def _resolve_orchestrator_config(
@@ -1539,6 +1542,22 @@ class DynamicOrchestrator:
 
                 messages = self._prune_stale_wait_history(messages)
                 messages = self._prune_messages_by_count(messages)
+                force_converge_reason = self._refresh_force_converge_state(
+                    runtime=runtime,
+                    context=context,
+                )
+                if force_converge_reason:
+                    messages.append(
+                        ModelMessage(
+                            role="system",
+                            content=(
+                                "Runtime update:\n"
+                                f"{force_converge_reason}\n"
+                                "Only use get_task_result, wait_for_tasks, or "
+                                "reply_to_user until this stage converges."
+                            ),
+                        )
+                    )
                 logger.debug("DynamicOrchestrator: step=%d calling model", step)
                 response = await self._call_model(messages, context, step=step)
                 response = ModelResponse(
@@ -2167,6 +2186,127 @@ class DynamicOrchestrator:
             if checkpoint.kind in blocking_kinds
         ]
 
+    def _force_converge_state(
+        self,
+        *,
+        runtime: InProcessChildTaskRuntime,
+        context: ExecutionContext,
+    ) -> tuple[str, dict[str, Any]] | None:
+        threshold = max(
+            1,
+            int(
+                getattr(
+                    self._config,
+                    "force_converge_dead_letter_threshold",
+                    3,
+                )
+                or 3
+            ),
+        )
+        notebook = self._ensure_plan_notebook(
+            str(context.state.get("original_goal", "") or ""),
+            context,
+        )
+        current_node = self._current_notebook_node(notebook, context)
+        task_map = self._notebook_task_map(context)
+        dead_ids: list[str] = []
+        success_ids: list[str] = []
+        pending_ids: list[str] = []
+
+        for task_id, node_id in task_map.items():
+            normalized_node_id = str(node_id or "").strip()
+            if not normalized_node_id or normalized_node_id not in notebook.nodes:
+                continue
+            node = notebook.get_node(normalized_node_id)
+            if str(node.parent_id or "") != current_node.node_id:
+                continue
+            if node.kind == "scheduled_task":
+                continue
+
+            result = runtime.results.get(task_id)
+            if result is not None:
+                resource_id = str(result.metadata.get("resource_id", "") or "").strip()
+                if resource_id == "group.scheduler":
+                    continue
+                if result.status == "succeeded":
+                    success_ids.append(task_id)
+                elif (
+                    result.status == "failed"
+                    and result.metadata.get("dead_lettered") is True
+                ):
+                    dead_ids.append(task_id)
+                continue
+
+            if task_id in runtime.in_flight:
+                state = runtime.task_state_snapshot(task_id)
+                resource_id = str(state.get("resource_id", "") or "").strip()
+                if resource_id != "group.scheduler":
+                    pending_ids.append(task_id)
+
+        if len(dead_ids) < threshold or success_ids or pending_ids:
+            return None
+
+        dead_preview = ", ".join(dead_ids[-threshold:])
+        reason = (
+            "convergence required: repeated child-task failures exhausted the retry "
+            f"budget for the current notebook node ({dead_preview}). "
+            "Do not dispatch more child tasks. Inspect existing task results and "
+            "reply with a concise blocker/failure summary."
+        )
+        return reason, {
+            "node_id": current_node.node_id,
+            "dead_task_ids": dead_ids,
+            "successful_task_ids": success_ids,
+            "pending_task_ids": pending_ids,
+        }
+
+    def _refresh_force_converge_state(
+        self,
+        *,
+        runtime: InProcessChildTaskRuntime,
+        context: ExecutionContext,
+    ) -> str | None:
+        payload = self._force_converge_state(runtime=runtime, context=context)
+        current_reason = str(
+            context.state.get("orchestrator_force_converge", "") or ""
+        ).strip()
+
+        if payload is None:
+            if current_reason:
+                logger.info("DynamicOrchestrator: clearing force-converge mode")
+            context.state.pop("orchestrator_force_converge", None)
+            context.state.pop("orchestrator_force_converge_node_id", None)
+            context.state.pop("orchestrator_force_converge_dead_task_ids", None)
+            return None
+
+        reason, metadata = payload
+        context.state["orchestrator_force_converge"] = reason
+        context.state["orchestrator_force_converge_node_id"] = metadata["node_id"]
+        context.state["orchestrator_force_converge_dead_task_ids"] = list(
+            metadata["dead_task_ids"]
+        )
+        if current_reason == reason:
+            return None
+
+        logger.warning(
+            "DynamicOrchestrator: force-converge activated node=%s dead_tasks=%s",
+            metadata["node_id"],
+            metadata["dead_task_ids"],
+        )
+        notebook = context.state.get("plan_notebook")
+        if isinstance(notebook, PlanNotebook) and metadata["node_id"] in notebook.nodes:
+            notebook.record_event(
+                node_id=metadata["node_id"],
+                kind="decision",
+                summary="进入强制收敛模式",
+                detail=reason,
+                metadata={
+                    "force_converge": True,
+                    "dead_task_ids": list(metadata["dead_task_ids"]),
+                },
+            )
+        return reason
+
     def _finalize_notebook_for_reply(
         self,
         *,
@@ -2534,10 +2674,25 @@ class DynamicOrchestrator:
             task_contract = context.state.get("task_contract")
             allowed = tuple(getattr(task_contract, "allowed_tools", ()) or ())
         if not allowed:
-            return self._orchestration_tools
-        tool_by_name = {t["function"]["name"]: t for t in self._orchestration_tools}
-        filtered = tuple(tool_by_name[name] for name in allowed if name in tool_by_name)
-        return filtered or self._orchestration_tools
+            selected = self._orchestration_tools
+        else:
+            tool_by_name = {t["function"]["name"]: t for t in self._orchestration_tools}
+            filtered = tuple(tool_by_name[name] for name in allowed if name in tool_by_name)
+            selected = filtered or self._orchestration_tools
+        if str(context.state.get("orchestrator_force_converge", "") or "").strip():
+            convergence_tools = tuple(
+                tool
+                for tool in selected
+                if tool["function"]["name"] in _FORCE_CONVERGE_TOOL_NAMES
+            )
+            if convergence_tools:
+                return convergence_tools
+            return tuple(
+                tool
+                for tool in self._orchestration_tools
+                if tool["function"]["name"] in _FORCE_CONVERGE_TOOL_NAMES
+            )
+        return selected
 
     async def _dispatch_tool(
         self,
@@ -2556,6 +2711,17 @@ class DynamicOrchestrator:
 
         if args.get("__tool_argument_parse_error__"):
             return f"error: invalid arguments: {args.get('__raw_arguments__', '')}"
+
+        force_converge_reason = str(
+            context.state.get("orchestrator_force_converge", "") or ""
+        ).strip()
+        if force_converge_reason and name in {"dispatch_task", "dispatch_team"}:
+            return (
+                "error: convergence required: "
+                f"{force_converge_reason} "
+                "Do not dispatch new child tasks; use get_task_result, "
+                "wait_for_tasks, or reply_to_user."
+            )
 
         if name == "dispatch_task":
             dispatch_args = dict(args)

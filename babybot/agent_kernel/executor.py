@@ -148,6 +148,16 @@ class SingleAgentExecutor:
         return output[:head] + note + output[-tail:]
 
     @staticmethod
+    def _filter_non_exploration_tools(
+        tool_schemas: Iterable[dict[str, Any]],
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            tool
+            for tool in tool_schemas
+            if not LoopGuard.is_exploration_tool(tool["function"]["name"])
+        )
+
+    @staticmethod
     def _consume_runtime_hint_messages(
         state: dict[str, Any],
     ) -> tuple[ModelMessage, ...]:
@@ -325,7 +335,6 @@ class SingleAgentExecutor:
         tool_failure_count = 0
         loop_guard_block_count = 0
         exploration_finish_required = False
-        exploration_grace_turn_used = False
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = context.state.get("heartbeat")
@@ -411,6 +420,8 @@ class SingleAgentExecutor:
                 ]
             else:
                 step_tools = available_tools
+            if exploration_finish_required:
+                step_tools = list(self._filter_non_exploration_tools(step_tools))
 
             # ── LLM request ──────────────────────────────────────
             self._emit(
@@ -502,56 +513,6 @@ class SingleAgentExecutor:
                     step,
                     [tc.name for tc in response.tool_calls],
                 )
-                if (
-                    exploration_finish_required
-                    and exploration_grace_turn_used
-                    and all(
-                    loop_guard.is_exploration_call(tc.name, tc.arguments)
-                    for tc in response.tool_calls
-                    )
-                ):
-                    error = (
-                        f"No progress after {no_progress_turns} consecutive tool-only turns."
-                        " Exploration budget was exhausted and the model still chose "
-                        "read/search/check tools instead of finishing or taking action."
-                    )
-                    logger.warning(
-                        "Executor no-progress fail task=%s turns=%d mode=forced_finalize_ignored",
-                        task.task_id,
-                        no_progress_turns,
-                    )
-                    self._transition_notebook_node(
-                        context,
-                        status="failed",
-                        summary="Exploration budget exhausted",
-                        detail=error,
-                        metadata={"task_id": task.task_id},
-                    )
-                    result = TaskResult(
-                        task_id=task.task_id,
-                        status="failed",
-                        error=error,
-                        metadata=self._build_usage_metadata(
-                            usage_totals,
-                            extra={
-                                "no_progress_turns": no_progress_turns,
-                                "blocked_tools": sorted(blocked_tool_names),
-                                "tool_call_count": tool_call_count,
-                                "tool_failure_count": tool_failure_count,
-                                "loop_guard_block_count": loop_guard_block_count,
-                                "max_step_exhausted_count": 0,
-                                "notebook_node_id": notebook_node_id,
-                            },
-                        ),
-                    )
-                    self._emit(
-                        context,
-                        "agent_end",
-                        task_id=task.task_id,
-                        status="failed",
-                        error=error,
-                    )
-                    return result
                 if tape is not None:
                     tape_entries: list[Entry] = []
                     for tool_call in response.tool_calls:
@@ -595,8 +556,29 @@ class SingleAgentExecutor:
                 # Phase 1: serial validation — lightweight checks
                 error_results: list[tuple[ModelToolCall, str]] = []
                 valid_calls: list[tuple[ModelToolCall, Any]] = []
+                forced_finalize_violations: list[ModelToolCall] = []
 
                 for tool_call in response.tool_calls:
+                    if (
+                        exploration_finish_required
+                        and loop_guard.is_exploration_call(
+                            tool_call.name,
+                            tool_call.arguments,
+                        )
+                    ):
+                        forced_finalize_violations.append(tool_call)
+                        error_results.append(
+                            (
+                                tool_call,
+                                (
+                                    "Exploration budget exhausted."
+                                    "\n[Hint: Read/search/check tools are no longer allowed for this task. "
+                                    "Return a concise conclusion or blocker summary, or switch to edit/write/action tools.]"
+                                ),
+                            )
+                        )
+                        continue
+
                     verdict = loop_guard.check_call(tool_call.name, tool_call.arguments)
                     if verdict.blocked:
                         loop_guard_block_count += 1
@@ -728,6 +710,53 @@ class SingleAgentExecutor:
                     loop_guard.is_exploration_call(tc.name, tc.arguments)
                     for tc, _ in valid_calls
                 )
+                if (
+                    exploration_finish_required
+                    and forced_finalize_violations
+                    and len(forced_finalize_violations) == len(response.tool_calls)
+                ):
+                    error = (
+                        f"No progress after {no_progress_turns} consecutive tool-only turns."
+                        " Exploration budget was exhausted and the model still chose "
+                        "read/search/check tools instead of finishing or taking action."
+                    )
+                    logger.warning(
+                        "Executor no-progress fail task=%s turns=%d mode=forced_finalize_ignored",
+                        task.task_id,
+                        no_progress_turns,
+                    )
+                    self._transition_notebook_node(
+                        context,
+                        status="failed",
+                        summary="Exploration budget exhausted",
+                        detail=error,
+                        metadata={"task_id": task.task_id},
+                    )
+                    result = TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                        metadata=self._build_usage_metadata(
+                            usage_totals,
+                            extra={
+                                "no_progress_turns": no_progress_turns,
+                                "blocked_tools": sorted(blocked_tool_names),
+                                "tool_call_count": tool_call_count,
+                                "tool_failure_count": tool_failure_count,
+                                "loop_guard_block_count": loop_guard_block_count,
+                                "max_step_exhausted_count": 0,
+                                "notebook_node_id": notebook_node_id,
+                            },
+                        ),
+                    )
+                    self._emit(
+                        context,
+                        "agent_end",
+                        task_id=task.task_id,
+                        status="failed",
+                        error=error,
+                    )
+                    return result
 
                 # Phase 2: parallel execution of validated tool calls
                 if valid_calls:
@@ -938,7 +967,6 @@ class SingleAgentExecutor:
                 if turn_made_progress:
                     no_progress_turns = 0
                     exploration_finish_required = False
-                    exploration_grace_turn_used = False
                 else:
                     no_progress_turns += 1
                     if exploration_only_turn:
@@ -1004,65 +1032,16 @@ class SingleAgentExecutor:
                         messages.append(tool_result_map[tool_call.call_id])
 
                 # Allow one last convergence turn after the exploration budget
-                # is exhausted. If the next model response still only explores,
-                # the executor fails before running those tools.
+                # is exhausted. That turn may finish directly or use action/edit
+                # tools, but exploration tools are removed from the offered set
+                # and rejected if the model still calls them.
                 if exploration_only_no_progress and no_progress_turns >= no_progress_limit:
                     if not exploration_finish_required:
                         exploration_finish_required = True
-                        exploration_grace_turn_used = False
                         context.state.setdefault("pending_runtime_hints", []).append(
                             "探索预算已耗尽。下一轮必须直接给出当前结论/缺口摘要，"
                             "或切换到编辑、写入、执行类工具。不要再调用读取、搜索、检查类工具。"
                         )
-                    elif not exploration_grace_turn_used:
-                        exploration_grace_turn_used = True
-                        context.state.setdefault("pending_runtime_hints", []).append(
-                            "你已经在探索预算耗尽后继续探索了一轮。"
-                            "下一轮必须直接给出结论/缺口摘要，或改用编辑、写入、执行类工具；"
-                            "如果仍继续读取、搜索、检查，将直接失败。"
-                        )
-                    else:
-                        error = (
-                            f"No progress after {no_progress_turns} consecutive tool-only turns."
-                            " Only exploratory tools were used; switch to edit/write/action tools or finish."
-                        )
-                        logger.warning(
-                            "Executor no-progress fail task=%s turns=%d mode=exploration_only",
-                            task.task_id,
-                            no_progress_turns,
-                        )
-                        self._transition_notebook_node(
-                            context,
-                            status="failed",
-                            summary="Executor stalled in exploration-only mode",
-                            detail=error,
-                            metadata={"task_id": task.task_id},
-                        )
-                        result = TaskResult(
-                            task_id=task.task_id,
-                            status="failed",
-                            error=error,
-                            metadata=self._build_usage_metadata(
-                                usage_totals,
-                                extra={
-                                    "no_progress_turns": no_progress_turns,
-                                    "blocked_tools": sorted(blocked_tool_names),
-                                    "tool_call_count": tool_call_count,
-                                    "tool_failure_count": tool_failure_count,
-                                    "loop_guard_block_count": loop_guard_block_count,
-                                    "max_step_exhausted_count": 0,
-                                    "notebook_node_id": notebook_node_id,
-                                },
-                            ),
-                        )
-                        self._emit(
-                            context,
-                            "agent_end",
-                            task_id=task.task_id,
-                            status="failed",
-                            error=error,
-                        )
-                        return result
 
                 # ── Turn end event ───────────────────────────────
                 self._emit(
@@ -1128,7 +1107,6 @@ class SingleAgentExecutor:
             text = text.strip()
             if text:
                 exploration_finish_required = False
-                exploration_grace_turn_used = False
                 final_summary = self._summarize_notebook_text(text)
                 self._record_notebook_event(
                     context,

@@ -157,3 +157,9 @@ class OrchestratorConfig:
     # resource composition.  Return ``""`` to skip.
     # If ``None``, no addendum is generated.
     build_resource_selection_addendum: Any = None  # Callable | None
+
+    # ── Force-converge policy ────────────────────────────────────────────
+    # After this many dead-lettered child tasks under the same notebook
+    # execution node, the orchestrator stops offering dispatch tools and
+    # requires the model to converge via existing results / failure summary.
+    force_converge_dead_letter_threshold: int = 3

@@ -1012,6 +1012,118 @@ def test_reply_to_user_blocks_when_notebook_has_open_checkpoint() -> None:
     assert "open notebook checkpoints" in result
 
 
+def test_force_converge_filters_dispatch_tools_after_repeated_dead_letters() -> None:
+    contract = build_task_contract(
+        user_input="参考仓库对本地 pdf 技能查漏补缺",
+        chat_key="feishu:c1",
+    )
+    execution_plan = build_execution_plan(contract)
+    context = ExecutionContext(
+        state={
+            "execution_plan": execution_plan,
+            "task_contract": contract,
+            "orchestrator_force_converge": "too many dead-lettered child tasks",
+        }
+    )
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=DummyGateway([]))
+
+    tool_names = [
+        item["function"]["name"]
+        for item in orch._tool_schemas_for_context(context)  # type: ignore[attr-defined]
+    ]
+
+    assert "dispatch_task" not in tool_names
+    assert "dispatch_team" not in tool_names
+    assert "reply_to_user" in tool_names
+    assert "get_task_result" in tool_names
+
+
+def test_force_converge_activates_after_repeated_dead_letters() -> None:
+    context = ExecutionContext()
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(),
+        gateway=DummyGateway([]),
+    )
+    notebook = orch._ensure_plan_notebook("repair pdf skill", context)  # type: ignore[attr-defined]
+    task_map = context.state.setdefault("notebook_task_map", {})
+
+    dead_results: dict[str, TaskResult] = {}
+    for idx in range(3):
+        node = notebook.add_child_node(
+            parent_id=notebook.root_node_id,
+            kind="child_task",
+            title=f"task-{idx}",
+            objective="retry the same failed exploration",
+            owner="subagent",
+            resource_ids=("skill.weather",),
+        )
+        task_id = f"task_{idx}"
+        task_map[task_id] = node.node_id
+        dead_results[task_id] = TaskResult(
+            task_id=task_id,
+            status="failed",
+            error="dead letter",
+            metadata={
+                "resource_id": "skill.weather",
+                "dead_lettered": True,
+            },
+        )
+
+    class RuntimeStub:
+        in_flight: dict[str, Any] = {}
+        results = dead_results
+
+        @staticmethod
+        def task_state_snapshot(task_id: str) -> dict[str, Any]:
+            del task_id
+            return {}
+
+    reason = orch._refresh_force_converge_state(  # type: ignore[attr-defined]
+        runtime=RuntimeStub(),  # type: ignore[arg-type]
+        context=context,
+    )
+
+    assert reason is not None
+    assert "convergence required" in reason
+    assert context.state["orchestrator_force_converge"] == reason
+
+
+def test_dispatch_task_rejected_when_orchestrator_force_converge_is_active() -> None:
+    context = ExecutionContext(
+        state={
+            "orchestrator_force_converge": "too many dead-lettered child tasks",
+        }
+    )
+
+    class RuntimeStub:
+        in_flight: dict[str, Any] = {}
+        results: dict[str, TaskResult] = {}
+
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=DummyGateway([]))
+
+    result = asyncio.run(
+        orch._dispatch_tool(  # type: ignore[attr-defined]
+            ModelToolCall(
+                call_id="dispatch",
+                name="dispatch_task",
+                arguments={
+                    "resource_id": "skill.weather",
+                    "description": "retry the same failed exploration",
+                },
+            ),
+            RuntimeStub(),  # type: ignore[arg-type]
+            context,
+            task_counter=0,
+            scheduler_handoff_created=False,
+            scheduler_dispatch_present_this_turn=False,
+            scheduler_dispatch_seen_before_call=False,
+            prior_live_task_ids_this_turn=(),
+        )
+    )
+
+    assert "convergence required" in result
+
+
 def test_max_steps_fallback() -> None:
     """Model never calls reply_to_user; verify fallback after MAX_STEPS."""
     # Return a no-op tool call every step to exhaust MAX_STEPS
