@@ -342,6 +342,59 @@ def test_resource_bridge_executor_builds_worker_prompt_from_notebook_context() -
     assert result.metadata["received_node_id"] == node.node_id
 
 
+def test_resource_bridge_executor_falls_back_to_root_notebook_node_when_state_is_stale() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    rm = _CapturingResourceManager()
+    bridge = ResourceBridgeExecutor(
+        resource_manager=rm,  # type: ignore[arg-type]
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+    )
+    notebook = create_root_notebook(
+        goal="repair stale notebook state",
+        flow_id="flow-stale-notebook",
+    )
+
+    result = asyncio.run(
+        bridge.execute(
+            task=type(
+                "T",
+                (),
+                {
+                    "task_id": "task-stale-node",
+                    "description": "continue from notebook root",
+                    "lease": type(
+                        "L",
+                        (),
+                        {
+                            "include_groups": (),
+                            "include_tools": (),
+                            "exclude_tools": (),
+                        },
+                    )(),
+                    "metadata": {
+                        "resource_id": "skill.weather",
+                        "skill_ids": [],
+                    },
+                    "deps": (),
+                },
+            )(),
+            context=ExecutionContext(
+                session_id="flow-stale-notebook",
+                state={
+                    "plan_notebook": notebook,
+                    "plan_notebook_id": notebook.notebook_id,
+                    "current_notebook_node_id": "missing-node",
+                },
+            ),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert result.metadata["received_notebook_id"] == notebook.notebook_id
+    assert result.metadata["received_node_id"] == notebook.root_node_id
+
+
 def test_resource_manager_public_subagent_result_api_forwards_notebook_binding() -> None:
     from babybot.agent_kernel.plan_notebook import create_root_notebook
     from babybot.resource import ResourceManager

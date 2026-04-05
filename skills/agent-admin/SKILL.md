@@ -28,5 +28,6 @@ include_groups:
 
 - Scope is limited to assistant profile / identity editing only.
 - Do not use this skill for any skill lifecycle operations (create, install, enable, disable, delete, reload). Use skill-manager for those.
+- If the user asks about skill lifecycle actions such as `reload_skill`, redirect to skill-manager instead of handling it here.
 - Do not edit profile files by hand when `set_assistant_profile` can perform the change safely.
 - Do not invent profile keys or field names.

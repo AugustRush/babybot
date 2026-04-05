@@ -220,6 +220,10 @@ class TeamRunner:
             termination_reason=reason,
         )
 
+    @staticmethod
+    def _format_completed_task_result(task_id: str, output: str) -> str:
+        return f"[DONE] task={task_id}: {str(output or '')[:500]}"
+
     async def run_debate(
         self,
         topic: str,
@@ -456,8 +460,13 @@ class TeamRunner:
                 for dep_tid in claimed.deps:
                     dep_task = task_list._tasks.get(dep_tid)
                     if dep_task and dep_task.status == "completed" and dep_task.output:
-                        dep_snippet = dep_task.output[:300]
-                        dep_line = f"  [dep:{dep_tid}]: {dep_snippet}"
+                        dep_line = (
+                            "  "
+                            + self._format_completed_task_result(
+                                dep_tid,
+                                dep_task.output,
+                            )
+                        )
                         if dep_line not in upstream_parts:
                             upstream_parts.append(dep_line)
                 if upstream_parts:
@@ -523,7 +532,10 @@ class TeamRunner:
                 )
 
                 # Broadcast result to all agents so dependents can use it.
-                broadcast_content = f"[DONE] task={claimed.task_id}: {output[:500]}"
+                broadcast_content = self._format_completed_task_result(
+                    claimed.task_id,
+                    output,
+                )
                 mailbox.broadcast(aid, agent_ids, broadcast_content)
                 msg_entry = {
                     "sender": aid,

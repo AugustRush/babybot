@@ -17,6 +17,7 @@ from .model import (
     ModelToolCall,
 )
 from .plan_notebook import PlanNotebook
+from .runtime_state import RuntimeState
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
 from .types import AgentEvent, ExecutionContext, TaskContract, TaskResult, ToolLease
@@ -190,15 +191,10 @@ class SingleAgentExecutor:
     def _resolve_notebook_binding(
         context: ExecutionContext,
     ) -> tuple[PlanNotebook | None, str]:
-        notebook = context.state.get("plan_notebook")
-        if not isinstance(notebook, PlanNotebook):
+        binding = RuntimeState(context).notebook_binding()
+        if not binding.active:
             return None, ""
-        node_id = str(context.state.get("current_notebook_node_id", "") or "").strip()
-        if not node_id or node_id not in notebook.nodes:
-            node_id = str(notebook.root_node_id or "").strip()
-        if not node_id or node_id not in notebook.nodes:
-            return None, ""
-        return notebook, node_id
+        return binding.notebook, binding.node_id
 
     @classmethod
     def _record_notebook_event(
@@ -262,6 +258,49 @@ class SingleAgentExecutor:
             return normalized
         return normalized[: max(1, limit - 3)].rstrip() + "..."
 
+    @classmethod
+    def _build_auto_converged_summary(
+        cls,
+        *,
+        task: TaskContract,
+        messages: list[ModelMessage],
+    ) -> str:
+        evidence: list[str] = []
+        seen: set[str] = set()
+        for message in reversed(messages):
+            if message.role != "tool":
+                continue
+            content = cls._summarize_notebook_text(message.content, limit=240)
+            if (
+                not content
+                or content.startswith("Tool error:")
+                or "Exploration budget exhausted." in content
+            ):
+                continue
+            line = f"- {message.name or 'tool'}: {content}"
+            if line in seen:
+                continue
+            seen.add(line)
+            evidence.append(line)
+            if len(evidence) >= 3:
+                break
+        evidence.reverse()
+
+        lines = [
+            "探索预算已耗尽，已停止继续读取/搜索/检查。",
+            f"任务：{str(task.description or '').strip() or task.task_id}",
+            "已收集证据：",
+        ]
+        if evidence:
+            lines.extend(evidence)
+        else:
+            lines.append("- 暂无可复用的有效工具结果。")
+        lines.append(
+            "结论：当前子任务未收敛到可直接执行的动作。"
+            "如需继续推进，上层必须改写目标，或切换到编辑、写入、执行类动作。"
+        )
+        return "\n".join(lines)
+
     # ── Main execution loop ──────────────────────────────────────────
 
     async def execute(
@@ -296,7 +335,8 @@ class SingleAgentExecutor:
                 )
             )
 
-        media_paths = context.state.get("media_paths") or ()
+        state_view = RuntimeState(context)
+        media_paths = state_view.media_paths()
         messages.append(
             ModelMessage(
                 role="user",
@@ -337,9 +377,9 @@ class SingleAgentExecutor:
         exploration_finish_required = False
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
-        heartbeat = context.state.get("heartbeat")
-        tape = context.state.get("tape")
-        tape_store = context.state.get("tape_store")
+        heartbeat = state_view.get("heartbeat")
+        tape = state_view.get("tape")
+        tape_store = state_view.get("tape_store")
         notebook, notebook_node_id = self._resolve_notebook_binding(context)
         if notebook is not None and notebook.get_node(notebook_node_id).status == "pending":
             self._transition_notebook_node(
@@ -715,27 +755,42 @@ class SingleAgentExecutor:
                     and forced_finalize_violations
                     and len(forced_finalize_violations) == len(response.tool_calls)
                 ):
-                    error = (
-                        f"No progress after {no_progress_turns} consecutive tool-only turns."
-                        " Exploration budget was exhausted and the model still chose "
-                        "read/search/check tools instead of finishing or taking action."
+                    auto_summary = self._build_auto_converged_summary(
+                        task=task,
+                        messages=messages,
                     )
                     logger.warning(
-                        "Executor no-progress fail task=%s turns=%d mode=forced_finalize_ignored",
+                        "Executor auto-converged task=%s turns=%d mode=forced_finalize_ignored",
                         task.task_id,
                         no_progress_turns,
                     )
+                    self._record_notebook_event(
+                        context,
+                        kind="summary",
+                        summary="探索预算耗尽，自动收敛",
+                        detail=auto_summary,
+                        metadata={
+                            "stage": "auto_converged_summary",
+                            "step": step,
+                            "task_id": task.task_id,
+                            "auto_converged": True,
+                        },
+                        progress=True,
+                    )
                     self._transition_notebook_node(
                         context,
-                        status="failed",
-                        summary="Exploration budget exhausted",
-                        detail=error,
-                        metadata={"task_id": task.task_id},
+                        status="completed",
+                        summary="探索预算耗尽，自动收敛",
+                        detail=auto_summary,
+                        metadata={
+                            "task_id": task.task_id,
+                            "auto_converged": True,
+                        },
                     )
                     result = TaskResult(
                         task_id=task.task_id,
-                        status="failed",
-                        error=error,
+                        status="succeeded",
+                        output=auto_summary,
                         metadata=self._build_usage_metadata(
                             usage_totals,
                             extra={
@@ -746,6 +801,8 @@ class SingleAgentExecutor:
                                 "loop_guard_block_count": loop_guard_block_count,
                                 "max_step_exhausted_count": 0,
                                 "notebook_node_id": notebook_node_id,
+                                "auto_converged": True,
+                                "completion_mode": "auto_summary_after_exploration_stall",
                             },
                         ),
                     )
@@ -753,8 +810,8 @@ class SingleAgentExecutor:
                         context,
                         "agent_end",
                         task_id=task.task_id,
-                        status="failed",
-                        error=error,
+                        status="succeeded",
+                        output_len=len(auto_summary),
                     )
                     return result
 
@@ -765,7 +822,7 @@ class SingleAgentExecutor:
                     def _collect_media(paths: list[str]) -> None:
                         if not paths:
                             return
-                        bucket = context.state.setdefault("media_paths_collected", [])
+                        bucket = state_view.collected_media_bucket()
                         existing = set(bucket)
                         added: list[str] = []
                         for path in paths:
@@ -787,7 +844,7 @@ class SingleAgentExecutor:
                                         },
                                     )
                         if added:
-                            context.state.setdefault("pending_runtime_hints", []).append(
+                            state_view.append_runtime_hint(
                                 "Output artifacts detected:\n"
                                 + "\n".join(f"- {path}" for path in added)
                                 + "\nIf these satisfy the task, stop and return a concise final answer with the exact paths."
@@ -972,7 +1029,7 @@ class SingleAgentExecutor:
                     if exploration_only_turn:
                         warning_turn = max(1, no_progress_limit - 1)
                         if no_progress_limit > 1 and no_progress_turns == warning_turn:
-                            context.state.setdefault("pending_runtime_hints", []).append(
+                            state_view.append_runtime_hint(
                                 "你已经连续 "
                                 f"{no_progress_turns} 轮只使用读取/搜索/检查类工具。"
                                 " 下一轮必须收敛：要么直接给出当前结论/缺口摘要，"
@@ -1038,7 +1095,7 @@ class SingleAgentExecutor:
                 if exploration_only_no_progress and no_progress_turns >= no_progress_limit:
                     if not exploration_finish_required:
                         exploration_finish_required = True
-                        context.state.setdefault("pending_runtime_hints", []).append(
+                        state_view.append_runtime_hint(
                             "探索预算已耗尽。下一轮必须直接给出当前结论/缺口摘要，"
                             "或切换到编辑、写入、执行类工具。不要再调用读取、搜索、检查类工具。"
                         )

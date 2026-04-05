@@ -380,8 +380,8 @@ def test_single_agent_executor_fails_fast_on_exploration_only_turns() -> None:
         )
     )
 
-    assert result.status == "failed"
-    assert "No progress" in result.error
+    assert result.status == "succeeded"
+    assert "探索预算已耗尽" in result.output
     assert tool.calls == 3
     assert model.calls == 4
 
@@ -440,8 +440,8 @@ def test_single_agent_executor_blocks_exploration_tools_once_finalize_is_require
         )
     )
 
-    assert result.status == "failed"
-    assert "No progress" in result.error
+    assert result.status == "succeeded"
+    assert "探索预算已耗尽" in result.output
     assert tool.calls == 3
     assert model.calls == 4
 
@@ -651,8 +651,8 @@ def test_single_agent_executor_blocks_extra_exploration_turn_before_finishing() 
         )
     )
 
-    assert result.status == "failed"
-    assert "No progress" in result.error
+    assert result.status == "succeeded"
+    assert "探索预算已耗尽" in result.output
     assert tool.calls == 3
     assert len(model.requests) == 4
     hard_stop_messages = [
@@ -661,6 +661,69 @@ def test_single_agent_executor_blocks_extra_exploration_turn_before_finishing() 
         if msg.role == "system" and "探索预算已耗尽" in msg.content
     ]
     assert len(hard_stop_messages) == 1
+
+
+def test_single_agent_executor_auto_summarizes_when_finalize_turn_is_ignored() -> (
+    None
+):
+    class ExploringAndIgnoringFinalizeModel(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.calls += 1
+            if any(
+                msg.role == "system" and "探索预算已耗尽" in msg.content
+                for msg in request.messages
+            ):
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id=f"call-{self.calls}",
+                            name="_workspace_view_text_file",
+                            arguments={"file_path": "skills/still_ignoring_hint.md"},
+                        ),
+                    ),
+                )
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=f"call-{self.calls}",
+                        name="_workspace_view_text_file",
+                        arguments={"file_path": f"skills/demo_{self.calls}.md"},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    tool = CountingViewTool()
+    registry.register(tool, group="code")
+    model = ExploringAndIgnoringFinalizeModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="find and repair the local skill"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert "探索预算已耗尽" in result.output
+    assert "已收集证据" in result.output
+    assert result.metadata["auto_converged"] is True
+    assert result.metadata["completion_mode"] == "auto_summary_after_exploration_stall"
+    assert tool.calls == 3
+    assert model.calls == 4
 
 
 def test_single_agent_executor_keeps_shell_action_available_on_finalize_turn() -> None:
@@ -809,8 +872,8 @@ def test_single_agent_executor_still_rejects_read_only_shell_on_finalize_turn() 
         )
     )
 
-    assert result.status == "failed"
-    assert "No progress" in result.error
+    assert result.status == "succeeded"
+    assert "探索预算已耗尽" in result.output
     assert view_tool.calls == 3
     assert shell_tool.calls == 0
 

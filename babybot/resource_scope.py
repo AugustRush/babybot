@@ -5,7 +5,8 @@ import re
 from typing import Any
 
 from .agent_kernel import ToolLease
-from .resource_models import LoadedSkill, ResourceBrief
+from .agent_kernel.lease_utils import lease_to_dict
+from .resource_models import ResourceCapability
 
 logger = logging.getLogger(__name__)
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -61,14 +62,7 @@ class ResourceScopeHelper:
 
     @staticmethod
     def lease_to_dict(lease: ToolLease) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if lease.include_groups:
-            payload["include_groups"] = list(lease.include_groups)
-        if lease.include_tools:
-            payload["include_tools"] = list(lease.include_tools)
-        if lease.exclude_tools:
-            payload["exclude_tools"] = list(lease.exclude_tools)
-        return payload
+        return lease_to_dict(lease)
 
     def preview_tool_names(
         self,
@@ -103,71 +97,100 @@ class ResourceScopeHelper:
             selected.append(registered)
         return selected
 
-    def get_resource_briefs(self) -> list[dict[str, Any]]:
-        briefs: list[ResourceBrief] = []
-        mcp_groups = set(self._owner.mcp_server_groups.values())
-        registry_snapshot = list(self._owner.registry.list())
+    def _tool_names_for_lease(
+        self,
+        lease: ToolLease,
+        *,
+        registry_snapshot: list[Any] | None = None,
+    ) -> tuple[str, ...]:
+        selected = self._filter_registered_tools(
+            list(registry_snapshot or self._owner.registry.list()),
+            lease,
+        )
+        return tuple(sorted(registered.tool.name for registered in selected))
 
-        def _tool_summary(lease: ToolLease) -> tuple[int, tuple[str, ...]]:
-            selected = self._filter_registered_tools(registry_snapshot, lease)
-            names = tuple(sorted(registered.tool.name for registered in selected))
-            return len(names), names[:6]
+    def iter_resource_capabilities(self) -> list[ResourceCapability]:
+        capabilities: list[ResourceCapability] = []
+        mcp_group_names = set(self._owner.mcp_server_groups.values())
+        registry_snapshot = list(self._owner.registry.list())
 
         for server_name, group_name in sorted(self._owner.mcp_server_groups.items()):
             group = self._owner.groups.get(group_name)
-            tool_count, tools_preview = _tool_summary(ToolLease(include_groups=(group_name,)))
-            briefs.append(
-                ResourceBrief(
+            lease = ToolLease(include_groups=(group_name,))
+            tool_names = self._tool_names_for_lease(
+                lease,
+                registry_snapshot=registry_snapshot,
+            )
+            capabilities.append(
+                ResourceCapability(
                     resource_id=self.mcp_resource_id(server_name),
                     resource_type="mcp",
                     name=server_name,
                     purpose=group.description if group else f"MCP tools from {server_name}",
-                    group=group_name,
-                    tool_count=tool_count,
-                    tools_preview=tools_preview,
-                    active=(bool(group.active) if group else True) and tool_count > 0,
+                    lease=lease,
+                    active=(bool(group.active) if group else True) and bool(tool_names),
+                    tool_group=group_name,
+                    tool_names=tool_names,
                 )
             )
 
         for skill in sorted(self._owner.skills.values(), key=lambda item: item.name.lower()):
             if not skill.active:
                 continue
-            skill_lease = skill.lease or ToolLease()
-            has_explicit_scope = bool(
-                skill_lease.include_groups or skill_lease.include_tools
+            lease = skill.lease or ToolLease()
+            has_explicit_scope = bool(lease.include_groups or lease.include_tools)
+            tool_names = (
+                self._tool_names_for_lease(
+                    lease,
+                    registry_snapshot=registry_snapshot,
+                )
+                if has_explicit_scope
+                else ()
             )
-            tool_count, tools_preview = _tool_summary(skill_lease) if has_explicit_scope else (0, ())
-            briefs.append(
-                ResourceBrief(
+            capabilities.append(
+                ResourceCapability(
                     resource_id=self.skill_resource_id(skill),
                     resource_type="skill",
                     name=skill.name,
                     purpose=skill.description or f"Skill: {skill.name}",
-                    group=skill.tool_group,
-                    tool_count=tool_count,
-                    tools_preview=tools_preview if has_explicit_scope else (),
-                    active=skill.active and (tool_count > 0 or not has_explicit_scope),
+                    lease=lease,
+                    active=skill.active and (bool(tool_names) or not has_explicit_scope),
+                    tool_group=skill.tool_group,
+                    tool_names=tool_names,
+                    keywords=tuple(skill.keywords or ()),
+                    phrases=tuple(skill.phrases or ()),
+                    source=skill.source,
                 )
             )
 
         for group_name, group in sorted(self._owner.groups.items()):
-            if group_name.startswith("skill_") or group_name in mcp_groups:
+            if group_name.startswith("skill_") or group_name in mcp_group_names:
                 continue
-            tool_count, tools_preview = _tool_summary(ToolLease(include_groups=(group_name,)))
-            briefs.append(
-                ResourceBrief(
+            lease = ToolLease(include_groups=(group_name,))
+            tool_names = self._tool_names_for_lease(
+                lease,
+                registry_snapshot=registry_snapshot,
+            )
+            capabilities.append(
+                ResourceCapability(
                     resource_id=self.group_resource_id(group_name),
                     resource_type="tool_group",
                     name=group_name,
                     purpose=group.description,
-                    group=group_name,
-                    tool_count=tool_count,
-                    tools_preview=tools_preview,
-                    active=group.active and tool_count > 0,
+                    lease=lease,
+                    active=group.active and bool(tool_names),
+                    tool_group=group_name,
+                    tool_names=tool_names,
                 )
             )
 
-        return [brief.to_dict() for brief in briefs]
+        return capabilities
+
+    def get_resource_briefs(self) -> list[dict[str, Any]]:
+        return [
+            capability.to_brief().to_dict()
+            for capability in self.iter_resource_capabilities()
+        ]
 
     def resolve_resource_scope(
         self,
@@ -178,28 +201,17 @@ class ResourceScopeHelper:
         if not normalized:
             return None
 
-        for skill in self._owner.skills.values():
-            if not skill.active:
+        for capability in self.iter_resource_capabilities():
+            if normalized != capability.resource_id.lower():
                 continue
-            if normalized == self.skill_resource_id(skill):
-                lease = skill.lease or ToolLease()
-                if require_tools and not self._owner.registry.list(lease):
-                    return None
-                return self.lease_to_dict(lease), (skill.name.strip().lower(),)
-
-        for server_name, group_name in self._owner.mcp_server_groups.items():
-            if normalized == self.mcp_resource_id(server_name):
-                lease = ToolLease(include_groups=(group_name,))
-                if require_tools and not self._owner.registry.list(lease):
-                    return None
-                return self.lease_to_dict(lease), ()
-
-        for group_name in self._owner.groups:
-            if normalized == self.group_resource_id(group_name):
-                lease = ToolLease(include_groups=(group_name,))
-                if require_tools and not self._owner.registry.list(lease):
-                    return None
-                return self.lease_to_dict(lease), ()
+            if require_tools and not self._owner.registry.list(capability.lease):
+                return None
+            skill_ids = (
+                (capability.name.strip().lower(),)
+                if capability.resource_type == "skill"
+                else ()
+            )
+            return self.lease_to_dict(capability.lease), skill_ids
 
         return None
 
@@ -342,83 +354,26 @@ class ResourceScopeHelper:
         require_network = self._query_requires_network(normalized_query)
         matches: list[dict[str, Any]] = []
 
-        for skill in sorted(self._owner.skills.values(), key=lambda item: item.name.lower()):
-            if not skill.active:
+        for capability in self.iter_resource_capabilities():
+            if not capability.active:
                 continue
-            resource_id = self.skill_resource_id(skill)
             score, reasons = self._score_text_match(
                 query=semantic_query,
                 query_terms=query_terms,
-                resource_id=resource_id,
-                name=skill.name,
-                keywords=tuple(skill.keywords or ()),
-                phrases=tuple(skill.phrases or ()),
+                resource_id=capability.resource_id,
+                name=capability.name,
+                keywords=capability.keywords,
+                phrases=capability.phrases,
                 fallback_text=(
-                    skill.name,
-                    skill.description,
-                    skill.prompt,
+                    capability.name,
+                    capability.purpose,
+                    *capability.tool_names,
                 ),
             )
-            if score <= 0:
-                continue
-            matches.append(
-                {
-                    "resource_id": resource_id,
-                    "resource_type": "skill",
-                    "name": skill.name,
-                    "score": score,
-                    "role": "primary",
-                    "reasons": reasons,
-                }
-            )
-
-        for server_name, group_name in sorted(self._owner.mcp_server_groups.items()):
-            group = self._owner.groups.get(group_name)
-            description = (
-                group.description if group is not None else f"MCP tools from {server_name}"
-            )
-            resource_id = self.mcp_resource_id(server_name)
-            score, reasons = self._score_text_match(
-                query=semantic_query,
-                query_terms=query_terms,
-                resource_id=resource_id,
-                name=server_name,
-                fallback_text=(server_name, description),
-            )
-            if score <= 0:
-                continue
-            matches.append(
-                {
-                    "resource_id": resource_id,
-                    "resource_type": "mcp",
-                    "name": server_name,
-                    "score": score,
-                    "role": "primary",
-                    "reasons": reasons,
-                }
-            )
-
-        for group_name, group in sorted(self._owner.groups.items()):
-            if not group.active or group_name.startswith("skill_") or group_name in set(
-                self._owner.mcp_server_groups.values()
-            ):
-                continue
-            lease = ToolLease(include_groups=(group_name,))
-            tool_names = tuple(
-                sorted(registered.tool.name for registered in self._owner.registry.list(lease))
-            )
-            resource_id = self.group_resource_id(group_name)
-            score, reasons = self._score_text_match(
-                query=semantic_query,
-                query_terms=query_terms,
-                resource_id=resource_id,
-                name=group_name,
-                fallback_text=(group_name, group.description, *tool_names),
-            )
             if require_network and self._resource_looks_network_capable(
-                name=group_name,
-                description=group.description,
-                tool_names=tool_names,
+                name=capability.name,
+                description=capability.purpose,
+                tool_names=capability.tool_names,
             ):
                 score += 60
                 reasons.append("capability:network")
@@ -426,11 +381,15 @@ class ResourceScopeHelper:
                 continue
             matches.append(
                 {
-                    "resource_id": resource_id,
-                    "resource_type": "tool_group",
-                    "name": group_name,
+                    "resource_id": capability.resource_id,
+                    "resource_type": capability.resource_type,
+                    "name": capability.name,
                     "score": score,
-                    "role": "supporting",
+                    "role": (
+                        "primary"
+                        if capability.resource_type in {"skill", "mcp"}
+                        else "supporting"
+                    ),
                     "reasons": reasons,
                 }
             )

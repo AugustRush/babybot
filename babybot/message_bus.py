@@ -64,6 +64,23 @@ def _runtime_event_job_id(events: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _channel_streaming_enabled(channel: Any) -> bool:
+    if channel is None:
+        return False
+    declared = getattr(channel, "supports_streaming", None)
+    if isinstance(declared, bool):
+        return declared
+    if callable(declared):
+        try:
+            return bool(declared())
+        except Exception:
+            return False
+    config = getattr(channel, "config", None)
+    return bool(
+        getattr(config, "streaming", False) or getattr(config, "stream_reply", False)
+    )
+
+
 @dataclass
 class MessageEnvelope:
     """Wrapper around an inbound message with tracking metadata."""
@@ -388,7 +405,7 @@ class MessageBus:
         stream_enabled = bool(
             channel
             and not is_scheduled
-            and getattr(channel, "supports_streaming", False)
+            and _channel_streaming_enabled(channel)
             and _can_create_card
             and _can_patch_card
         )
@@ -430,7 +447,11 @@ class MessageBus:
         _stage_tasks: set[asyncio.Task[None]] = set()
         _has_stage_messages: bool = False
 
-        async def _send_intermediate_message(text: str) -> None:
+        async def _send_intermediate_message(
+            text: str,
+            *,
+            message_format: str | None = None,
+        ) -> None:
             """Send an independent message card (not patching the stream card)."""
             nonlocal _has_stage_messages
             if not text or not text.strip() or channel is None:
@@ -441,7 +462,9 @@ class MessageBus:
                     "sender_id": msg.sender_id,
                     "metadata": msg.metadata,
                 }
-                if bool(
+                if message_format:
+                    send_kwargs["message_format"] = message_format
+                elif bool(
                     getattr(self._config.system, "debug_runtime_feedback", False)
                 ) and text.strip().startswith("调试："):
                     send_kwargs["message_format"] = "post"
@@ -461,7 +484,7 @@ class MessageBus:
         async def _schedule_stage_message(text: str) -> None:
             """Fire-and-forget a stage result message, tracked for later await."""
             task: asyncio.Task[None] = asyncio.create_task(
-                _send_intermediate_message(text)
+                _send_intermediate_message(text, message_format="post")
             )
             _stage_tasks.add(task)
             task.add_done_callback(_stage_tasks.discard)
@@ -476,10 +499,6 @@ class MessageBus:
             None
         )
         last_runtime_progress_text_by_scope: dict[tuple[str, str, str, str], str] = {}
-        # Single progress message id: created once, patched on subsequent updates.
-        # Reuse the lifecycle card created at ACK time when available.
-        progress_message_id: str | None = lifecycle_card_id
-        progress_lock = asyncio.Lock()
         progress_spinner_counter: int = 1  # Start at 1; 0 was used for the ACK.
 
         # Animation state — shared between the event callback and the ticker.
@@ -490,74 +509,59 @@ class MessageBus:
         _animation_done = asyncio.Event()
         _ANIMATION_INTERVAL_S = 3.0
 
-        async def _patch_progress(text: str) -> None:
-            """Patch the progress card or fall back to send_response."""
-            nonlocal progress_message_id, progress_spinner_counter
+        def _runtime_stage_text(event_payload: dict[str, Any]) -> str:
+            normalized_event = normalize_runtime_feedback_event(event_payload)
+            event_name = str(event_payload.get("event", "") or "").strip().lower()
+            raw_payload = event_payload.get("payload") or {}
+            description = str(raw_payload.get("description", "") or "").strip()
+            label = description or normalized_event.message or "执行中"
+
+            if normalized_event.stage == "interactive_session" and msg.channel != "feishu":
+                return ""
+
+            if normalized_event.state in {"queued", "planning", "running"}:
+                suffix = ""
+                if isinstance(normalized_event.progress, (int, float)):
+                    suffix = f" ({int(float(normalized_event.progress) * 100)}%)"
+                return f"处理中：{label}{suffix}"
+
+            if normalized_event.state == "completed":
+                if normalized_event.stage == "task":
+                    return f"阶段完成：{label}"
+                return f"阶段完成：{label}" if label else "阶段完成"
+
+            if normalized_event.state == "failed":
+                if normalized_event.error:
+                    return f"阶段失败：{label}\n原因：{normalized_event.error}"
+                return f"阶段失败：{label}"
+
+            if normalized_event.state == "cancelled":
+                return f"已取消：{label}"
+
+            return ""
+
+        async def _send_progress(text: str) -> None:
+            """Send progress as an independent post message."""
             if not text or channel is None:
                 return
             try:
-                async with progress_lock:
-                    can_patch = progress_message_id is not None and _can_patch_card
-                    if can_patch:
-                        patched = await channel.patch_stream_message(  # type: ignore[attr-defined]
-                            progress_message_id, text
-                        )
-                        if patched:
-                            return
-                        logger.warning(
-                            "Progress card patch failed, will send new message "
-                            "channel=%s message_id=%s",
-                            msg.channel,
-                            progress_message_id,
-                        )
-                        progress_message_id = None
-                    if _can_create_card:
-                        new_id = await channel.create_stream_message(  # type: ignore[attr-defined]
-                            msg.chat_id,
-                            text,
-                            sender_id=msg.sender_id,
-                            metadata=msg.metadata,
-                        )
-                        if new_id:
-                            progress_message_id = new_id
-                            return
-                    await channel.send_response(
-                        msg.chat_id,
-                        TaskResponse(text=text),
-                        sender_id=msg.sender_id,
-                        metadata=msg.metadata,
-                        message_format="post",
-                    )
+                await channel.send_response(
+                    msg.chat_id,
+                    TaskResponse(text=text),
+                    sender_id=msg.sender_id,
+                    metadata=msg.metadata,
+                    message_format="post",
+                )
             except Exception:
                 logger.warning(
-                    "Failed to patch progress channel=%s chat_id=%s",
+                    "Failed to send progress channel=%s chat_id=%s",
                     msg.channel,
                     msg.chat_id,
                     exc_info=True,
                 )
 
-        async def _animation_ticker() -> None:
-            """Periodically rotate the spinner on the progress card while tasks run."""
-            nonlocal progress_spinner_counter, _active_task_label
-            while not _animation_done.is_set():
-                try:
-                    await asyncio.wait_for(
-                        _animation_done.wait(),
-                        timeout=_ANIMATION_INTERVAL_S,
-                    )
-                except asyncio.TimeoutError:
-                    pass
-                if _animation_done.is_set():
-                    break
-                label = _active_task_label
-                if not label or progress_message_id is None:
-                    continue
-                spinner = progress_spinner(progress_spinner_counter)
-                progress_spinner_counter += 1
-                await _patch_progress(f"{spinner} {label}…")
-
         async def _runtime_event_callback(event: Any) -> None:
-            nonlocal stream_detached, last_runtime_progress_key, progress_message_id
+            nonlocal stream_detached, last_runtime_progress_key
             nonlocal progress_spinner_counter, _active_task_label
             payload = _event_to_payload(event)
             runtime_events.append(payload)
@@ -582,10 +586,7 @@ class MessageBus:
             if normalized_event.state in {"completed", "failed", "cancelled"}:
                 _animation_done.set()
 
-            progress_text = render_runtime_feedback_event(
-                normalized_event,
-                spinner_counter=progress_spinner_counter,
-            )
+            progress_text = _runtime_stage_text(payload)
             if not progress_text or channel is None:
                 return
             progress_key = feedback_dedupe_key(normalized_event)
@@ -607,11 +608,6 @@ class MessageBus:
                 and normalized_event.state in {"running", "completed", "failed"}
             ):
                 stream_detached = True
-            if (
-                normalized_event.stage == "interactive_session"
-                and msg.channel != "feishu"
-            ):
-                return
             # For terminal subtask events that carry output or an error,
             # schedule a separate stage result message (fire-and-forget, tracked).
             # Using _schedule_stage_message ensures these tasks are awaited
@@ -622,10 +618,11 @@ class MessageBus:
                 normalized_event.state in {"completed", "failed"}
                 and normalized_event.stage == "task"
             ):
-                stage_text = render_stage_result(normalized_event)
+                stage_text = progress_text
                 if stage_text:
                     await _schedule_stage_message(stage_text)
-            await _patch_progress(progress_text)
+                return
+            await _send_progress(progress_text)
 
         async def _interactive_output_callback(event: Any) -> None:
             nonlocal interactive_last_sent_text, interactive_sent_partial
@@ -695,10 +692,7 @@ class MessageBus:
             if self._supports_intermediate_message:
                 process_kwargs["send_intermediate_message"] = _send_intermediate_message
 
-        # Start the animation ticker only when the channel supports card patching.
         ticker_task: asyncio.Task[None] | None = None
-        if _can_patch_card and not is_scheduled:
-            ticker_task = asyncio.create_task(_animation_ticker())
 
         try:
             response = await heartbeat.watch(

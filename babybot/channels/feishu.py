@@ -336,7 +336,10 @@ class FeishuChannel(BaseChannel):
     @property
     def supports_streaming(self) -> bool:
         """Return True when streaming replies are enabled in Feishu config."""
-        return bool(getattr(self.config, "streaming", False))
+        return bool(
+            getattr(self.config, "streaming", False)
+            or getattr(self.config, "stream_reply", False)
+        )
 
     # ── Lifecycle ────────────────────────────────────────────────────
 

@@ -391,7 +391,10 @@ class CronScheduler:
             if task.run_at is not None:
                 # Use the structured is_error flag; fall back to text inspection for
                 # older TaskResponse objects that may not have the attribute.
-                response_is_error = getattr(response, "is_error", False)
+                raw_is_error = getattr(response, "is_error", False)
+                response_is_error = (
+                    raw_is_error if isinstance(raw_is_error, bool) else False
+                )
                 if not response_is_error:
                     self._one_shot_attempts.pop(task.name, None)
                     self._mark_one_shot_completed(task.name)

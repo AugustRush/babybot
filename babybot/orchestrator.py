@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from .agent_kernel import ExecutionContext
+from .agent_kernel import ExecutionContext, RuntimeState
 from .agent_kernel.plan_notebook import PlanNotebook
 from .agent_kernel.plan_notebook_store import PlanNotebookStore
 from .agent_kernel.dynamic_orchestrator import (
@@ -315,8 +315,8 @@ class OrchestratorAgent:
         context: ExecutionContext,
         final_text: str,
     ) -> None:
-        notebook = context.state.get("plan_notebook")
-        if not isinstance(notebook, PlanNotebook):
+        notebook = RuntimeState(context).notebook_binding().notebook
+        if notebook is None:
             return
         completion_summary = self._build_notebook_completion_summary(
             notebook,
@@ -1553,7 +1553,7 @@ class OrchestratorAgent:
             context=context,
             final_text=text,
         )
-        collected_media = context.state.get("media_paths_collected", [])
+        collected_media = RuntimeState(context).collected_media_bucket()
         dedup_media = sorted(set(collected_media))
 
         return text, dedup_media

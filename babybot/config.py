@@ -114,6 +114,12 @@ class FeishuConfig:
     react_emoji: str = "THUMBSUP"
     media_dir: str = ""
     streaming: bool = False
+    stream_reply: bool = False
+
+    def __post_init__(self) -> None:
+        # Backward compatibility: older callers/tests still use stream_reply.
+        if self.stream_reply and not self.streaming:
+            self.streaming = True
 
     def validate(self) -> None:
         """Validate Feishu configuration when enabled."""

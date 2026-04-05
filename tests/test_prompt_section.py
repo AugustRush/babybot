@@ -6,9 +6,15 @@ from __future__ import annotations
 from babybot.agent_kernel import (
     ExecutionContext,
     OrchestratorState,
+    RuntimeState,
     SystemPromptBuilder,
     SystemPromptSection,
     WorkerState,
+)
+from babybot.agent_kernel.prompt_assembly import (
+    add_list_section,
+    add_text_section,
+    dedupe_prompt_items,
 )
 from babybot.resource_skill_runtime import (
     _EXECUTION_RULES,
@@ -121,6 +127,68 @@ def test_worker_state_missing_key_returns_none_via_get() -> None:
     ws: WorkerState = ctx.worker_state
     assert ws.get("tape") is None
     assert ws.get("max_model_tokens", 0) == 0
+
+
+def test_runtime_state_centralizes_media_and_runtime_hints() -> None:
+    ctx = ExecutionContext(
+        session_id="runtime-state",
+        state={"media_paths": ["a.png", "b.png"]},
+    )
+
+    runtime = RuntimeState(ctx)
+    assert runtime.media_paths() == ("a.png", "b.png")
+
+    runtime.append_runtime_hint("first")
+    runtime.append_runtime_hint("second")
+
+    assert ctx.state["pending_runtime_hints"] == ["first", "second"]
+
+
+def test_runtime_state_notebook_binding_falls_back_to_root_node() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    notebook = create_root_notebook(goal="repair runtime state", flow_id="flow-runtime")
+    ctx = ExecutionContext(
+        session_id="runtime-notebook",
+        state={
+            "plan_notebook": notebook,
+            "current_notebook_node_id": "missing-node",
+        },
+    )
+
+    binding = RuntimeState(ctx).notebook_binding()
+
+    assert binding.active is True
+    assert binding.notebook is notebook
+    assert binding.node_id == notebook.root_node_id
+
+
+def test_dedupe_prompt_items_filters_blanks_and_caps_result() -> None:
+    assert dedupe_prompt_items(
+        [" alpha ", "", "alpha", "beta", "  ", "gamma"],
+        limit=2,
+    ) == ["alpha", "beta"]
+
+
+def test_prompt_assembly_helpers_build_consistent_sections() -> None:
+    builder = SystemPromptBuilder()
+
+    add_text_section(
+        builder,
+        "catalog",
+        "worker-a, worker-b",
+        priority=10,
+        header="Catalog:\n",
+    )
+    add_list_section(
+        builder,
+        "hints",
+        [" first ", "first", "second"],
+        priority=20,
+        header="Hints:\n",
+    )
+
+    assert builder.build() == "Catalog:\nworker-a, worker-b\nHints:\n- first\n- second"
 
 
 # ── Task-class classification ─────────────────────────────────────────────

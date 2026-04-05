@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from .executor import _build_history_messages
 from .model import ModelMessage
-from .plan_notebook import PlanNotebook
 from .plan_notebook_context import build_worker_context_view
+from .runtime_state import RuntimeState
 from .types import (
     ExecutionContext,
     TaskContract,
@@ -161,16 +161,18 @@ class ResourceBridgeExecutor:
     async def execute(
         self, task: TaskContract, context: ExecutionContext
     ) -> TaskResult:
+        state_view = RuntimeState(context)
+
         # Fast path: direct answer (no tools)
         if task.metadata.get("direct_answer"):
             goal = task.description
-            heartbeat = context.state.get("heartbeat")
-            media_paths = context.state.get("media_paths") or ()
-            stream_callback = context.state.get("stream_callback")
-            tape = context.state.get("tape")
-            tape_store = context.state.get("tape_store")
-            memory_store = context.state.get("memory_store")
-            history_budget = context.state.get("context_history_tokens", 2000)
+            heartbeat = state_view.get("heartbeat")
+            media_paths = state_view.media_paths()
+            stream_callback = state_view.get("stream_callback")
+            tape = state_view.get("tape")
+            tape_store = state_view.get("tape_store")
+            memory_store = state_view.get("memory_store")
+            history_budget = state_view.get("context_history_tokens", 2000)
 
             base_prompt = (
                 "You are a helpful assistant. Answer concisely and accurately. "
@@ -242,11 +244,11 @@ class ResourceBridgeExecutor:
         # Enrich task description with upstream results
         enriched = self._enrich_with_upstream(task, context)
 
-        tape = context.state.get("tape")
-        tape_store = context.state.get("tape_store")
-        memory_store = context.state.get("memory_store")
-        heartbeat = context.state.get("heartbeat")
-        media_paths = context.state.get("media_paths")
+        tape = state_view.get("tape")
+        tape_store = state_view.get("tape_store")
+        memory_store = state_view.get("memory_store")
+        heartbeat = state_view.get("heartbeat")
+        media_paths = list(state_view.media_paths())
 
         run_subagent_task = self._rm.run_subagent_task
         run_subagent_task_result = getattr(self._rm, "run_subagent_task_result", None)
@@ -264,12 +266,11 @@ class ResourceBridgeExecutor:
             run_subagent_task, "memory_store"
         ):
             kwargs["memory_store"] = memory_store
-        notebook = context.state.get("plan_notebook")
-        notebook_node_id = str(
-            task.metadata.get("notebook_node_id")
-            or context.state.get("current_notebook_node_id", "")
-            or ""
-        ).strip()
+        notebook_binding = state_view.notebook_binding(
+            str(task.metadata.get("notebook_node_id") or "").strip()
+        )
+        notebook = notebook_binding.notebook
+        notebook_node_id = notebook_binding.node_id
 
         if callable(run_subagent_task_result):
             detailed_kwargs = dict(kwargs)
@@ -277,7 +278,7 @@ class ResourceBridgeExecutor:
                 run_subagent_task_result, "memory_store"
             ):
                 detailed_kwargs.pop("memory_store", None)
-            if isinstance(notebook, PlanNotebook) and _supports_kwarg(
+            if notebook is not None and _supports_kwarg(
                 run_subagent_task_result,
                 "plan_notebook",
             ):
@@ -298,10 +299,10 @@ class ResourceBridgeExecutor:
 
             artifacts = tuple(detailed_result.artifacts or ())
             if detailed_result.status == "succeeded":
-                context.state.setdefault("upstream_results", {})[task.task_id] = (
+                state_view.upstream_results_bucket()[task.task_id] = (
                     detailed_result.output
                 )
-            context.state.setdefault("media_paths_collected", []).extend(artifacts)
+            state_view.extend_collected_media(artifacts)
             return TaskResult(
                 task_id=task.task_id,
                 status=detailed_result.status,
@@ -313,7 +314,7 @@ class ResourceBridgeExecutor:
             )
 
         try:
-            if isinstance(notebook, PlanNotebook) and _supports_kwarg(
+            if notebook is not None and _supports_kwarg(
                 run_subagent_task,
                 "plan_notebook",
             ):
@@ -332,8 +333,8 @@ class ResourceBridgeExecutor:
             )
 
         # Store result for downstream tasks
-        context.state.setdefault("upstream_results", {})[task.task_id] = output
-        context.state.setdefault("media_paths_collected", []).extend(media or [])
+        state_view.upstream_results_bucket()[task.task_id] = output
+        state_view.extend_collected_media(media or ())
 
         return TaskResult(
             task_id=task.task_id,
@@ -345,28 +346,22 @@ class ResourceBridgeExecutor:
     @staticmethod
     def _enrich_with_upstream(task: TaskContract, context: ExecutionContext) -> str:
         """Append runtime context needed by downstream tasks."""
-        notebook = context.state.get("plan_notebook")
-        notebook_node_id = str(
-            task.metadata.get("notebook_node_id")
-            or context.state.get("current_notebook_node_id", "")
-            or ""
-        ).strip()
-        notebook_bound = (
-            isinstance(notebook, PlanNotebook)
-            and notebook_node_id
-            and notebook_node_id in notebook.nodes
+        state_view = RuntimeState(context)
+        notebook_binding = state_view.notebook_binding(
+            str(task.metadata.get("notebook_node_id") or "").strip()
         )
-        notebook_task_map = context.state.get("notebook_task_map", {})
-        upstream = task.metadata.get("upstream_results") or context.state.get(
-            "upstream_results", {}
-        )
-        original_goal = str(context.state.get("original_goal", "") or "").strip()
+        notebook = notebook_binding.notebook
+        notebook_node_id = notebook_binding.node_id
+        notebook_bound = notebook_binding.active
+        notebook_task_map = state_view.notebook_task_map()
+        upstream = task.metadata.get("upstream_results") or state_view.upstream_results_bucket()
+        original_goal = str(state_view.get("original_goal", "") or "").strip()
         original_request_header = str(
-            context.state.get("original_request_header", "--- original_request ---")
+            state_view.get("original_request_header", "--- original_request ---")
             or "--- original_request ---"
         ).strip()
         upstream_results_header = str(
-            context.state.get("upstream_results_header", "--- upstream_results ---")
+            state_view.get("upstream_results_header", "--- upstream_results ---")
             or "--- upstream_results ---"
         ).strip()
         parts = [task.description]
@@ -399,7 +394,7 @@ class ResourceBridgeExecutor:
             enriched = enriched or dep_enriched
 
         if notebook_bound:
-            token_budget = int(context.state.get("notebook_context_budget", 2200) or 2200)
+            token_budget = state_view.notebook_context_budget(default=2200)
             view = build_worker_context_view(
                 notebook,
                 notebook_node_id,

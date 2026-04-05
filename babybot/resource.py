@@ -22,7 +22,6 @@ from typing import (
 from .agent_kernel import (
     SkillPack,
     TaskResult,
-    register_mcp_tools,
     ToolLease,
     ToolRegistry,
     ToolResult,
@@ -42,8 +41,6 @@ from .builtin_tools.workers import (
 from .config import Config
 from .mcp_runtime import (
     BaseMCPRuntimeClient,
-    HttpMCPRuntimeClient,
-    StdioMCPRuntimeClient,
     close_clients_best_effort,
 )
 from .resource_models import (
@@ -54,18 +51,16 @@ from .resource_models import (
     SkillRuntimeConfig,
     ToolGroup,
 )
+from .resource_admin import ResourceAdminHelper
+from .resource_mcp import ResourceMCPHelper
 from .resource_python_runner import ExternalPythonRunner
 from .resource_skill_runtime import ResourceSkillRuntime
 from .resource_scope import ResourceScopeHelper
 from .resource_subagent_runtime import ResourceSubagentRuntime
 from .resource_tool_loader import ResourceToolLoader
-from .resource_workspace_tools import (
-    WorkspaceToolSuite,
-    check_shell_safety as _check_shell_safety,
-)
+from .resource_workspace_tools import WorkspaceToolSuite, check_shell_safety as _check_shell_safety
 from .resource_skill_loader import SkillLoader
 from .worker import create_worker_executor
-from .context_views import build_context_view
 
 logger = logging.getLogger(__name__)
 _CURRENT_CALLABLE_TOOL_WRITE_ROOT: contextvars.ContextVar[str | None] = (
@@ -538,48 +533,18 @@ class ResourceManager:
     def _skill_runtime_view(self) -> ResourceSkillRuntime:
         return self._lazy("_skill_runtime", lambda: ResourceSkillRuntime(self))
 
+    def _admin_view(self) -> ResourceAdminHelper:
+        return self._lazy("_resource_admin", lambda: ResourceAdminHelper(self))
+
+    def _mcp_view(self) -> ResourceMCPHelper:
+        return self._lazy("_resource_mcp", lambda: ResourceMCPHelper(self))
+
     @staticmethod
     def _callable_tool_cls() -> type[CallableTool]:
         return CallableTool
 
     async def _register_mcp_servers(self, mcp_servers: dict[str, dict]) -> None:
-        for name, server_conf in mcp_servers.items():
-            try:
-                mcp_type = server_conf.get("type", "http")
-                group_name = server_conf.get("group_name", name)
-                if mcp_type == "stdio":
-                    command, args, cwd, env = self._prepare_mcp_stdio_launch(
-                        name=name,
-                        command=server_conf["command"],
-                        args=server_conf.get("args", []),
-                        server_conf=server_conf,
-                    )
-                    await self.register_mcp_stdio(
-                        name=name,
-                        command=command,
-                        args=args,
-                        cwd=cwd,
-                        env=env,
-                        group_name=group_name,
-                    )
-                else:
-                    transport = server_conf.get("transport", "streamable_http")
-                    url, headers = self._prepare_mcp_http_launch(
-                        name=name,
-                        url=server_conf["url"],
-                        server_conf=server_conf,
-                    )
-                    await self.register_mcp(
-                        name=name,
-                        url=url,
-                        headers=headers,
-                        transport=transport,
-                        group_name=group_name,
-                    )
-                if server_conf.get("active", False):
-                    self.activate_groups([group_name])
-            except Exception as exc:
-                logger.warning("Failed to register MCP server %s: %s", name, exc)
+        await self._mcp_view().register_mcp_servers(mcp_servers)
 
     async def register_mcp(
         self,
@@ -589,24 +554,13 @@ class ResourceManager:
         transport: str = "streamable_http",
         group_name: str = "mcp",
     ) -> None:
-        if transport not in {"streamable_http", "http"}:
-            logger.warning(
-                "MCP transport '%s' is not supported yet for '%s'.",
-                transport,
-                name,
-            )
-            return
-        client = HttpMCPRuntimeClient(url=url, headers=headers)
-        await client.connect()
-        self.mcp_clients[name] = client
-        self.mcp_server_groups[name] = group_name
-        if group_name not in self.groups:
-            self.groups[group_name] = ToolGroup(
-                name=group_name,
-                description=f"MCP tools from {name}",
-                active=False,
-            )
-        await register_mcp_tools(self.registry, client, group=group_name)
+        await self._mcp_view().register_mcp(
+            name=name,
+            url=url,
+            headers=headers,
+            transport=transport,
+            group_name=group_name,
+        )
 
     async def register_mcp_stdio(
         self,
@@ -617,17 +571,14 @@ class ResourceManager:
         env: dict[str, str] | None = None,
         group_name: str = "mcp",
     ) -> None:
-        client = StdioMCPRuntimeClient(command=command, args=args, cwd=cwd, env=env)
-        await client.connect()
-        self.mcp_clients[name] = client
-        self.mcp_server_groups[name] = group_name
-        if group_name not in self.groups:
-            self.groups[group_name] = ToolGroup(
-                name=group_name,
-                description=f"MCP tools from {name}",
-                active=False,
-            )
-        await register_mcp_tools(self.registry, client, group=group_name)
+        await self._mcp_view().register_mcp_stdio(
+            name=name,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            group_name=group_name,
+        )
 
     def _prepare_mcp_stdio_launch(
         self,
@@ -636,13 +587,12 @@ class ResourceManager:
         args: list[str],
         server_conf: dict[str, Any],
     ) -> tuple[str, list[str], str | None, dict[str, str] | None]:
-        defaults = self._build_mcp_stdio_env(name)
-        env = self._normalize_stdio_mcp_env(server_conf.get("env"), defaults=defaults)
-        cwd = self._normalize_stdio_mcp_path(server_conf.get("cwd"))
-        if cwd is None:
-            cwd = env["BABYBOT_MCP_ARTIFACT_ROOT"]
-        Path(cwd).mkdir(parents=True, exist_ok=True)
-        return command, list(args), cwd, env or None
+        return self._mcp_view().prepare_mcp_stdio_launch(
+            name=name,
+            command=command,
+            args=args,
+            server_conf=server_conf,
+        )
 
     def _normalize_stdio_mcp_env(
         self,
@@ -650,14 +600,10 @@ class ResourceManager:
         *,
         defaults: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        normalized: dict[str, str] = dict(defaults or {})
-        if not isinstance(raw_env, dict):
-            return normalized
-        for key, value in raw_env.items():
-            if value is None:
-                continue
-            normalized[str(key)] = self._normalize_mcp_mapping_value(str(key), value)
-        return normalized
+        return self._mcp_view().normalize_stdio_mcp_env(
+            raw_env,
+            defaults=defaults,
+        )
 
     def _prepare_mcp_http_launch(
         self,
@@ -665,18 +611,15 @@ class ResourceManager:
         url: str,
         server_conf: dict[str, Any],
     ) -> tuple[str, dict[str, str] | None]:
-        headers = self._normalize_http_mcp_headers(
-            server_conf.get("headers"),
-            defaults=self._build_mcp_http_headers(name),
+        return self._mcp_view().prepare_mcp_http_launch(
+            name=name,
+            url=url,
+            server_conf=server_conf,
         )
-        return url, headers or None
 
     @staticmethod
     def _normalize_stdio_mcp_path(value: Any) -> str | None:
-        if value in (None, ""):
-            return None
-        text = os.path.expandvars(str(value))
-        return str(Path(text).expanduser().resolve())
+        return ResourceMCPHelper.normalize_stdio_mcp_path(value)
 
     def _normalize_http_mcp_headers(
         self,
@@ -684,57 +627,30 @@ class ResourceManager:
         *,
         defaults: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        normalized: dict[str, str] = dict(defaults or {})
-        if not isinstance(raw_headers, dict):
-            return normalized
-        for key, value in raw_headers.items():
-            if value is None:
-                continue
-            normalized[str(key)] = self._normalize_mcp_mapping_value(str(key), value)
-        return normalized
+        return self._mcp_view().normalize_http_mcp_headers(
+            raw_headers,
+            defaults=defaults,
+        )
 
     def _build_mcp_stdio_env(self, name: str) -> dict[str, str]:
-        metadata = self._build_mcp_runtime_metadata(name)
-        return {
-            "BABYBOT_MCP_SERVER_NAME": metadata["server_name"],
-            "BABYBOT_MCP_WORKSPACE_ROOT": metadata["workspace_root"],
-            "BABYBOT_MCP_ARTIFACT_ROOT": metadata["artifact_root"],
-        }
+        return self._mcp_view().build_mcp_stdio_env(name)
 
     def _build_mcp_http_headers(self, name: str) -> dict[str, str]:
-        metadata = self._build_mcp_runtime_metadata(name)
-        return {
-            "X-Babybot-Mcp-Server": metadata["server_name"],
-            "X-Babybot-Workspace-Root": metadata["workspace_root"],
-            "X-Babybot-Artifact-Root": metadata["artifact_root"],
-        }
+        return self._mcp_view().build_mcp_http_headers(name)
 
     def _build_mcp_runtime_metadata(self, name: str) -> dict[str, str]:
-        workspace_root = str(self.config.workspace_dir.resolve())
-        artifact_root = str(self._get_mcp_artifact_root(name))
-        return {
-            "server_name": name,
-            "workspace_root": workspace_root,
-            "artifact_root": artifact_root,
-        }
+        return self._mcp_view().build_mcp_runtime_metadata(name)
 
     def _get_mcp_artifact_root(self, name: str) -> Path:
-        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", name.strip()) or "mcp"
-        root = self._get_output_dir() / "mcp" / safe_name
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        return self._mcp_view().get_mcp_artifact_root(name)
 
     @staticmethod
     def _normalize_mcp_mapping_value(key: str, value: Any) -> str:
-        text = os.path.expandvars(str(value))
-        if ResourceManager._is_path_like_mcp_key(key):
-            return str(Path(text).expanduser().resolve())
-        return text
+        return ResourceMCPHelper.normalize_mcp_mapping_value(key, value)
 
     @staticmethod
     def _is_path_like_mcp_key(key: str) -> bool:
-        upper = key.upper().replace("-", "_")
-        return upper.endswith(("_ROOT", "_DIR", "_PATH"))
+        return ResourceMCPHelper.is_path_like_mcp_key(key)
 
     def _load_config(self) -> None:
         tool_groups = {
@@ -762,191 +678,22 @@ class ResourceManager:
         self.skills[skill.name.strip().lower()] = skill
 
     def _resolve_skill_record(self, skill_name: str) -> LoadedSkill | None:
-        normalized = (skill_name or "").strip().lower()
-        if not normalized:
-            return None
-        direct = self.skills.get(normalized)
-        if direct is not None:
-            return direct
-        for skill in self.skills.values():
-            if normalized in {
-                skill.name.strip().lower(),
-                self._skill_resource_id(skill).strip().lower(),
-                Path(skill.directory).name.strip().lower(),
-            }:
-                return skill
-        return None
+        return self._admin_view().resolve_skill_record(skill_name)
 
     def _resolve_skill_directory_input(self, skill_path: str) -> Path:
-        raw = (skill_path or "").strip()
-        if not raw:
-            return Path(raw).expanduser().resolve()
-
-        normalized = raw.lower()
-        for skill in getattr(self, "skills", {}).values():
-            if normalized in {
-                skill.name.strip().lower(),
-                self._skill_resource_id(skill).strip().lower(),
-            }:
-                return Path(skill.directory).expanduser().resolve()
-
-        candidates: list[Path] = []
-        raw_path = Path(raw).expanduser()
-        if raw_path.is_absolute():
-            candidates.append(raw_path)
-        else:
-            candidates.append(Path(self.config.resolve_workspace_path(raw)))
-            candidates.append(
-                (self.config.workspace_skills_dir / raw_path).expanduser()
-            )
-            candidates.append((self.config.builtin_skills_dir / raw_path).expanduser())
-            candidates.append(raw_path)
-
-        for candidate in candidates:
-            resolved = candidate.resolve()
-            if resolved.is_file() and resolved.name == "SKILL.md":
-                return resolved.parent
-            if resolved.is_dir() and (resolved / "SKILL.md").exists():
-                return resolved
-
-        fallback = candidates[0] if candidates else raw_path
-        resolved = fallback.resolve()
-        if resolved.name == "SKILL.md":
-            return resolved.parent
-        return resolved
+        return self._admin_view().resolve_skill_directory_input(skill_path)
 
     def _record_runtime_hint(self, message: str) -> None:
-        text = (message or "").strip()
-        if not text:
-            return
-        ctx = self._get_current_tool_context_var().get()
-        state = getattr(ctx, "state", None)
-        if not isinstance(state, dict):
-            return
-        hints = state.setdefault("pending_runtime_hints", [])
-        if isinstance(hints, list):
-            hints.append(text)
+        self._admin_view().record_runtime_hint(message)
 
     def reload_skill(self, skill_path: str) -> str:
-        """Re-discover and register a single skill from *skill_path*.
-
-        This allows a newly created or updated skill to become available
-        without restarting the process.  If the skill was previously loaded
-        its tools are removed first.
-        """
-        skill_dir = self._resolve_skill_directory_input(skill_path)
-        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
-            return f"Not a valid skill directory: {skill_dir}"
-
-        loader = self._skill_loader_view()
-        meta, prompt_summary, prompt_body = loader.read_skill_document(skill_dir)
-        name = meta.get("name", skill_dir.name)
-        key = name.strip().lower()
-
-        # Remove previous version if present.
-        old = self.skills.get(key)
-        old_active = old.active if old is not None else True
-        if old and old.tool_group:
-            removed = self.registry.unregister_group(old.tool_group)
-            self.groups.pop(old.tool_group, None)
-            logger.info(
-                "Unregistered %d old tools for skill %s",
-                len(removed),
-                name,
-            )
-
-        runtime = self._build_skill_runtime(meta)
-        tool_group, tool_names = self._register_skill_tools(
-            name,
-            skill_dir,
-            runtime=runtime,
-        )
-
-        meta_include_groups = loader._parse_frontmatter_list(meta.get("include_groups"))
-        meta_include_tools = loader._parse_frontmatter_list(meta.get("include_tools"))
-        meta_exclude_tools = loader._parse_frontmatter_list(meta.get("exclude_tools"))
-
-        description = meta.get("description", f"Skill: {name}")
-        keywords = loader.normalize_keywords(
-            None, fallback=(description, name, prompt_summary[:400])
-        )
-        phrases = loader.normalize_phrases(None, fallback=(description, name))
-
-        self._upsert_skill(
-            LoadedSkill(
-                name=name,
-                description=description,
-                directory=str(skill_dir),
-                prompt=prompt_summary,
-                prompt_body="",
-                prompt_body_path=str((skill_dir / "SKILL.md").resolve()),
-                keywords=keywords,
-                phrases=phrases,
-                source="hot-reload",
-                active=old_active,
-                lease=ToolLease(
-                    include_groups=tuple(
-                        dict.fromkeys(
-                            [
-                                *meta_include_groups,
-                                *([tool_group] if tool_group else []),
-                            ]
-                        )
-                    ),
-                    include_tools=tuple(meta_include_tools),
-                    exclude_tools=tuple(meta_exclude_tools),
-                ),
-                tool_group=tool_group,
-                tools=tool_names,
-                runtime=runtime,
-            )
-        )
-        skill_md = str((skill_dir / "SKILL.md").resolve())
-        self._record_runtime_hint(
-            "技能已热重载："
-            f"{name}\n"
-            f"skill_dir={skill_dir}\n"
-            f"SKILL.md={skill_md}\n"
-            "当前运行中的 agent 不会自动重建技能快照或扩展 lease。"
-        )
-        logger.info("Hot-reloaded skill %s with %d tools", name, len(tool_names))
-        parts = [f"Skill '{name}' reloaded successfully."]
-        if tool_names:
-            parts.append(f"Registered tools: {', '.join(tool_names)}")
-        return " ".join(parts)
+        return self._admin_view().reload_skill(skill_path)
 
     def get_assistant_profile(self) -> str:
-        memory_store = getattr(self, "memory_store", None)
-        if memory_store is None:
-            return "暂无 assistant profile：memory_store 未初始化。"
-        load_profile = getattr(memory_store, "load_assistant_profile", None)
-        if not callable(load_profile):
-            return "暂无 assistant profile：memory_store 不支持读取。"
-        text = str(load_profile() or "").strip()
-        return text or "assistant profile 为空。"
+        return self._admin_view().get_assistant_profile()
 
     def set_assistant_profile(self, content: str, mode: str = "replace") -> str:
-        memory_store = getattr(self, "memory_store", None)
-        if memory_store is None:
-            return "无法修改 assistant profile：memory_store 未初始化。"
-        save_profile = getattr(memory_store, "save_assistant_profile", None)
-        if not callable(save_profile):
-            return "无法修改 assistant profile：memory_store 不支持写入。"
-        normalized_mode = str(mode or "replace").strip().lower()
-        if normalized_mode not in {"replace", "append"}:
-            return "Unsupported mode. Use replace or append."
-        incoming = str(content or "").strip()
-        if normalized_mode == "append":
-            current = self.get_assistant_profile()
-            base = (
-                ""
-                if current.startswith("暂无 assistant profile")
-                or current == "assistant profile 为空。"
-                else current
-            )
-            incoming = f"{base}\n\n{incoming}".strip() if base else incoming
-        save_profile(incoming)
-        return "Assistant profile updated successfully."
+        return self._admin_view().set_assistant_profile(content, mode=mode)
 
     def list_admin_skills(
         self,
@@ -955,7 +702,7 @@ class ResourceManager:
         limit: int = 50,
         offset: int = 0,
     ) -> str:
-        return self._inspect_skills(
+        return self._admin_view().list_admin_skills(
             query=query,
             active_only=active_only,
             limit=limit,
@@ -963,51 +710,13 @@ class ResourceManager:
         )
 
     def enable_skill(self, skill_name: str) -> str:
-        skill = self._resolve_skill_record(skill_name)
-        if skill is None:
-            return f"Skill not found: {skill_name}"
-        if skill.active:
-            return f"Skill '{skill.name}' is already enabled."
-        skill.active = True
-        return f"Skill '{skill.name}' enabled."
+        return self._admin_view().enable_skill(skill_name)
 
     def disable_skill(self, skill_name: str) -> str:
-        skill = self._resolve_skill_record(skill_name)
-        if skill is None:
-            return f"Skill not found: {skill_name}"
-        if not skill.active:
-            return f"Skill '{skill.name}' is already disabled."
-        skill.active = False
-        return f"Skill '{skill.name}' disabled."
+        return self._admin_view().disable_skill(skill_name)
 
     def delete_skill(self, skill_name: str) -> str:
-        skill = self._resolve_skill_record(skill_name)
-        if skill is None:
-            return f"Skill not found: {skill_name}"
-
-        skill_dir = Path(skill.directory).expanduser().resolve()
-        workspace_root = self.config.workspace_skills_dir.expanduser().resolve()
-        try:
-            skill_dir.relative_to(workspace_root)
-        except ValueError:
-            return (
-                "Refusing to delete non-workspace skill. "
-                "Only workspace custom skills can be deleted."
-            )
-
-        if skill.tool_group:
-            removed = self.registry.unregister_group(skill.tool_group)
-            self.groups.pop(skill.tool_group, None)
-            logger.info(
-                "Deleted skill %s and unregistered %d tools",
-                skill.name,
-                len(removed),
-            )
-
-        self.skills.pop(skill.name.strip().lower(), None)
-        if skill_dir.exists():
-            shutil.rmtree(skill_dir)
-        return f"Skill '{skill.name}' deleted from workspace."
+        return self._admin_view().delete_skill(skill_name)
 
     def _register_skill_tools(
         self,
@@ -1381,107 +1090,35 @@ class ResourceManager:
         return "\n\n".join(prompts)
 
     def _default_chat_key(self) -> str:
-        from .channels.tools import ChannelToolContext
-
-        ctx = ChannelToolContext.get_current()
-        if ctx is None or not ctx.chat_id:
-            return ""
-        channel_name = (ctx.channel_name or "").strip()
-        if channel_name:
-            return f"{channel_name}:{ctx.chat_id}"
-        return str(ctx.chat_id)
+        return self._admin_view().default_chat_key()
 
     def _inspect_runtime_flow(self, flow_id: str = "", chat_key: str = "") -> str:
-        provider = getattr(self, "_observability_provider", None)
-        resolved_chat_key = chat_key.strip() or self._default_chat_key()
-        if provider is not None and hasattr(provider, "inspect_runtime_flow"):
-            return str(
-                provider.inspect_runtime_flow(
-                    flow_id=flow_id.strip(), chat_key=resolved_chat_key
-                )
-            )
-        if not flow_id and not resolved_chat_key:
-            return "暂无可观测的运行中 flow。"
-        return f"flow={flow_id.strip()};chat={resolved_chat_key}"
+        return self._admin_view().inspect_runtime_flow(
+            flow_id=flow_id,
+            chat_key=chat_key,
+        )
 
     def _inspect_chat_context(self, chat_key: str = "", query: str = "") -> str:
-        provider = getattr(self, "_observability_provider", None)
-        resolved_chat_key = chat_key.strip() or self._default_chat_key()
-        if provider is not None and hasattr(provider, "inspect_chat_context"):
-            return str(
-                provider.inspect_chat_context(
-                    chat_key=resolved_chat_key, query=query.strip()
-                )
-            )
-        if not resolved_chat_key:
-            return "缺少 chat_key，且当前上下文没有可推断的会话。"
-        return self._fallback_inspect_chat_context(
-            resolved_chat_key, query=query.strip()
+        return self._admin_view().inspect_chat_context(
+            chat_key=chat_key,
+            query=query,
         )
 
     def _fallback_inspect_chat_context(self, chat_key: str, query: str = "") -> str:
-        memory_store = getattr(self, "memory_store", None)
-        if memory_store is None:
-            return f"chat={chat_key}\n暂无 memory store。"
-        view = build_context_view(
-            memory_store=memory_store, chat_id=chat_key, query=query
+        return self._admin_view().fallback_inspect_chat_context(
+            chat_key,
+            query=query,
         )
-        records = memory_store.list_memories(chat_id=chat_key)
-        parts = ["[Chat Context]", f"chat_key={chat_key}"]
-        if query:
-            parts.append(f"query={query}")
-        if view.hot:
-            parts.append("[Hot Context]\n- " + "\n- ".join(view.hot))
-        if view.warm:
-            parts.append("[Warm Context]\n- " + "\n- ".join(view.warm))
-        if view.cold:
-            parts.append("[Cold Context]\n- " + "\n- ".join(view.cold))
-        if records:
-            lines = [
-                f"- memory_type={record.memory_type} key={record.key} tier={record.tier} status={record.status} summary={record.summary}"
-                for record in records[:12]
-            ]
-            parts.append("[Memory Records]\n" + "\n".join(lines))
-        return "\n".join(parts)
 
     def _inspect_policy(self, chat_key: str = "", decision_kind: str = "") -> str:
-        provider = getattr(self, "_observability_provider", None)
-        resolved_chat_key = chat_key.strip() or self._default_chat_key()
-        if provider is not None and hasattr(provider, "inspect_policy"):
-            return str(
-                provider.inspect_policy(
-                    chat_key=resolved_chat_key,
-                    decision_kind=decision_kind.strip(),
-                )
-            )
-        return decision_kind.strip() or resolved_chat_key or "policy"
+        return self._admin_view().inspect_policy(
+            chat_key=chat_key,
+            decision_kind=decision_kind,
+        )
 
     @staticmethod
     def _schema_type_summary(schema: dict[str, Any]) -> str:
-        if not isinstance(schema, dict):
-            return "unknown"
-        schema_type = schema.get("type")
-        if schema_type == "array":
-            item_summary = ResourceManager._schema_type_summary(schema.get("items", {}))
-            return f"array[{item_summary}]"
-        if schema_type == "object" and isinstance(
-            schema.get("additionalProperties"), dict
-        ):
-            nested = ResourceManager._schema_type_summary(
-                schema["additionalProperties"]
-            )
-            return f"object[{nested}]"
-        if schema.get("enum"):
-            values = ",".join(str(value) for value in schema["enum"][:4])
-            return f"{schema_type or 'enum'}({values})"
-        if schema.get("anyOf"):
-            variants = [
-                ResourceManager._schema_type_summary(item)
-                for item in schema["anyOf"]
-                if isinstance(item, dict)
-            ]
-            return "|".join(variants) if variants else "any"
-        return str(schema_type or "any")
+        return ResourceAdminHelper.schema_type_summary(schema)
 
     def _inspect_tools(
         self,
@@ -1491,52 +1128,13 @@ class ResourceManager:
         limit: int = 50,
         offset: int = 0,
     ) -> str:
-        query_text = query.strip().lower()
-        group_filter = group.strip().lower()
-        normalized_limit = max(1, min(int(limit or 50), 200))
-        normalized_offset = max(0, int(offset or 0))
-        rows: list[str] = []
-        for registered in sorted(self.registry.list(), key=lambda item: item.tool.name):
-            tool_name = registered.tool.name
-            tool_group = registered.group
-            group_state = self.groups.get(tool_group)
-            is_active = bool(group_state.active) if group_state is not None else False
-            if active_only and not is_active:
-                continue
-            if group_filter and tool_group.lower() != group_filter:
-                continue
-            haystack = f"{tool_name} {tool_group}".lower()
-            if query_text and query_text not in haystack:
-                continue
-            properties = registered.tool.schema.get("properties", {})
-            schema_parts = [
-                f"{name}:{self._schema_type_summary(prop)}"
-                for name, prop in properties.items()
-                if isinstance(prop, dict)
-            ]
-            schema_summary = ", ".join(schema_parts) if schema_parts else "no-args"
-            rows.append(
-                f"- tool={tool_name} group={tool_group} active={is_active} schema={schema_summary}"
-            )
-        total = len(rows)
-        window = rows[normalized_offset : normalized_offset + normalized_limit]
-        lines = [
-            "[Tools]",
-            (
-                f"- total={total} returned={len(window)} "
-                f"offset={normalized_offset} limit={normalized_limit}"
-            ),
-        ]
-        if not window:
-            lines.append("- no matching tools")
-            return "\n".join(lines)
-        lines.extend(window)
-        if normalized_offset + len(window) < total:
-            lines.append(
-                f"[Truncated. Use offset={normalized_offset + len(window)} "
-                f"limit={normalized_limit} to read more.]"
-            )
-        return "\n".join(lines)
+        return self._admin_view().inspect_tools(
+            query=query,
+            group=group,
+            active_only=active_only,
+            limit=limit,
+            offset=offset,
+        )
 
     def _inspect_skills(
         self,
@@ -1545,53 +1143,15 @@ class ResourceManager:
         limit: int = 50,
         offset: int = 0,
     ) -> str:
-        query_text = query.strip().lower()
-        normalized_limit = max(1, min(int(limit or 50), 200))
-        normalized_offset = max(0, int(offset or 0))
-        rows: list[str] = []
-        for skill in sorted(self.skills.values(), key=lambda item: item.name.lower()):
-            if active_only and not skill.active:
-                continue
-            haystack = f"{skill.name} {skill.description} {skill.source}".lower()
-            if query_text and query_text not in haystack:
-                continue
-            tool_list = ", ".join(skill.tools) if skill.tools else "-"
-            rows.append(
-                f"- skill={skill.name} active={skill.active} source={skill.source} "
-                f"group={skill.tool_group or '-'} tools={tool_list}"
-            )
-        total = len(rows)
-        window = rows[normalized_offset : normalized_offset + normalized_limit]
-        lines = [
-            "[Skills]",
-            (
-                f"- total={total} returned={len(window)} "
-                f"offset={normalized_offset} limit={normalized_limit}"
-            ),
-        ]
-        if not window:
-            lines.append("- no matching skills")
-            return "\n".join(lines)
-        lines.extend(window)
-        if normalized_offset + len(window) < total:
-            lines.append(
-                f"[Truncated. Use offset={normalized_offset + len(window)} "
-                f"limit={normalized_limit} to read more.]"
-            )
-        return "\n".join(lines)
+        return self._admin_view().inspect_skills(
+            query=query,
+            active_only=active_only,
+            limit=limit,
+            offset=offset,
+        )
 
     def _inspect_skill_load_errors(self, limit: int = 20) -> str:
-        capped = max(1, int(limit or 20))
-        entries = list(self._skill_load_errors[-capped:])
-        if not entries:
-            return "[Skill Load Errors]\n- none"
-        lines = ["[Skill Load Errors]"]
-        for item in entries:
-            lines.append(
-                f"- skill={item.get('skill', '')} path={item.get('path', '')} "
-                f"stage={item.get('stage', '')} error={item.get('error', '')}"
-            )
-        return "\n".join(lines)
+        return self._admin_view().inspect_skill_load_errors(limit=limit)
 
     def _record_skill_load_error(
         self,
@@ -1601,15 +1161,12 @@ class ResourceManager:
         error: str,
         stage: str,
     ) -> None:
-        entry = {
-            "skill": str(skill),
-            "path": str(path),
-            "error": str(error),
-            "stage": str(stage),
-        }
-        self._skill_load_errors.append(entry)
-        if len(self._skill_load_errors) > 50:
-            self._skill_load_errors = self._skill_load_errors[-50:]
+        self._admin_view().record_skill_load_error(
+            skill=skill,
+            path=path,
+            error=error,
+            stage=stage,
+        )
 
     def register_channel_tools(self, channel_tools: "ChannelTools") -> None:
         group_name = channel_tools.get_tool_group_name()

@@ -20,6 +20,8 @@ from babybot.agent_kernel.dynamic_orchestrator import (
     InMemoryChildTaskBus,
     _build_resource_catalog,
 )
+from babybot.agent_kernel.orchestrator_child_tasks import ChildTaskRuntimeHelper
+from babybot.agent_kernel.orchestrator_notebook import NotebookRuntimeHelper
 from babybot.execution_plan import (
     build_execution_plan,
     compile_execution_plan_to_notebook,
@@ -1086,6 +1088,84 @@ def test_force_converge_activates_after_repeated_dead_letters() -> None:
     assert reason is not None
     assert "convergence required" in reason
     assert context.state["orchestrator_force_converge"] == reason
+
+
+def test_notebook_runtime_helper_ensures_plan_notebook_state() -> None:
+    helper = NotebookRuntimeHelper(config=type("Cfg", (), {})())
+    context = ExecutionContext(session_id="helper-flow", state={})
+
+    notebook = helper.ensure_plan_notebook("repair pdf skill", context)
+
+    assert context.state["plan_notebook"] is notebook
+    assert context.state["plan_notebook_id"] == notebook.notebook_id
+    assert context.state["current_notebook_node_id"] == notebook.primary_frontier_node_id()
+    assert context.state["notebook_context_budget"] == 2400
+
+
+def test_child_task_runtime_helper_merges_maintenance_dispatches() -> None:
+    helper = ChildTaskRuntimeHelper(config=type("Cfg", (), {})())
+    tool_calls = (
+        ModelToolCall(
+            call_id="call-1",
+            name="dispatch_task",
+            arguments={
+                "resource_id": "skill.weather",
+                "description": "inspect local skill layout",
+                "timeout_s": 30,
+            },
+        ),
+        ModelToolCall(
+            call_id="call-2",
+            name="dispatch_task",
+            arguments={
+                "resource_ids": ["skill.image", "group.code"],
+                "description": "patch the skill files",
+                "timeout_s": 90,
+            },
+        ),
+    )
+
+    merged = helper.merge_dispatch_calls_for_maintenance(
+        tool_calls,
+        goal="修复并维护本地 skill",
+    )
+
+    assert len(merged) == 1
+    assert merged[0].arguments["resource_ids"] == [
+        "skill.weather",
+        "skill.image",
+        "group.code",
+    ]
+    assert merged[0].arguments["timeout_s"] == 90
+    assert "同一维护目标的合并子任务" in merged[0].arguments["description"]
+
+
+def test_child_task_runtime_helper_recent_successful_results_filters_scheduler() -> None:
+    helper = ChildTaskRuntimeHelper(config=type("Cfg", (), {})())
+    results = {
+        "task_1": TaskResult(
+            task_id="task_1",
+            status="succeeded",
+            output="scheduled",
+            metadata={"resource_id": "group.scheduler"},
+        ),
+        "task_2": TaskResult(
+            task_id="task_2",
+            status="failed",
+            error="boom",
+            metadata={"resource_id": "skill.weather"},
+        ),
+        "task_3": TaskResult(
+            task_id="task_3",
+            status="succeeded",
+            output="usable output",
+            metadata={"resource_id": "skill.image"},
+        ),
+    }
+
+    selected = helper.recent_successful_upstream_results(results, limit=1)
+
+    assert list((selected or {}).keys()) == ["task_3"]
 
 
 def test_force_converge_activates_immediately_after_exploration_stall_dead_letter() -> (

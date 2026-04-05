@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .lease_utils import merge_tool_leases
 from .types import SystemPromptBuilder, ToolLease
 
 
@@ -20,24 +21,8 @@ class SkillPack:
 
 
 def merge_leases(primary: ToolLease, secondary: ToolLease) -> ToolLease:
-    """Merge two leases with additive include semantics.
-
-    - include_groups/include_tools are UNIONED (additive access)
-    - exclude_tools are unioned (deny wins)
-
-    This means skills ADD their tool groups to the available set rather
-    than restricting them.
-    """
-    include_groups = set(primary.include_groups) | set(secondary.include_groups)
-    include_tools = set(primary.include_tools) | set(secondary.include_tools)
-
-    return ToolLease(
-        include_groups=tuple(sorted(include_groups)),
-        include_tools=tuple(sorted(include_tools)),
-        exclude_tools=tuple(
-            sorted(set(primary.exclude_tools) | set(secondary.exclude_tools))
-        ),
-    )
+    """Merge two leases with additive include semantics."""
+    return merge_tool_leases(primary, secondary)
 
 
 def merge_prompts(skills: list[SkillPack]) -> str:

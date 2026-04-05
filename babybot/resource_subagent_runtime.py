@@ -12,6 +12,7 @@ from .agent_kernel import (
     TaskResult,
     ToolLease,
 )
+from .agent_kernel.lease_utils import filter_tool_lease, merge_tool_leases
 
 logger = logging.getLogger(__name__)
 
@@ -36,22 +37,12 @@ class ResourceSubagentRuntime:
 
     @classmethod
     def harden_execution_lease(cls, lease: ToolLease) -> ToolLease:
-        include_groups = [
-            group
-            for group in lease.include_groups
-            if group not in cls._FORBIDDEN_CHILD_GROUPS
-            and not str(group).startswith("channel_")
-        ]
-        include_tools = [
-            tool
-            for tool in lease.include_tools
-            if tool not in cls._FORBIDDEN_CHILD_TOOLS
-        ]
-        exclude_tools = sorted(set(lease.exclude_tools) | cls._FORBIDDEN_CHILD_TOOLS)
-        return ToolLease(
-            include_groups=tuple(include_groups),
-            include_tools=tuple(include_tools),
-            exclude_tools=tuple(exclude_tools),
+        return filter_tool_lease(
+            lease,
+            drop_groups=cls._FORBIDDEN_CHILD_GROUPS,
+            drop_group_prefixes=("channel_",),
+            drop_tools=cls._FORBIDDEN_CHILD_TOOLS,
+            extra_exclude_tools=cls._FORBIDDEN_CHILD_TOOLS,
         )
 
     @staticmethod
@@ -59,29 +50,10 @@ class ResourceSubagentRuntime:
         base_lease: ToolLease,
         skill_packs: list[SkillPack],
     ) -> ToolLease:
-        merged_lease = base_lease
-        for skill in skill_packs:
-            merged_lease = ToolLease(
-                include_groups=tuple(
-                    sorted(
-                        set(merged_lease.include_groups)
-                        | set(skill.tool_lease.include_groups)
-                    )
-                ),
-                include_tools=tuple(
-                    sorted(
-                        set(merged_lease.include_tools)
-                        | set(skill.tool_lease.include_tools)
-                    )
-                ),
-                exclude_tools=tuple(
-                    sorted(
-                        set(merged_lease.exclude_tools)
-                        | set(skill.tool_lease.exclude_tools)
-                    )
-                ),
-            )
-        return merged_lease
+        return merge_tool_leases(
+            base_lease,
+            *(skill.tool_lease for skill in skill_packs),
+        )
 
     @staticmethod
     def executor_skill_packs(skill_packs: list[SkillPack]) -> list[SkillPack]:

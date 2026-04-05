@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_kernel import SkillPack, SystemPromptBuilder, ToolLease
+from .agent_kernel.prompt_assembly import add_text_section
 
 
 class ResourceSkillRuntime:
@@ -189,24 +190,29 @@ class ResourceSkillRuntime:
         task_class = _classify_task_from_tools(tools_text, merged_lease)
 
         # ── Section: Identity & task (always first) ──────────────────
-        builder.add(
+        add_text_section(
+            builder,
             "identity",
             f"你是 {agent_name}，请完成任务并直接输出最终答案。",
             priority=0,
             cacheable=True,
         )
-        builder.add(
+        add_text_section(
+            builder,
             "task",
-            f"任务：{task_description}",
+            task_description,
             priority=10,
+            header="任务：",
         )
 
         # ── Section: Activated skills ────────────────────────────────
         selected_names = ", ".join(skill.name for skill in selected_skill_packs) or "无"
-        builder.add(
+        add_text_section(
+            builder,
             "active_skills",
-            f"已激活技能（本次强相关）：{selected_names}",
+            selected_names,
             priority=20,
+            header="已激活技能（本次强相关）：",
         )
 
         # ── Section: Skill catalog ───────────────────────────────────
@@ -217,21 +223,26 @@ class ResourceSkillRuntime:
             )
         else:
             skill_catalog = self.format_skill_catalog(max_items=24)
-        builder.add(
+        add_text_section(
+            builder,
             "skill_catalog",
-            f"可用技能目录（按需选择）：\n{skill_catalog}",
+            skill_catalog,
             priority=30,
+            header="可用技能目录（按需选择）：\n",
         )
 
         # ── Section: Available tools ─────────────────────────────────
-        builder.add(
+        add_text_section(
+            builder,
             "tools",
-            f"可用工具：{tools_text}",
+            tools_text,
             priority=40,
+            header="可用工具：",
         )
 
         # ── Section: Execution rules (static, cacheable) ─────────────
-        builder.add(
+        add_text_section(
+            builder,
             "execution_rules",
             _EXECUTION_RULES,
             priority=50,
@@ -243,7 +254,8 @@ class ResourceSkillRuntime:
         # for pure text-gen workers (no tools → no extra constraints needed).
         task_specific = _TASK_CLASS_RULES.get(task_class, "")
         if task_specific:
-            builder.add(
+            add_text_section(
+                builder,
                 f"task_class_rules:{task_class}",
                 task_specific,
                 priority=55,
@@ -251,7 +263,8 @@ class ResourceSkillRuntime:
             )
 
         # ── Section: Skill maintenance rules ─────────────────────────
-        builder.add(
+        add_text_section(
+            builder,
             "skill_maintenance_rules",
             _SKILL_MAINTENANCE_RULES,
             priority=60,

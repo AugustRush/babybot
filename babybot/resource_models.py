@@ -42,6 +42,35 @@ class ResourceBrief:
 
 
 @dataclass(frozen=True)
+class ResourceCapability:
+    """Unified runtime view of a resolvable capability/resource."""
+
+    resource_id: str
+    resource_type: str
+    name: str
+    purpose: str
+    lease: ToolLease = ToolLease()
+    active: bool = True
+    tool_group: str = ""
+    tool_names: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
+    phrases: tuple[str, ...] = ()
+    source: str = ""
+
+    def to_brief(self, *, preview_limit: int = 6) -> ResourceBrief:
+        return ResourceBrief(
+            resource_id=self.resource_id,
+            resource_type=self.resource_type,
+            name=self.name,
+            purpose=self.purpose,
+            group=self.tool_group,
+            tool_count=len(self.tool_names),
+            tools_preview=self.tool_names[:preview_limit],
+            active=self.active,
+        )
+
+
+@dataclass(frozen=True)
 class SkillRuntimeConfig:
     python_executable: str = ""
     python_fallback_executables: tuple[str, ...] = ()
