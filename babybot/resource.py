@@ -357,6 +357,14 @@ class ResourceCatalog:
     def search_resources(self, query: str | None = None) -> dict[str, Any]:
         return self._manager._search_resources(query)
 
+    def recommend_resources(
+        self,
+        query: str,
+        *,
+        limit: int = 6,
+    ) -> dict[str, Any]:
+        return self._manager._recommend_resources(query, limit=limit)
+
 
 class WorkerRuntime:
     """Execution runtime for sub-agent task launches."""
@@ -1283,6 +1291,22 @@ class ResourceManager:
             resource_id,
             require_tools=require_tools,
         )
+
+    def recommend_resources(
+        self,
+        query: str,
+        *,
+        limit: int = 6,
+    ) -> dict[str, Any]:
+        return self._catalog_view().recommend_resources(query, limit=limit)
+
+    def _recommend_resources(
+        self,
+        query: str,
+        *,
+        limit: int = 6,
+    ) -> dict[str, Any]:
+        return self._resource_scope_view().recommend_resources(query, limit=limit)
 
     def set_scheduled_task_manager(
         self, manager: "ScheduledTaskManager | None"

@@ -8,6 +8,34 @@ from .agent_kernel import ToolLease
 from .resource_models import LoadedSkill, ResourceBrief
 
 logger = logging.getLogger(__name__)
+_URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_NETWORK_QUERY_MARKERS = (
+    "http://",
+    "https://",
+    "www.",
+    "github.com",
+    "raw.githubusercontent.com",
+    "仓库",
+    "网页",
+    "网页链接",
+    "网址",
+    "链接",
+    "文档",
+    "readme",
+)
+_NETWORK_RESOURCE_MARKERS = (
+    "web",
+    "http",
+    "fetch",
+    "search",
+    "browser",
+    "crawl",
+    "url",
+    "网页",
+    "浏览",
+    "仓库",
+    "文档",
+)
 
 
 class ResourceScopeHelper:
@@ -215,6 +243,225 @@ class ResourceScopeHelper:
             "tools": tools,
             "mcp_servers": list(self._owner.mcp_clients.keys()),
             "skills": skills,
+        }
+
+    @staticmethod
+    def _contains_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _strip_urls(text: str) -> str:
+        return _URL_RE.sub(" ", str(text or ""))
+
+    def _query_requires_network(self, query: str) -> bool:
+        normalized = (query or "").strip().lower()
+        if not normalized:
+            return False
+        return self._contains_any_marker(normalized, _NETWORK_QUERY_MARKERS)
+
+    def _resource_looks_network_capable(
+        self,
+        *,
+        name: str,
+        description: str,
+        tool_names: tuple[str, ...] = (),
+    ) -> bool:
+        haystack = " ".join([name, description, *tool_names]).lower()
+        return self._contains_any_marker(haystack, _NETWORK_RESOURCE_MARKERS)
+
+    def _score_text_match(
+        self,
+        *,
+        query: str,
+        query_terms: set[str],
+        resource_id: str,
+        name: str,
+        keywords: tuple[str, ...] = (),
+        phrases: tuple[str, ...] = (),
+        fallback_text: tuple[str, ...] = (),
+    ) -> tuple[int, list[str]]:
+        normalized_query = (query or "").strip().lower()
+        normalized_name = (name or "").strip().lower()
+        normalized_resource_id = (resource_id or "").strip().lower()
+        reasons: list[str] = []
+        score = 0
+
+        if normalized_resource_id and normalized_resource_id in normalized_query:
+            score += 120
+            reasons.append("explicit_resource_id")
+        elif normalized_name and len(normalized_name) >= 3 and normalized_name in normalized_query:
+            score += 80
+            reasons.append("explicit_name")
+
+        matched_phrases = {
+            phrase.strip().lower()
+            for phrase in phrases
+            if str(phrase).strip() and str(phrase).strip().lower() in normalized_query
+        }
+        if matched_phrases:
+            score += 24 * len(matched_phrases)
+            reasons.append(f"phrase_matches={len(matched_phrases)}")
+
+        candidate_terms = set()
+        for keyword in keywords:
+            text = str(keyword).strip().lower()
+            if text:
+                candidate_terms.add(text)
+        tokenizer = getattr(self._owner, "_tokenize", None)
+        if callable(tokenizer):
+            for value in fallback_text:
+                candidate_terms.update(tokenizer(str(value or "")))
+        matched_terms = sorted(term for term in candidate_terms if term in query_terms)
+        if matched_terms:
+            score += 6 * len(matched_terms)
+            reasons.append(f"term_matches={len(matched_terms)}")
+
+        return score, reasons
+
+    def recommend_resources(
+        self,
+        query: str,
+        *,
+        limit: int = 6,
+    ) -> dict[str, Any]:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return {
+                "query": "",
+                "primary_resource_ids": [],
+                "supporting_resource_ids": [],
+                "resource_ids": [],
+                "matches": [],
+            }
+
+        semantic_query = self._strip_urls(normalized_query).strip()
+        tokenizer = getattr(self._owner, "_tokenize", None)
+        query_terms = (
+            tokenizer(semantic_query) if callable(tokenizer) else set()
+        )
+        require_network = self._query_requires_network(normalized_query)
+        matches: list[dict[str, Any]] = []
+
+        for skill in sorted(self._owner.skills.values(), key=lambda item: item.name.lower()):
+            if not skill.active:
+                continue
+            resource_id = self.skill_resource_id(skill)
+            score, reasons = self._score_text_match(
+                query=semantic_query,
+                query_terms=query_terms,
+                resource_id=resource_id,
+                name=skill.name,
+                keywords=tuple(skill.keywords or ()),
+                phrases=tuple(skill.phrases or ()),
+                fallback_text=(
+                    skill.name,
+                    skill.description,
+                    skill.prompt,
+                ),
+            )
+            if score <= 0:
+                continue
+            matches.append(
+                {
+                    "resource_id": resource_id,
+                    "resource_type": "skill",
+                    "name": skill.name,
+                    "score": score,
+                    "role": "primary",
+                    "reasons": reasons,
+                }
+            )
+
+        for server_name, group_name in sorted(self._owner.mcp_server_groups.items()):
+            group = self._owner.groups.get(group_name)
+            description = (
+                group.description if group is not None else f"MCP tools from {server_name}"
+            )
+            resource_id = self.mcp_resource_id(server_name)
+            score, reasons = self._score_text_match(
+                query=semantic_query,
+                query_terms=query_terms,
+                resource_id=resource_id,
+                name=server_name,
+                fallback_text=(server_name, description),
+            )
+            if score <= 0:
+                continue
+            matches.append(
+                {
+                    "resource_id": resource_id,
+                    "resource_type": "mcp",
+                    "name": server_name,
+                    "score": score,
+                    "role": "primary",
+                    "reasons": reasons,
+                }
+            )
+
+        for group_name, group in sorted(self._owner.groups.items()):
+            if not group.active or group_name.startswith("skill_") or group_name in set(
+                self._owner.mcp_server_groups.values()
+            ):
+                continue
+            lease = ToolLease(include_groups=(group_name,))
+            tool_names = tuple(
+                sorted(registered.tool.name for registered in self._owner.registry.list(lease))
+            )
+            resource_id = self.group_resource_id(group_name)
+            score, reasons = self._score_text_match(
+                query=semantic_query,
+                query_terms=query_terms,
+                resource_id=resource_id,
+                name=group_name,
+                fallback_text=(group_name, group.description, *tool_names),
+            )
+            if require_network and self._resource_looks_network_capable(
+                name=group_name,
+                description=group.description,
+                tool_names=tool_names,
+            ):
+                score += 60
+                reasons.append("capability:network")
+            if score <= 0:
+                continue
+            matches.append(
+                {
+                    "resource_id": resource_id,
+                    "resource_type": "tool_group",
+                    "name": group_name,
+                    "score": score,
+                    "role": "supporting",
+                    "reasons": reasons,
+                }
+            )
+
+        matches.sort(
+            key=lambda item: (
+                0 if item["role"] == "primary" else 1,
+                -int(item["score"]),
+                str(item["resource_id"]),
+            )
+        )
+        primary_resource_ids = [
+            item["resource_id"] for item in matches if item["role"] == "primary"
+        ][:1]
+        supporting_resource_ids = [
+            item["resource_id"]
+            for item in matches
+            if item["role"] == "supporting"
+        ][: max(0, limit - len(primary_resource_ids))]
+        resource_ids = list(
+            dict.fromkeys([*primary_resource_ids, *supporting_resource_ids])
+        )[:limit]
+        filtered_matches = [
+            item for item in matches if item["resource_id"] in resource_ids
+        ]
+        return {
+            "query": normalized_query,
+            "primary_resource_ids": primary_resource_ids,
+            "supporting_resource_ids": supporting_resource_ids,
+            "resource_ids": resource_ids,
+            "matches": filtered_matches,
         }
 
     def build_task_lease(self, lease: dict[str, Any]) -> ToolLease:

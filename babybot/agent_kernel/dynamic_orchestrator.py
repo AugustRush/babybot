@@ -370,6 +370,20 @@ def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(resource_ids))
 
 
+def _normalize_recommended_resource_ids(
+    payload: dict[str, Any] | None,
+    key: str,
+) -> tuple[str, ...]:
+    if not isinstance(payload, dict):
+        return ()
+    raw = payload.get(key)
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(
+        dict.fromkeys(str(item).strip() for item in raw if str(item).strip())
+    )
+
+
 def _provider_policy_hints(
     resource_manager: "ResourceManager",
     goal: str,
@@ -1493,6 +1507,72 @@ class DynamicOrchestrator:
                 patched_fn["parameters"] = patched_params
             result.append({"type": "function", "function": patched_fn})
         return tuple(result)
+
+    def _augment_dispatch_resources(
+        self,
+        dispatch_args: dict[str, Any],
+        *,
+        context: ExecutionContext,
+    ) -> dict[str, Any]:
+        resource_ids = list(_dispatch_resource_ids(dispatch_args))
+        original_goal = str(context.state.get("original_goal", "") or "").strip()
+        description = str(dispatch_args.get("description", "") or "").strip()
+        signal_text = "\n".join(part for part in (original_goal, description) if part)
+        if not signal_text:
+            return dispatch_args
+
+        recommender = getattr(self._rm, "recommend_resources", None)
+        if not callable(recommender):
+            recommender = getattr(self._rm, "_recommend_resources", None)
+        if not callable(recommender):
+            return dispatch_args
+
+        try:
+            recommendation = recommender(signal_text, limit=4)
+        except Exception:
+            logger.exception("resource recommendation raised; using raw dispatch args")
+            return dispatch_args
+
+        primary_ids = list(
+            _normalize_recommended_resource_ids(
+                recommendation,
+                "primary_resource_ids",
+            )
+        )
+        supporting_ids = list(
+            _normalize_recommended_resource_ids(
+                recommendation,
+                "supporting_resource_ids",
+            )
+        )
+        recommended_ids = list(
+            _normalize_recommended_resource_ids(recommendation, "resource_ids")
+        )
+        if not primary_ids and not supporting_ids and not recommended_ids:
+            return dispatch_args
+
+        additions: list[str] = []
+        if not resource_ids and recommended_ids:
+            additions.extend(recommended_ids)
+        elif primary_ids and not set(resource_ids) & set(primary_ids):
+            additions.append(primary_ids[0])
+        for resource_id in supporting_ids:
+            if resource_id not in resource_ids and resource_id not in additions:
+                additions.append(resource_id)
+
+        if not additions:
+            return dispatch_args
+
+        merged_resource_ids = list(dict.fromkeys([*resource_ids, *additions]))
+        augmented = dict(dispatch_args)
+        if len(merged_resource_ids) == 1:
+            augmented["resource_id"] = merged_resource_ids[0]
+            augmented.pop("resource_ids", None)
+            return augmented
+
+        augmented["resource_ids"] = merged_resource_ids
+        augmented.pop("resource_id", None)
+        return augmented
 
     async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
         task_counter = 0
@@ -2754,7 +2834,10 @@ class DynamicOrchestrator:
             )
 
         if name == "dispatch_task":
-            dispatch_args = dict(args)
+            dispatch_args = self._augment_dispatch_resources(
+                dict(args),
+                context=context,
+            )
             resource_ids = _dispatch_resource_ids(dispatch_args)
             deps = list(dispatch_args.get("deps", []) or [])
             active_in_flight = len(runtime.in_flight)

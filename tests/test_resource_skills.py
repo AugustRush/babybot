@@ -795,6 +795,141 @@ def test_select_skill_packs_with_explicit_ids_filters_result() -> None:
     assert [pack.name for pack in packs] == ["weather-query"]
 
 
+def test_recommend_resources_prefers_specialist_skill_and_network_group() -> None:
+    class _DummyTool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.description = name
+            self.schema = {"type": "object", "properties": {}}
+
+        async def invoke(self, args, context):
+            del args, context
+            return TaskResult(task_id="tool", status="succeeded", output="")
+
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "web": ToolGroup(name="web", description="Web tools", active=True),
+        "skill_skill_manager": ToolGroup(
+            name="skill_skill_manager",
+            description="Skill lifecycle tools",
+            active=True,
+        ),
+        "skill_minimax_pdf": ToolGroup(
+            name="skill_minimax_pdf",
+            description="PDF generation tools",
+            active=True,
+        ),
+    }
+    manager.registry = ToolRegistry()
+    manager.registry.register(_DummyTool("web_fetch"), group="web")
+    manager.registry.register(_DummyTool("reload_skill"), group="skill_skill_manager")
+    manager.registry.register(_DummyTool("render_pdf"), group="skill_minimax_pdf")
+    manager.mcp_server_groups = {}
+    manager.skills = {
+        "skill-manager": LoadedSkill(
+            name="skill-manager",
+            description="Use when creating, updating, installing, enabling, disabling, deleting, or reloading babybot skills.",
+            directory="/tmp/skill-manager",
+            prompt=(
+                "Example Requests:\n"
+                "- 帮我创建一个提取发票字段的技能\n"
+                "- 安装 pdf 解析技能\n"
+                "- 更新 weather 技能的 SKILL.md"
+            ),
+            active=True,
+            keywords=("创建", "安装", "更新", "技能", "reload", "pdf"),
+            phrases=("创建技能", "安装 pdf 解析技能", "更新 weather 技能"),
+            lease=ToolLease(include_groups=("skill_skill_manager",)),
+            tool_group="skill_skill_manager",
+            tools=("reload_skill",),
+        ),
+        "minimax-pdf": LoadedSkill(
+            name="minimax-pdf",
+            description="Generate PDF files from markdown or structured input.",
+            directory="/tmp/minimax-pdf",
+            prompt="Example Requests:\n- 使用这个技能生成一个pdf文件给我",
+            active=True,
+            keywords=("pdf", "generate", "文件"),
+            phrases=("生成一个pdf文件",),
+            lease=ToolLease(include_groups=("skill_minimax_pdf",)),
+            tool_group="skill_minimax_pdf",
+            tools=("render_pdf",),
+        ),
+    }
+
+    result = manager._recommend_resources(
+        "参考仓库创建本地pdf技能 https://github.com/MiniMax-AI/skills/tree/main/skills/minimax-pdf"
+    )
+
+    assert result["primary_resource_ids"] == ["skill.skill-manager"]
+    assert result["supporting_resource_ids"] == ["group.web"]
+    assert result["resource_ids"] == ["skill.skill-manager", "group.web"]
+
+
+def test_recommend_resources_prefers_domain_skill_over_management_skill_for_usage_request() -> (
+    None
+):
+    class _DummyTool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.description = name
+            self.schema = {"type": "object", "properties": {}}
+
+        async def invoke(self, args, context):
+            del args, context
+            return TaskResult(task_id="tool", status="succeeded", output="")
+
+    manager = object.__new__(ResourceManager)
+    manager.groups = {
+        "skill_skill_manager": ToolGroup(
+            name="skill_skill_manager",
+            description="Skill lifecycle tools",
+            active=True,
+        ),
+        "skill_minimax_pdf": ToolGroup(
+            name="skill_minimax_pdf",
+            description="PDF generation tools",
+            active=True,
+        ),
+    }
+    manager.registry = ToolRegistry()
+    manager.registry.register(_DummyTool("reload_skill"), group="skill_skill_manager")
+    manager.registry.register(_DummyTool("render_pdf"), group="skill_minimax_pdf")
+    manager.mcp_server_groups = {}
+    manager.skills = {
+        "skill-manager": LoadedSkill(
+            name="skill-manager",
+            description="Use when creating, updating, installing, enabling, disabling, deleting, or reloading babybot skills.",
+            directory="/tmp/skill-manager",
+            prompt="Example Requests:\n- 安装 pdf 解析技能",
+            active=True,
+            keywords=("创建", "安装", "更新", "技能", "reload", "pdf"),
+            phrases=("创建技能", "安装 pdf 解析技能"),
+            lease=ToolLease(include_groups=("skill_skill_manager",)),
+            tool_group="skill_skill_manager",
+            tools=("reload_skill",),
+        ),
+        "minimax-pdf": LoadedSkill(
+            name="minimax-pdf",
+            description="Generate PDF files from markdown or structured input.",
+            directory="/tmp/minimax-pdf",
+            prompt="Example Requests:\n- 使用这个技能生成一个pdf文件给我",
+            active=True,
+            keywords=("pdf", "generate", "文件"),
+            phrases=("使用这个技能生成一个pdf文件给我", "生成一个pdf文件"),
+            lease=ToolLease(include_groups=("skill_minimax_pdf",)),
+            tool_group="skill_minimax_pdf",
+            tools=("render_pdf",),
+        ),
+    }
+
+    result = manager._recommend_resources("使用这个技能生成一个pdf文件给我")
+
+    assert result["primary_resource_ids"] == ["skill.minimax-pdf"]
+    assert result["supporting_resource_ids"] == []
+    assert result["resource_ids"] == ["skill.minimax-pdf"]
+
+
 def test_resource_briefs_and_scope_resolution() -> None:
     manager = object.__new__(ResourceManager)
     manager.groups = {

@@ -1830,6 +1830,369 @@ def test_system_prompt_discourages_using_management_skills_as_execution_skills()
     assert "使用某个技能/能力完成任务" in system_prompt
 
 
+def test_dispatch_task_auto_adds_skill_manager_for_remote_skill_creation_request() -> (
+    None
+):
+    class _RM(DummyResourceManager):
+        def get_resource_briefs(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "group.web",
+                    "type": "tool_group",
+                    "name": "web",
+                    "purpose": "访问网页和远程仓库",
+                    "group": "web",
+                    "tool_count": 2,
+                    "tools_preview": ["web_fetch", "web_search"],
+                    "active": True,
+                },
+                {
+                    "id": "skill.skill-manager",
+                    "type": "skill",
+                    "name": "skill-manager",
+                    "purpose": "创建、更新、安装、启用、禁用、删除或重载技能",
+                    "group": "skill_skill_manager",
+                    "tool_count": 2,
+                    "tools_preview": ["reload_skill", "inspect_skills"],
+                    "active": True,
+                },
+            ]
+
+        def resolve_resource_scope(
+            self, resource_id: str, require_tools: bool = False
+        ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+            del require_tools
+            if resource_id == "group.web":
+                return {"include_groups": ["web"]}, ()
+            if resource_id == "skill.skill-manager":
+                return {"include_groups": ["skill_skill_manager"]}, ("skill-manager",)
+            return None
+
+        def recommend_resources(
+            self, query: str, *, limit: int = 6
+        ) -> dict[str, Any]:
+            del query, limit
+            return {
+                "primary_resource_ids": ["skill.skill-manager"],
+                "supporting_resource_ids": ["group.web"],
+                "resource_ids": ["skill.skill-manager", "group.web"],
+                "matches": [],
+            }
+
+        async def run_subagent_task(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> tuple[str, list[str]]:
+            del agent_name, tape, tape_store, heartbeat, media_paths
+            self.calls.append(
+                {
+                    "task_description": task_description,
+                    "lease": lease,
+                    "skill_ids": list(skill_ids or []),
+                }
+            )
+            return "skill created", []
+
+    class _Gateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "group.web",
+                            "[Research] 参考仓库创建本地pdf技能",
+                            call_id="c1",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("完成", call_id="c3")
+
+    goal = "参考仓库创建本地pdf技能 https://github.com/MiniMax-AI/skills/tree/main/skills/minimax-pdf"
+    rm = _RM()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=_Gateway())
+
+    result = asyncio.run(
+        orch.run(goal, ExecutionContext(state={"original_goal": goal}))
+    )
+
+    assert result.conclusion == "完成"
+    assert len(rm.calls) == 1
+    assert rm.calls[0]["skill_ids"] == ["skill-manager"]
+    assert rm.calls[0]["lease"] == {
+        "include_groups": ["skill_skill_manager", "web"],
+        "include_tools": [],
+        "exclude_tools": [],
+    }
+    child_result = next(iter(result.task_results.values()))
+    assert child_result.metadata["resource_ids"] == ["group.web", "skill.skill-manager"]
+    assert child_result.metadata["skill_ids"] == ["skill-manager"]
+
+
+def test_dispatch_task_auto_adds_web_for_remote_skill_creation_request() -> None:
+    class _RM(DummyResourceManager):
+        def get_resource_briefs(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "group.web",
+                    "type": "tool_group",
+                    "name": "web",
+                    "purpose": "访问网页和远程仓库",
+                    "group": "web",
+                    "tool_count": 2,
+                    "tools_preview": ["web_fetch", "web_search"],
+                    "active": True,
+                },
+                {
+                    "id": "skill.skill-manager",
+                    "type": "skill",
+                    "name": "skill-manager",
+                    "purpose": "创建、更新、安装、启用、禁用、删除或重载技能",
+                    "group": "skill_skill_manager",
+                    "tool_count": 2,
+                    "tools_preview": ["reload_skill", "inspect_skills"],
+                    "active": True,
+                },
+            ]
+
+        def resolve_resource_scope(
+            self, resource_id: str, require_tools: bool = False
+        ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+            del require_tools
+            if resource_id == "group.web":
+                return {"include_groups": ["web"]}, ()
+            if resource_id == "skill.skill-manager":
+                return {"include_groups": ["skill_skill_manager"]}, ("skill-manager",)
+            return None
+
+        def recommend_resources(
+            self, query: str, *, limit: int = 6
+        ) -> dict[str, Any]:
+            del query, limit
+            return {
+                "primary_resource_ids": ["skill.skill-manager"],
+                "supporting_resource_ids": ["group.web"],
+                "resource_ids": ["skill.skill-manager", "group.web"],
+                "matches": [],
+            }
+
+        async def run_subagent_task(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> tuple[str, list[str]]:
+            del agent_name, tape, tape_store, heartbeat, media_paths
+            self.calls.append(
+                {
+                    "task_description": task_description,
+                    "lease": lease,
+                    "skill_ids": list(skill_ids or []),
+                }
+            )
+            return "skill created", []
+
+    class _Gateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.skill-manager",
+                            "[Implementation] 参考仓库创建本地pdf技能",
+                            call_id="c1",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("完成", call_id="c3")
+
+    goal = "参考仓库创建本地pdf技能 https://github.com/MiniMax-AI/skills/tree/main/skills/minimax-pdf"
+    rm = _RM()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=_Gateway())
+
+    result = asyncio.run(
+        orch.run(goal, ExecutionContext(state={"original_goal": goal}))
+    )
+
+    assert result.conclusion == "完成"
+    assert len(rm.calls) == 1
+    assert rm.calls[0]["skill_ids"] == ["skill-manager"]
+    assert rm.calls[0]["lease"] == {
+        "include_groups": ["skill_skill_manager", "web"],
+        "include_tools": [],
+        "exclude_tools": [],
+    }
+    child_result = next(iter(result.task_results.values()))
+    assert child_result.metadata["resource_ids"] == ["skill.skill-manager", "group.web"]
+    assert child_result.metadata["skill_ids"] == ["skill-manager"]
+
+
+def test_dispatch_task_does_not_add_skill_manager_for_skill_usage_request() -> None:
+    class _RM(DummyResourceManager):
+        def get_resource_briefs(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "skill.skill-manager",
+                    "type": "skill",
+                    "name": "skill-manager",
+                    "purpose": "创建、更新、安装、启用、禁用、删除或重载技能",
+                    "group": "skill_skill_manager",
+                    "tool_count": 2,
+                    "tools_preview": ["reload_skill", "inspect_skills"],
+                    "active": True,
+                },
+                {
+                    "id": "skill.minimax-pdf",
+                    "type": "skill",
+                    "name": "minimax-pdf",
+                    "purpose": "根据输入生成 PDF",
+                    "group": "skill_minimax_pdf",
+                    "tool_count": 4,
+                    "tools_preview": ["render_pdf"],
+                    "active": True,
+                },
+            ]
+
+        def resolve_resource_scope(
+            self, resource_id: str, require_tools: bool = False
+        ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+            del require_tools
+            if resource_id == "skill.skill-manager":
+                return {"include_groups": ["skill_skill_manager"]}, ("skill-manager",)
+            if resource_id == "skill.minimax-pdf":
+                return {"include_groups": ["skill_minimax_pdf"]}, ("minimax-pdf",)
+            return None
+
+        async def run_subagent_task(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> tuple[str, list[str]]:
+            del agent_name, tape, tape_store, heartbeat, media_paths
+            self.calls.append(
+                {
+                    "task_description": task_description,
+                    "lease": lease,
+                    "skill_ids": list(skill_ids or []),
+                }
+            )
+            return "pdf ready", []
+
+    class _Gateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.minimax-pdf",
+                            "[Implementation] 使用这个技能生成一个pdf文件给我",
+                            call_id="c1",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return _reply_tool_call("完成", call_id="c3")
+
+    goal = "使用这个技能生成一个pdf文件给我"
+    rm = _RM()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=_Gateway())
+
+    result = asyncio.run(
+        orch.run(goal, ExecutionContext(state={"original_goal": goal}))
+    )
+
+    assert result.conclusion == "完成"
+    assert len(rm.calls) == 1
+    assert rm.calls[0]["skill_ids"] == ["minimax-pdf"]
+    assert rm.calls[0]["lease"] == {
+        "include_groups": ["skill_minimax_pdf"],
+        "include_tools": [],
+        "exclude_tools": [],
+    }
+    child_result = next(iter(result.task_results.values()))
+    assert child_result.metadata["resource_ids"] == ["skill.minimax-pdf"]
+    assert child_result.metadata["skill_ids"] == ["minimax-pdf"]
+
+
 def test_system_prompt_includes_assistant_profile_markdown(tmp_path) -> None:
     from babybot.context import Tape
     from babybot.memory_store import HybridMemoryStore
