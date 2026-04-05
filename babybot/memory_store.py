@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .feedback_events import normalize_runtime_feedback_event, runtime_event_primary_label
 from .memory_models import MemoryRecord
 from .sqlite_utils import connect_sqlite
 
@@ -527,14 +528,15 @@ class HybridMemoryStore:
 
     def observe_runtime_event(self, chat_id: str, payload: dict[str, Any]) -> None:
         event_name = str(payload.get("event", "") or "").strip().lower()
+        normalized = normalize_runtime_feedback_event(payload)
         event_payload = dict(payload.get("payload") or {})
         if event_name == "succeeded":
-            self._observe_success_event(chat_id, event_payload)
+            self._observe_success_event(chat_id, normalized, event_payload)
             return
         if event_name not in {"failed", "dead_lettered", "stalled"}:
             return
-        description = str(event_payload.get("description", "") or "").strip()
-        error = str(event_payload.get("error", "") or "").strip()
+        description = runtime_event_primary_label(normalized)
+        error = str(normalized.error or "").strip()
         if not description and not error:
             return
         now = time.time()
@@ -561,14 +563,19 @@ class HybridMemoryStore:
             )
         )
 
-    def _observe_success_event(self, chat_id: str, payload: dict[str, Any]) -> None:
-        description = str(payload.get("description", "") or "").strip()
+    def _observe_success_event(
+        self,
+        chat_id: str,
+        normalized: Any,
+        payload: dict[str, Any],
+    ) -> None:
+        description = runtime_event_primary_label(normalized)
         output = str(payload.get("output", "") or "").strip()
         if not description and not output:
             return
         now = time.time()
         summary = f"最近完成：{description}".strip("：")
-        output_preview = output[:120].strip()
+        output_preview = str(normalized.output_summary or output[:120]).strip()
         if output_preview:
             summary = f"{summary}（{output_preview}）"
         self._insert_or_merge(

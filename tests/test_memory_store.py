@@ -167,6 +167,38 @@ def test_hybrid_memory_store_ignores_assistant_reply_for_long_term_preferences_b
     assert "speech.wav" in summaries
 
 
+def test_hybrid_memory_store_prefers_user_label_over_internal_description(tmp_path) -> None:
+    store = HybridMemoryStore(
+        db_path=tmp_path / "context.db",
+        memory_dir=tmp_path / "memory",
+    )
+    store.ensure_bootstrap()
+
+    store.observe_runtime_event(
+        "feishu:chat-1",
+        {
+            "event": "succeeded",
+            "task_id": "task-1",
+            "payload": {
+                "description": (
+                    "[执行型子任务]\n"
+                    "你是执行型子任务，不是任务编排器。\n"
+                    "原始子任务：使用 OpenCLI 查询完整回复列表"
+                ),
+                "user_label": "查询完整回复列表",
+                "output": "已抓取 reply-list.json",
+            },
+        },
+    )
+
+    records = store.list_memories(chat_id="feishu:chat-1")
+    summaries = "\n".join(record.summary for record in records)
+
+    assert "查询完整回复列表" in summaries
+    assert "[执行型子任务]" not in summaries
+    assert "原始子任务" not in summaries
+
+
 def test_hybrid_memory_store_applies_user_corrections_and_supersedes_old_preferences(tmp_path) -> None:
     store = HybridMemoryStore(
         db_path=tmp_path / "context.db",

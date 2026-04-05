@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .feedback_events import normalize_runtime_feedback_event
+from .feedback_events import normalize_runtime_feedback_event, runtime_event_primary_label
 
 
 JobState = Literal[
@@ -76,5 +76,5 @@ def project_job_state_from_runtime_event(event_payload: dict[str, Any]) -> tuple
             state = "repairing"
         elif state == "cancelled":
             state = "running"
-    progress_message = normalized.message or normalized.stage or state
+    progress_message = runtime_event_primary_label(normalized) or normalized.stage or state
     return state, progress_message

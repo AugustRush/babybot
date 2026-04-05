@@ -202,3 +202,26 @@ def test_project_job_state_from_runtime_event_keeps_job_completion() -> None:
 
     assert state == "completed"
     assert message == "整体完成"
+
+
+def test_project_job_state_from_runtime_event_prefers_user_label_for_child_updates() -> None:
+    state, message = project_job_state_from_runtime_event(
+        {
+            "event": "progress",
+            "flow_id": "flow-1",
+            "task_id": "task-1",
+            "payload": {
+                "stage": "task",
+                "description": (
+                    "[执行型子任务]\n"
+                    "你是执行型子任务，不是任务编排器。\n"
+                    "原始子任务：查询完整回复列表"
+                ),
+                "user_label": "查询完整回复列表",
+                "progress": 0.5,
+            },
+        }
+    )
+
+    assert state == "running"
+    assert message == "查询完整回复列表"

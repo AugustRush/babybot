@@ -31,6 +31,20 @@ class RuntimeFeedbackEvent:
     task_label: str = ""
 
 
+def runtime_event_primary_label(event: RuntimeFeedbackEvent) -> str:
+    """Return the canonical user-facing label for a runtime event."""
+    label = str(event.task_label or "").strip()
+    if label:
+        return label
+    message = str(event.message or "").strip()
+    if message:
+        return message
+    stage = str(event.stage or "").strip()
+    if stage and stage not in {"task", "job"}:
+        return stage
+    return ""
+
+
 _ACTIVE_FEEDBACK_STATES = frozenset(
     {"queued", "planning", "running", "waiting_tool", "waiting_user", "repairing"}
 )
@@ -260,20 +274,20 @@ def render_runtime_feedback_event(
         progress_hint = f" ({pct}%)"
 
     if event.state == "queued":
-        label = event.message or "排队中"
+        label = runtime_event_primary_label(event) or "排队中"
         return f"{spinner} {label}…"
     if event.state == "planning":
-        label = event.message or "规划中"
+        label = runtime_event_primary_label(event) or "规划中"
         return f"{spinner} {label}…{progress_hint}"
     if event.state in {"running", "waiting_tool", "waiting_user", "repairing"}:
-        label = event.message or "执行中"
+        label = runtime_event_primary_label(event) or "执行中"
         return f"{spinner} {label}…{progress_hint}"
     if event.state == "completed":
-        return event.message or "✅ 已完成"
+        return runtime_event_primary_label(event) or "✅ 已完成"
     if event.state == "cancelled":
-        return event.message or "⊘ 已取消"
+        return runtime_event_primary_label(event) or "⊘ 已取消"
     if event.state == "failed":
-        label = event.message or "执行失败"
+        label = runtime_event_primary_label(event) or "执行失败"
         if event.error:
             return f"⚠ {label}\n原因：{event.error}"
         return f"⚠ {label}"
@@ -292,7 +306,7 @@ def render_stage_result(event: RuntimeFeedbackEvent) -> str:
         return ""
 
     # Build header line from task_label or fallback resource name from message.
-    label = event.task_label or event.message or ""
+    label = runtime_event_primary_label(event)
     # Strip leading spinner / status symbols that may be in message.
     # Covers Braille spinner frames, status icons, and legacy symbols.
     label = re.sub(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✅⚠⊘]\s*", "", label).strip()

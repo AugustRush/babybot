@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
+from ..feedback_events import normalize_runtime_feedback_event, runtime_event_primary_label
 from .loop_guard import LoopGuard, LoopGuardConfig
 from .model import (
     ModelMessage,
@@ -1519,9 +1520,17 @@ def _history_entry_text(entry: object) -> str:
     if kind == "event":
         event_name = str(payload.get("event", "") or "?")
         event_payload = payload.get("payload") or {}
-        description = str(event_payload.get("description", "") or "").strip()
-        error = str(event_payload.get("error", "") or "").strip()
-        output = str(event_payload.get("output", "") or "").strip()
+        normalized = normalize_runtime_feedback_event(
+            {
+                "event": event_name,
+                "task_id": str(payload.get("task_id", "") or ""),
+                "flow_id": str(payload.get("flow_id", "") or ""),
+                "payload": dict(event_payload or {}),
+            }
+        )
+        description = runtime_event_primary_label(normalized)
+        error = str(normalized.error or "").strip()
+        output = str(normalized.output_summary or event_payload.get("output", "") or "").strip()
         details_parts = [part for part in (description, output, error) if part]
         details = (
             " | ".join(details_parts)

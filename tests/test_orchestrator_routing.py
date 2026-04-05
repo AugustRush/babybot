@@ -18,6 +18,7 @@ from babybot.agent_kernel import (
     ModelToolCall,
 )
 from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
+from babybot.agent_kernel.dynamic_orchestrator import ChildTaskEvent
 from babybot.context import TapeStore
 from babybot.context import Tape
 from babybot.memory_store import HybridMemoryStore
@@ -1622,6 +1623,41 @@ def test_inspect_runtime_flow_includes_policy_decision_explain() -> None:
     assert "feature_bias=0.040" in text
     assert "decision_kind=worker" in text
     assert "action=deny_worker" in text
+
+
+def test_inspect_runtime_flow_uses_user_label_not_internal_prompt() -> None:
+    agent = object.__new__(OrchestratorAgent)
+    agent._recent_flow_ids_by_chat = {"feishu:chat-1": "orchestrator:flow-1"}
+    agent._task_heartbeat_registry = type("Registry", (), {"snapshot": lambda self, flow_id: {}})()
+    agent._recent_policy_decisions_by_flow = {}
+
+    class _Bus:
+        def events_for(self, flow_id: str):
+            del flow_id
+            return [
+                ChildTaskEvent(
+                    flow_id="orchestrator:flow-1",
+                    task_id="task_1",
+                    event="progress",
+                    payload={
+                        "description": (
+                            "[执行型子任务]\n"
+                            "你是执行型子任务，不是任务编排器。\n"
+                            "原始子任务：查询完整回复列表"
+                        ),
+                        "user_label": "查询完整回复列表",
+                        "progress": 0.5,
+                    },
+                )
+            ]
+
+    agent._child_task_bus = _Bus()
+
+    text = agent.inspect_runtime_flow(chat_key="feishu:chat-1")
+
+    assert "查询完整回复列表" in text
+    assert "[执行型子任务]" not in text
+    assert "原始子任务" not in text
 
 
 def test_remember_flow_id_uses_lru_eviction() -> None:

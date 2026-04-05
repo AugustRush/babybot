@@ -29,6 +29,7 @@ from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
 from .context_views import build_context_view
 from .execution_plan import build_execution_plan, compile_execution_plan_to_notebook
+from .feedback_events import normalize_runtime_feedback_event, runtime_event_primary_label
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
@@ -1599,10 +1600,17 @@ class OrchestratorAgent:
         if events:
             lines = []
             for event in events[-12:]:
-                payload = dict(event.payload or {})
-                status = str(payload.get("status", "") or "")
-                progress = payload.get("progress")
-                desc = str(payload.get("description", "") or "")
+                normalized_event = normalize_runtime_feedback_event(
+                    {
+                        "event": event.event,
+                        "task_id": event.task_id,
+                        "flow_id": event.flow_id,
+                        "payload": dict(event.payload or {}),
+                    }
+                )
+                status = str(normalized_event.state or "")
+                progress = normalized_event.progress
+                desc = runtime_event_primary_label(normalized_event)
                 suffix = []
                 if desc:
                     suffix.append(desc)
