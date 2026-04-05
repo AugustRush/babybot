@@ -1168,6 +1168,34 @@ def test_child_task_runtime_helper_recent_successful_results_filters_scheduler()
     assert list((selected or {}).keys()) == ["task_3"]
 
 
+def test_child_task_runtime_helper_recent_successful_results_skips_auto_converged() -> (
+    None
+):
+    helper = ChildTaskRuntimeHelper(config=type("Cfg", (), {})())
+    results = {
+        "task_1": TaskResult(
+            task_id="task_1",
+            status="succeeded",
+            output="stall summary",
+            metadata={
+                "resource_id": "skill.weather",
+                "auto_converged": True,
+                "completion_mode": "auto_summary_after_exploration_stall",
+            },
+        ),
+        "task_2": TaskResult(
+            task_id="task_2",
+            status="succeeded",
+            output="usable output",
+            metadata={"resource_id": "skill.image"},
+        ),
+    }
+
+    selected = helper.recent_successful_upstream_results(results, limit=2)
+
+    assert list((selected or {}).keys()) == ["task_2"]
+
+
 def test_force_converge_activates_immediately_after_exploration_stall_dead_letter() -> (
     None
 ):
@@ -1222,6 +1250,58 @@ def test_force_converge_activates_immediately_after_exploration_stall_dead_lette
 
     assert reason is not None
     assert "convergence required" in reason
+    assert context.state["orchestrator_force_converge"] == reason
+
+
+def test_force_converge_activates_after_auto_converged_child_result() -> None:
+    context = ExecutionContext()
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(),
+        gateway=DummyGateway([]),
+    )
+    notebook = orch._ensure_plan_notebook(  # type: ignore[attr-defined]
+        "repair pdf skill",
+        context,
+    )
+    task_map = context.state.setdefault("notebook_task_map", {})
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="explore local pdf skill",
+        objective="修改 pdf 技能默认中文字体",
+        owner="subagent",
+        resource_ids=("skill.weather",),
+    )
+    task_map["task_0"] = node.node_id
+
+    class RuntimeStub:
+        in_flight: dict[str, Any] = {}
+        results = {
+            "task_0": TaskResult(
+                task_id="task_0",
+                status="succeeded",
+                output="只完成了探索摘要，没有实施修改。",
+                metadata={
+                    "resource_id": "skill.weather",
+                    "auto_converged": True,
+                    "completion_mode": "auto_summary_after_exploration_stall",
+                },
+            )
+        }
+
+        @staticmethod
+        def task_state_snapshot(task_id: str) -> dict[str, Any]:
+            del task_id
+            return {}
+
+    reason = orch._refresh_force_converge_state(  # type: ignore[attr-defined]
+        runtime=RuntimeStub(),  # type: ignore[arg-type]
+        context=context,
+    )
+
+    assert reason is not None
+    assert "convergence required" in reason
+    assert "auto-converged" in reason
     assert context.state["orchestrator_force_converge"] == reason
 
 
@@ -2814,6 +2894,63 @@ def test_wait_for_tasks_preserves_skill_context_for_failed_tasks() -> None:
     assert payload["description"] == "查询天气"
 
 
+def test_wait_for_tasks_preserves_auto_converged_context() -> None:
+    from babybot.agent_kernel.dynamic_orchestrator import (
+        InMemoryChildTaskBus,
+        InProcessChildTaskRuntime,
+    )
+    from babybot.heartbeat import TaskHeartbeatRegistry
+
+    class _DummyRM(DummyResourceManager):
+        def resolve_resource_scope(self, resource_id: str, require_tools: bool = False):
+            del require_tools
+            if resource_id == "skill.weather":
+                return {"include_groups": ["skill_weather"]}, ("weather",)
+            return None
+
+    class _Bridge:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="ignored",
+                status="succeeded",
+                output="探索预算已耗尽，仅输出阻塞摘要。",
+                metadata={
+                    "auto_converged": True,
+                    "completion_mode": "auto_summary_after_exploration_stall",
+                },
+            )
+
+    runtime = InProcessChildTaskRuntime(
+        flow_id="flow-auto-converged-context",
+        resource_manager=_DummyRM(),  # type: ignore[arg-type]
+        bridge=_Bridge(),  # type: ignore[arg-type]
+        child_task_bus=InMemoryChildTaskBus(),
+        task_heartbeat_registry=TaskHeartbeatRegistry(),
+        max_parallel=1,
+        max_tasks=5,
+    )
+
+    async def _run() -> dict[str, Any]:
+        task_id = await runtime.dispatch(
+            {"resource_id": "skill.weather", "description": "修改 pdf 技能"},
+            task_counter=0,
+            context=ExecutionContext(session_id="flow-auto-converged-context"),
+        )
+        payload = json.loads(await runtime.wait_for_tasks([task_id]))
+        return payload[task_id]
+
+    payload = asyncio.run(_run())
+
+    assert payload["status"] == "succeeded"
+    assert payload["auto_converged"] is True
+    assert payload["completion_mode"] == "auto_summary_after_exploration_stall"
+    assert payload["resource_id"] == "skill.weather"
+    assert payload["resource_ids"] == ["skill.weather"]
+    assert payload["skill_ids"] == ["weather"]
+    assert payload["description"] == "修改 pdf 技能"
+
+
 def test_child_task_bus_clears_events_after_flow_completion() -> None:
     step1 = ModelResponse(
         text="",
@@ -2860,6 +2997,98 @@ def test_child_task_bus_clears_events_after_flow_completion() -> None:
 
     assert result.conclusion == "done"
     assert bus.events_for("flow-test") == []
+
+
+def test_orchestrator_blocks_redispatch_after_auto_converged_child_result() -> None:
+    class AutoConvergedGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+            self.wait_payload = ""
+            self.redispatch_result = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.weather",
+                            "先探索 pdf 技能实现",
+                            call_id="c1",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in reversed(request.messages):
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                        break
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 2:
+                for msg in reversed(request.messages):
+                    if msg.role == "tool" and msg.tool_call_id == "c2":
+                        self.wait_payload = msg.content
+                        break
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.weather",
+                            "继续探索并修改 pdf 技能",
+                            call_id="c3",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            for msg in reversed(request.messages):
+                if msg.role == "tool" and msg.tool_call_id == "c3":
+                    self.redispatch_result = msg.content
+                    break
+            self._call_idx += 1
+            return _reply_tool_call("基于现有阻塞摘要直接收敛", call_id="c4")
+
+    class _Bridge:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, task, context):
+            del task, context
+            self.calls += 1
+            return TaskResult(
+                task_id="ignored",
+                status="succeeded",
+                output="探索预算已耗尽，仅输出阻塞摘要。",
+                metadata={
+                    "resource_id": "skill.weather",
+                    "auto_converged": True,
+                    "completion_mode": "auto_summary_after_exploration_stall",
+                },
+            )
+
+    gw = AutoConvergedGateway()
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+    bridge = _Bridge()
+    orch._bridge = bridge  # type: ignore[assignment]
+
+    result = asyncio.run(orch.run("修改 pdf 技能默认中文字体", ExecutionContext()))
+
+    assert result.conclusion == "基于现有阻塞摘要直接收敛"
+    assert "\"auto_converged\": true" in gw.wait_payload
+    assert "convergence required" in gw.redispatch_result
+    assert bridge.calls == 1
 
 
 def test_orchestrator_accepts_executor_registry() -> None:

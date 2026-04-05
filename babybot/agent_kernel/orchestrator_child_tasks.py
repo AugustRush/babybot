@@ -235,6 +235,8 @@ class ChildTaskRuntimeHelper:
                 continue
             if str(result.output or "").strip() == "":
                 continue
+            if result.metadata.get("auto_converged") is True:
+                continue
             resource_id = str(result.metadata.get("resource_id", "") or "").strip()
             if resource_id == "group.scheduler":
                 continue

@@ -793,6 +793,7 @@ class InProcessChildTaskRuntime:
     @classmethod
     def _result_payload(cls, result: TaskResult) -> dict[str, Any]:
         artifacts = cls._result_artifacts(result)
+        metadata = dict(result.metadata or {})
         payload: dict[str, Any] = {
             "status": result.status,
             "output": result.output,
@@ -800,11 +801,15 @@ class InProcessChildTaskRuntime:
             "reply_artifacts_ready": bool(artifacts),
             "reply_artifacts_count": len(artifacts),
         }
-        metadata = dict(result.metadata or {})
         for key in ("resource_id", "description", "error_type"):
             value = metadata.get(key)
             if isinstance(value, str) and value.strip():
                 payload[key] = value
+        if metadata.get("auto_converged") is True:
+            payload["auto_converged"] = True
+        completion_mode = metadata.get("completion_mode")
+        if isinstance(completion_mode, str) and completion_mode.strip():
+            payload["completion_mode"] = completion_mode
         for key in ("resource_ids", "skill_ids"):
             value = metadata.get(key)
             if isinstance(value, (list, tuple)):

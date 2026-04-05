@@ -369,11 +369,20 @@ class NotebookRuntimeHelper:
             if result is None:
                 continue
             if result.status == "succeeded":
+                auto_converged = result.metadata.get("auto_converged") is True
                 notebook.transition_node(
                     node_id,
                     "completed",
-                    summary="子任务完成",
+                    summary="子任务自动收敛" if auto_converged else "子任务完成",
                     detail=str(result.output or ""),
+                    metadata=(
+                        {
+                            "auto_converged": True,
+                            "completion_mode": result.metadata.get("completion_mode"),
+                        }
+                        if auto_converged
+                        else None
+                    ),
                 )
                 for artifact in getattr(result, "artifacts", ()) or ():
                     if str(artifact).strip():
@@ -461,6 +470,7 @@ class NotebookRuntimeHelper:
         task_map = self.notebook_task_map(context)
         dead_ids: list[str] = []
         immediate_dead_ids: list[str] = []
+        auto_converged_ids: list[str] = []
         success_ids: list[str] = []
         pending_ids: list[str] = []
 
@@ -480,7 +490,10 @@ class NotebookRuntimeHelper:
                 if resource_id == "group.scheduler":
                     continue
                 if result.status == "succeeded":
-                    success_ids.append(task_id)
+                    if result.metadata.get("auto_converged") is True:
+                        auto_converged_ids.append(task_id)
+                    else:
+                        success_ids.append(task_id)
                 elif (
                     result.status == "failed"
                     and result.metadata.get("dead_lettered") is True
@@ -503,7 +516,16 @@ class NotebookRuntimeHelper:
         if success_ids or pending_ids:
             return None
 
-        if immediate_dead_ids:
+        if auto_converged_ids:
+            stalled_preview = ", ".join(auto_converged_ids)
+            reason = (
+                "convergence required: a child task auto-converged after exhausting "
+                f"its exploration budget ({stalled_preview}). "
+                "Do not redispatch similar exploratory work. Inspect the existing "
+                "task result and reply with a concise blocker summary, or switch "
+                "to a materially different action path."
+            )
+        elif immediate_dead_ids:
             dead_preview = ", ".join(immediate_dead_ids)
             reason = (
                 "convergence required: a child task already exhausted its exploration "
@@ -526,6 +548,7 @@ class NotebookRuntimeHelper:
             "node_id": current_node.node_id,
             "dead_task_ids": dead_ids,
             "immediate_dead_task_ids": immediate_dead_ids,
+            "auto_converged_task_ids": auto_converged_ids,
             "successful_task_ids": success_ids,
             "pending_task_ids": pending_ids,
         }
@@ -551,6 +574,10 @@ class NotebookRuntimeHelper:
                 "orchestrator_force_converge_immediate_dead_task_ids",
                 None,
             )
+            context.state.pop(
+                "orchestrator_force_converge_auto_converged_task_ids",
+                None,
+            )
             return None
 
         reason, metadata = payload
@@ -562,13 +589,17 @@ class NotebookRuntimeHelper:
         context.state["orchestrator_force_converge_immediate_dead_task_ids"] = list(
             metadata.get("immediate_dead_task_ids") or []
         )
+        context.state["orchestrator_force_converge_auto_converged_task_ids"] = list(
+            metadata.get("auto_converged_task_ids") or []
+        )
         if current_reason == reason:
             return None
 
         logger.warning(
-            "DynamicOrchestrator: force-converge activated node=%s dead_tasks=%s",
+            "DynamicOrchestrator: force-converge activated node=%s dead_tasks=%s auto_converged=%s",
             metadata["node_id"],
             metadata["dead_task_ids"],
+            metadata.get("auto_converged_task_ids") or [],
         )
         notebook = RuntimeState(context).notebook_binding().notebook
         if notebook is not None and metadata["node_id"] in notebook.nodes:
@@ -582,6 +613,9 @@ class NotebookRuntimeHelper:
                     "dead_task_ids": list(metadata["dead_task_ids"]),
                     "immediate_dead_task_ids": list(
                         metadata.get("immediate_dead_task_ids") or []
+                    ),
+                    "auto_converged_task_ids": list(
+                        metadata.get("auto_converged_task_ids") or []
                     ),
                 },
             )
