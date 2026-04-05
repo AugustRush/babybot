@@ -329,6 +329,31 @@ def test_normalize_task_description_not_leaked_as_message() -> None:
     assert normalized.task_label == "这是系统内部的任务描述"
 
 
+def test_normalize_prefers_user_label_over_internal_child_task_prompt() -> None:
+    normalized = normalize_runtime_feedback_event(
+        {
+            "job_id": "j1",
+            "flow_id": "f1",
+            "task_id": "t1",
+            "event": "succeeded",
+            "payload": {
+                "user_label": "查询该推文的完整回复列表",
+                "task_description": (
+                    "[执行型子任务]\n"
+                    "你是执行型子任务，不是任务编排器，也不是最终回复器。\n"
+                    "原始子任务：[Research] 使用 OpenCLI 查询推文回复\n"
+                    "[输入]\n"
+                    "- parent_goal: 查看完整回复"
+                ),
+            },
+        }
+    )
+
+    assert normalized.task_label == "查询该推文的完整回复列表"
+    assert "[执行型子任务]" not in normalized.task_label
+    assert "原始子任务" not in normalized.task_label
+
+
 def test_normalize_runtime_feedback_event_prefers_notebook_summary_fields() -> None:
     normalized = normalize_runtime_feedback_event(
         {

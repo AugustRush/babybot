@@ -99,6 +99,12 @@ class OrchestratorConfig:
     # If ``None`` the normalisation step is skipped entirely.
     build_child_task_prompt: Any = None  # Callable | None
 
+    # Callable ``(raw_description, original_goal, resource_ids) -> str`` that
+    # builds the short, user-facing feedback label for runtime progress events,
+    # notebook titles, and task payload summaries. This MUST stay free of
+    # internal execution-only prompt scaffolding.
+    build_child_task_feedback_label: Any = None  # Callable | None
+
     # ── Repo/skill maintenance detector ─────────────────────────────────
     # Callable ``(text: str) -> bool`` used to detect maintenance-like tasks
     # and add extra guidance lines to the child-task prompt.

@@ -511,10 +511,11 @@ class MessageBus:
 
         def _runtime_stage_text(event_payload: dict[str, Any]) -> str:
             normalized_event = normalize_runtime_feedback_event(event_payload)
-            event_name = str(event_payload.get("event", "") or "").strip().lower()
-            raw_payload = event_payload.get("payload") or {}
-            description = str(raw_payload.get("description", "") or "").strip()
-            label = description or normalized_event.message or "执行中"
+            label = (
+                normalized_event.task_label
+                or normalized_event.message
+                or "执行中"
+            )
 
             if normalized_event.stage == "interactive_session" and msg.channel != "feishu":
                 return ""

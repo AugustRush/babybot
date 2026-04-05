@@ -801,7 +801,7 @@ class InProcessChildTaskRuntime:
             "reply_artifacts_ready": bool(artifacts),
             "reply_artifacts_count": len(artifacts),
         }
-        for key in ("resource_id", "description", "error_type"):
+        for key in ("resource_id", "description", "error_type", "user_label"):
             value = metadata.get(key)
             if isinstance(value, str) and value.strip():
                 payload[key] = value
@@ -885,6 +885,10 @@ class InProcessChildTaskRuntime:
 
         resource_ids = _dispatch_resource_ids(args)
         description: str = args.get("description", "")
+        public_description = str(
+            args.get("__public_description", "") or args.get("__feedback_label", "") or description
+        ).strip()
+        feedback_label = str(args.get("__feedback_label", "") or public_description).strip()
         deps: list[str] = args.get("deps", [])
         if not resource_ids:
             return "error: resource_id or resource_ids is required"
@@ -901,7 +905,7 @@ class InProcessChildTaskRuntime:
 
         duplicate_reason = self._duplicate_dispatch_reason(
             resource_ids=resource_ids,
-            description=description,
+            description=public_description,
         )
         if duplicate_reason is not None:
             return duplicate_reason
@@ -948,8 +952,8 @@ class InProcessChildTaskRuntime:
             node = notebook.add_child_node(
                 parent_id=parent_id,
                 kind=task_kind,
-                title=DynamicOrchestrator._task_title_from_description(description),
-                objective=str(description or "").strip(),
+                title=DynamicOrchestrator._task_title_from_description(public_description),
+                objective=public_description,
                 owner="subagent",
                 resource_ids=tuple(resource_ids),
                 deps=dep_node_ids,
@@ -982,7 +986,9 @@ class InProcessChildTaskRuntime:
                 "resource_id": primary_resource_id,
                 "resource_ids": list(resource_ids),
                 "skill_ids": merged_skill_ids,
-                "description": description,
+                "description": public_description,
+                "execution_description": description,
+                "user_label": feedback_label,
                 "notebook_node_id": notebook_node_id,
             },
         )
@@ -1039,7 +1045,8 @@ class InProcessChildTaskRuntime:
                 payload=self._event_payload(
                     resource_id=primary_resource_id,
                     resource_ids=list(resource_ids),
-                    description=description,
+                    description=public_description,
+                    user_label=feedback_label,
                     deps=list(deps),
                     **_notebook_feedback_payload(),
                 ),
@@ -1050,7 +1057,9 @@ class InProcessChildTaskRuntime:
             status="queued",
             resource_id=primary_resource_id,
             resource_ids=list(resource_ids),
-            description=description,
+            description=public_description,
+            execution_description=description,
+            user_label=feedback_label,
             deps=list(deps),
         )
 
@@ -1059,7 +1068,7 @@ class InProcessChildTaskRuntime:
                 self._monitor_task_progress(
                     task_id=task_id,
                     resource_id=primary_resource_id,
-                    description=description,
+                    description=public_description,
                 )
             )
             if deps:
@@ -1078,7 +1087,8 @@ class InProcessChildTaskRuntime:
                             event="started",
                             payload=self._event_payload(
                                 resource_id=primary_resource_id,
-                                description=description,
+                                description=public_description,
+                                user_label=feedback_label,
                                 **_notebook_feedback_payload(),
                             ),
                         )
@@ -1163,7 +1173,8 @@ class InProcessChildTaskRuntime:
                                     status=result.status,
                                     error=result.error,
                                     output=result.output,
-                                    task_description=description,
+                                    task_description=public_description,
+                                    user_label=feedback_label,
                                     **_notebook_feedback_payload(),
                                 ),
                             )
@@ -1203,7 +1214,8 @@ class InProcessChildTaskRuntime:
                                 event="retrying",
                                 payload=self._event_payload(
                                     resource_id=primary_resource_id,
-                                    description=description,
+                                    description=public_description,
+                                    user_label=feedback_label,
                                     attempt=attempt,
                                     max_attempts=max_attempts,
                                     error=result.error,
@@ -1237,7 +1249,8 @@ class InProcessChildTaskRuntime:
                                 attempts=final_result.attempts,
                                 max_attempts=max_attempts,
                                 error_type=decision.error_type,
-                                task_description=description,
+                                task_description=public_description,
+                                user_label=feedback_label,
                                 **_notebook_feedback_payload(),
                             ),
                         )
@@ -2086,6 +2099,19 @@ class DynamicOrchestrator:
             upstream_results=upstream_results,
         )
 
+    def _build_child_task_feedback_label(
+        self,
+        *,
+        description: str,
+        resource_ids: tuple[str, ...],
+        context: ExecutionContext,
+    ) -> str:
+        return self._child_task_runtime.build_child_task_feedback_label(
+            description=description,
+            resource_ids=resource_ids,
+            context=context,
+        )
+
     @staticmethod
     def _recent_successful_upstream_results(
         results: dict[str, "TaskResult"],
@@ -2285,6 +2311,12 @@ class DynamicOrchestrator:
                 context=context,
             )
             resource_ids = _dispatch_resource_ids(dispatch_args)
+            raw_description = str(dispatch_args.get("description", "") or "")
+            feedback_label = self._build_child_task_feedback_label(
+                description=raw_description,
+                resource_ids=resource_ids,
+                context=context,
+            )
             deps = list(dispatch_args.get("deps", []) or [])
             active_in_flight = len(runtime.in_flight)
             scheduler_dispatch = "group.scheduler" in resource_ids
@@ -2353,8 +2385,10 @@ class DynamicOrchestrator:
                     upstream_results = self._recent_successful_upstream_results(
                         runtime.results
                     )
+                dispatch_args["__public_description"] = raw_description
+                dispatch_args["__feedback_label"] = feedback_label
                 dispatch_args["description"] = self._normalize_child_task_description(
-                    description=str(dispatch_args.get("description", "") or ""),
+                    description=raw_description,
                     resource_ids=resource_ids,
                     context=context,
                     upstream_results=upstream_results,

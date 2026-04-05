@@ -235,6 +235,28 @@ def _build_child_task_prompt(
     return "\n".join(lines)
 
 
+def _build_child_task_feedback_label(
+    raw_description: str,
+    original_goal: str,
+    resource_ids: tuple[str, ...],
+) -> str:
+    del original_goal, resource_ids
+    for line in str(raw_description or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("原始子任务："):
+            stripped = stripped.split("：", 1)[1].strip()
+        elif stripped.startswith("原始子任务:"):
+            stripped = stripped.split(":", 1)[1].strip()
+        stripped = stripped.removeprefix("[执行型子任务]").strip()
+        if stripped.startswith("[") and "]" in stripped:
+            stripped = stripped.split("]", 1)[1].strip()
+        if stripped and not stripped.startswith("["):
+            return stripped[:80]
+    return "执行子任务"
+
+
 # ── Honesty reminder ─────────────────────────────────────────────────────────
 
 _ALL_TASKS_FAILED_REMINDER = (
@@ -356,6 +378,7 @@ def build_orchestrator_config() -> OrchestratorConfig:
         upstream_results_header=_UPSTREAM_RESULTS_HEADER,
         child_task_sentinel=_CHILD_TASK_SENTINEL,
         build_child_task_prompt=_build_child_task_prompt,
+        build_child_task_feedback_label=_build_child_task_feedback_label,
         is_maintenance_task=_is_maintenance_task,
         all_tasks_failed_reminder=_ALL_TASKS_FAILED_REMINDER,
         step_budget_exhausted_header=_STEP_BUDGET_EXHAUSTED_HEADER,

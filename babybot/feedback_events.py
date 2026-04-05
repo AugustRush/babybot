@@ -89,21 +89,24 @@ def _extract_task_label(raw_description: str) -> str:
     """
     if not raw_description:
         return ""
-    # Take the first non-blank line.
-    first_line = ""
-    for line in raw_description.splitlines():
-        stripped = line.strip()
-        if stripped:
-            first_line = stripped
-            break
-    if not first_line:
+    lines = [line.strip() for line in raw_description.splitlines() if line.strip()]
+    if not lines:
         return ""
-    # Strip phase prefixes like "[Research]", "[执行]", "[Implementation]".
-    first_line = re.sub(r"^\[[^\]]{1,30}\]\s*", "", first_line).strip()
-    # Truncate.
-    if len(first_line) > _TASK_DESC_MAX_CHARS:
-        first_line = first_line[:_TASK_DESC_MAX_CHARS] + "…"
-    return first_line
+    candidate = lines[0]
+    if candidate == "[执行型子任务]":
+        for line in lines[1:]:
+            if line.startswith("原始子任务："):
+                candidate = line.split("：", 1)[1].strip()
+                break
+            if line.startswith("原始子任务:"):
+                candidate = line.split(":", 1)[1].strip()
+                break
+        else:
+            return ""
+    candidate = re.sub(r"^\[[^\]]{1,30}\]\s*", "", candidate).strip()
+    if len(candidate) > _TASK_DESC_MAX_CHARS:
+        candidate = candidate[:_TASK_DESC_MAX_CHARS] + "…"
+    return candidate
 
 
 def _build_notebook_feedback_message(payload: dict[str, Any]) -> str:
@@ -208,11 +211,14 @@ def normalize_runtime_feedback_event(raw: Any) -> RuntimeFeedbackEvent:
         output_summary = _truncate_output(raw_output)
 
     # task_label: user-readable description of what the subtask did.
-    # Read from the "task_description" payload field (not "description", which
-    # may contain the full system-prompt).
-    task_label = _extract_task_label(
-        str(payload.get("task_description", "") or "").strip()
-    )
+    # Prefer explicit user_label. Fall back to task_description only when needed.
+    task_label = _extract_task_label(str(payload.get("user_label", "") or "").strip())
+    if not task_label:
+        task_label = _extract_task_label(
+            str(payload.get("task_description", "") or "").strip()
+        )
+    if not task_label:
+        task_label = _extract_task_label(str(payload.get("description", "") or "").strip())
 
     return RuntimeFeedbackEvent(
         job_id=job_id,

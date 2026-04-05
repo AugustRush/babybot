@@ -653,6 +653,66 @@ def test_message_bus_dedupes_same_task_progress_text_across_interleaved_events()
     ]
 
 
+def test_message_bus_never_uses_internal_description_as_progress_label() -> None:
+    class _PromptLeakOrchestrator:
+        async def process_task(
+            self,
+            user_input: str,
+            chat_key: str = "",
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            stream_callback: Any = None,
+            runtime_event_callback: Any = None,
+        ) -> TaskResponse:
+            del user_input, chat_key, heartbeat, media_paths, stream_callback
+            if runtime_event_callback is not None:
+                await runtime_event_callback(
+                    {
+                        "flow_id": "flow-1",
+                        "task_id": "task-1",
+                        "event": "started",
+                        "payload": {
+                            "stage": "task",
+                            "description": (
+                                "[执行型子任务]\n"
+                                "你是执行型子任务，不是任务编排器。\n"
+                                "原始子任务：使用 OpenCLI 查询完整回复列表"
+                            ),
+                            "user_label": "查询完整回复列表",
+                        },
+                    }
+                )
+            return TaskResponse(text="done")
+
+    channel = _FakeFeishuChannel(stream_reply=False)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_PromptLeakOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> None:
+        await bus.start()
+        try:
+            await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    asyncio.run(_run())
+
+    assert [item.text for item in channel.sent] == [
+        "处理中：查询完整回复列表",
+        "done",
+    ]
+
+
 def test_message_bus_chat_semaphore_uses_lru_eviction() -> None:
     cfg = _Config()
     cfg.system.max_concurrency = 2

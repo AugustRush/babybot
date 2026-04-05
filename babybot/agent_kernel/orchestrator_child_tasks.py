@@ -221,6 +221,35 @@ class ChildTaskRuntimeHelper:
             return raw_description
         return built if built else raw_description
 
+    def build_child_task_feedback_label(
+        self,
+        *,
+        description: str,
+        resource_ids: tuple[str, ...],
+        context: ExecutionContext,
+    ) -> str:
+        raw_description = str(description or "").strip()
+        if not raw_description:
+            return "执行子任务"
+
+        builder = getattr(self._config, "build_child_task_feedback_label", None)
+        if builder is None:
+            return raw_description.splitlines()[0].strip()[:80]
+
+        original_goal = str(context.state.get("original_goal", "") or "").strip()
+        try:
+            built = builder(
+                raw_description=raw_description,
+                original_goal=original_goal,
+                resource_ids=resource_ids,
+            )
+        except Exception:
+            logger.exception(
+                "build_child_task_feedback_label raised; using raw description"
+            )
+            return raw_description.splitlines()[0].strip()[:80]
+        return str(built or raw_description).strip()[:80] or "执行子任务"
+
     @staticmethod
     def recent_successful_upstream_results(
         results: dict[str, TaskResult],
