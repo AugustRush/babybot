@@ -378,6 +378,8 @@ class WorkerRuntime:
         heartbeat: "Heartbeat | None" = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> tuple[str, list[str]]:
         return await self._manager._run_subagent_task(
             task_description=task_description,
@@ -389,6 +391,8 @@ class WorkerRuntime:
             heartbeat=heartbeat,
             media_paths=media_paths,
             skill_ids=skill_ids,
+            plan_notebook=plan_notebook,
+            notebook_node_id=notebook_node_id,
         )
 
     async def run_subagent_task_result(
@@ -402,6 +406,8 @@ class WorkerRuntime:
         heartbeat: "Heartbeat | None" = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> TaskResult:
         return await self._manager._run_subagent_task_result(
             task_description=task_description,
@@ -413,6 +419,8 @@ class WorkerRuntime:
             heartbeat=heartbeat,
             media_paths=media_paths,
             skill_ids=skill_ids,
+            plan_notebook=plan_notebook,
+            notebook_node_id=notebook_node_id,
         )
 
 
@@ -1608,6 +1616,8 @@ class ResourceManager:
         heartbeat: "Heartbeat | None" = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> tuple[str, list[str]]:
         return await self._runtime_view().run_subagent_task(
             task_description=task_description,
@@ -1619,6 +1629,8 @@ class ResourceManager:
             heartbeat=heartbeat,
             media_paths=media_paths,
             skill_ids=skill_ids,
+            plan_notebook=plan_notebook,
+            notebook_node_id=notebook_node_id,
         )
 
     async def run_subagent_task_result(
@@ -1632,6 +1644,8 @@ class ResourceManager:
         heartbeat: "Heartbeat | None" = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> TaskResult:
         return await self._runtime_view().run_subagent_task_result(
             task_description=task_description,
@@ -1643,6 +1657,8 @@ class ResourceManager:
             heartbeat=heartbeat,
             media_paths=media_paths,
             skill_ids=skill_ids,
+            plan_notebook=plan_notebook,
+            notebook_node_id=notebook_node_id,
         )
 
     async def _run_subagent_task(
@@ -1656,6 +1672,8 @@ class ResourceManager:
         heartbeat: "Heartbeat | None" = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> tuple[str, list[str]]:
         return await self._subagent_runtime_view().run_subagent_task(
             task_description=task_description,
@@ -1667,6 +1685,8 @@ class ResourceManager:
             heartbeat=heartbeat,
             media_paths=media_paths,
             skill_ids=skill_ids,
+            plan_notebook=plan_notebook,
+            notebook_node_id=notebook_node_id,
         )
 
     async def _run_subagent_task_result(
@@ -1680,6 +1700,8 @@ class ResourceManager:
         heartbeat: "Heartbeat | None" = None,
         media_paths: list[str] | None = None,
         skill_ids: list[str] | None = None,
+        plan_notebook: Any = None,
+        notebook_node_id: str = "",
     ) -> TaskResult:
         return await self._subagent_runtime_view().run_subagent_task_result(
             task_description=task_description,
@@ -1691,6 +1713,8 @@ class ResourceManager:
             heartbeat=heartbeat,
             media_paths=media_paths,
             skill_ids=skill_ids,
+            plan_notebook=plan_notebook,
+            notebook_node_id=notebook_node_id,
         )
 
     def _build_task_lease(self, lease: dict[str, Any]) -> ToolLease:

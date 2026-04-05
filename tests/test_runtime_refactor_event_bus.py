@@ -342,6 +342,67 @@ def test_resource_bridge_executor_builds_worker_prompt_from_notebook_context() -
     assert result.metadata["received_node_id"] == node.node_id
 
 
+def test_resource_manager_public_subagent_result_api_forwards_notebook_binding() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+    from babybot.resource import ResourceManager
+
+    notebook = create_root_notebook(goal="repair local pdf skill", flow_id="flow-public")
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Apply fixes",
+        objective="patch local files",
+        owner="worker",
+    )
+    captured: dict[str, Any] = {}
+
+    class _RuntimeView:
+        async def run_subagent_task_result(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            memory_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+            plan_notebook: Any = None,
+            notebook_node_id: str = "",
+        ) -> TaskResult:
+            del (
+                task_description,
+                lease,
+                agent_name,
+                tape,
+                tape_store,
+                memory_store,
+                heartbeat,
+                media_paths,
+                skill_ids,
+            )
+            captured["plan_notebook"] = plan_notebook
+            captured["notebook_node_id"] = notebook_node_id
+            return TaskResult(task_id="worker-1", status="succeeded", output="done")
+
+    rm = ResourceManager.__new__(ResourceManager)
+    rm._runtime_view = lambda: _RuntimeView()  # type: ignore[attr-defined]
+
+    result = asyncio.run(
+        ResourceManager.run_subagent_task_result(
+            rm,
+            task_description="patch local files",
+            plan_notebook=notebook,
+            notebook_node_id=node.node_id,
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert captured["plan_notebook"] is notebook
+    assert captured["notebook_node_id"] == node.node_id
+
+
 def test_runtime_retries_retryable_failures_before_succeeding() -> None:
     bus = InMemoryChildTaskBus()
     bridge = _ScriptedBridge([
