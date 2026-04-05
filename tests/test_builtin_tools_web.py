@@ -227,6 +227,73 @@ class TestWebFetch:
             with pytest.raises(RuntimeError, match="Failed to fetch"):
                 asyncio.run(tool(url="https://example.com/missing"))
 
+    def test_github_contents_api_rate_limit_falls_back_to_public_tree(self) -> None:
+        api_url = "https://api.github.com/repos/MiniMax-AI/skills/contents/skills/minimax-pdf"
+        fallback_url = (
+            "https://github.com/MiniMax-AI/skills/tree/main/skills/minimax-pdf"
+        )
+        calls: list[str] = []
+
+        class _SequenceClient:
+            async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+                del kwargs
+                calls.append(url)
+                if url == api_url:
+                    return _FakeResponse(status_code=403, text="rate limit exceeded")
+                if url == fallback_url:
+                    return _FakeResponse(
+                        text="<html><body><article><h1>minimax-pdf</h1></article></body></html>"
+                    )
+                raise AssertionError(f"unexpected url: {url}")
+
+            async def aclose(self) -> None:
+                pass
+
+        tool = build_web_fetch_tool(_DummyOwner())
+        with patch(
+            "babybot.builtin_tools.web._get_http_client",
+            return_value=_SequenceClient(),
+        ):
+            result = asyncio.run(tool(url=api_url))
+
+        assert "minimax-pdf" in result
+        assert calls == [api_url, fallback_url]
+
+    def test_github_contents_api_file_rate_limit_falls_back_to_raw(self) -> None:
+        api_url = (
+            "https://api.github.com/repos/MiniMax-AI/skills/contents/skills/minimax-pdf/SKILL.md"
+        )
+        fallback_url = (
+            "https://raw.githubusercontent.com/MiniMax-AI/skills/main/skills/minimax-pdf/SKILL.md"
+        )
+        calls: list[str] = []
+
+        class _SequenceClient:
+            async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+                del kwargs
+                calls.append(url)
+                if url == api_url:
+                    return _FakeResponse(status_code=429, text="rate limit exceeded")
+                if url == fallback_url:
+                    return _FakeResponse(
+                        text="# Skill\nhello",
+                        content_type="text/plain; charset=utf-8",
+                    )
+                raise AssertionError(f"unexpected url: {url}")
+
+            async def aclose(self) -> None:
+                pass
+
+        tool = build_web_fetch_tool(_DummyOwner())
+        with patch(
+            "babybot.builtin_tools.web._get_http_client",
+            return_value=_SequenceClient(),
+        ):
+            result = asyncio.run(tool(url=api_url))
+
+        assert result == "# Skill\nhello"
+        assert calls == [api_url, fallback_url]
+
 
 # ---------------------------------------------------------------------------
 # web_search tool tests

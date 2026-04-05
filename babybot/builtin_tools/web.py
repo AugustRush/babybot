@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,48 @@ def _truncate(text: str, max_chars: int = _MAX_CONTENT_LENGTH) -> str:
     return text[:max_chars] + f"\n\n[Truncated — {len(text)} chars total]"
 
 
+def _github_fallback_urls(url: str) -> list[str]:
+    parsed = urlparse(url)
+    if parsed.netloc != "api.github.com":
+        return []
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 5 or parts[0] != "repos" or parts[3] != "contents":
+        return []
+
+    owner = parts[1]
+    repo = parts[2]
+    content_path = "/".join(parts[4:])
+    if not owner or not repo or not content_path:
+        return []
+
+    ref = (parse_qs(parsed.query).get("ref") or [""])[0].strip()
+    branches = [ref] if ref else ["main", "master"]
+    filename = content_path.rsplit("/", 1)[-1]
+    looks_like_file = "." in filename
+
+    candidates: list[str] = []
+    for branch in branches:
+        if looks_like_file:
+            candidates.append(
+                f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{content_path}"
+            )
+            candidates.append(
+                f"https://github.com/{owner}/{repo}/blob/{branch}/{content_path}"
+            )
+        else:
+            candidates.append(
+                f"https://github.com/{owner}/{repo}/tree/{branch}/{content_path}"
+            )
+    return candidates
+
+
+def _should_retry_with_github_fallback(url: str, exc: Exception) -> bool:
+    if not _github_fallback_urls(url):
+        return False
+    text = str(exc).lower()
+    return any(token in text for token in ("403", "429", "rate limit"))
+
+
 async def _get_http_client() -> Any:
     """Lazy-import and return an httpx.AsyncClient."""
     import httpx
@@ -124,8 +166,38 @@ def build_web_fetch_tool(owner: Any) -> Any:
 
         client = await _get_http_client()
         try:
-            response = await client.get(url)
-            response.raise_for_status()
+            response = None
+            fetch_url = url
+            fetch_candidates = [url]
+            fallback_urls = _github_fallback_urls(url)
+            if fallback_urls:
+                fetch_candidates.extend(fallback_urls)
+            last_exc: Exception | None = None
+            for idx, candidate_url in enumerate(fetch_candidates):
+                try:
+                    candidate_response = await client.get(candidate_url)
+                    candidate_response.raise_for_status()
+                    response = candidate_response
+                    fetch_url = candidate_url
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    is_primary_request = idx == 0
+                    if is_primary_request and _should_retry_with_github_fallback(
+                        url, exc
+                    ):
+                        logger.info(
+                            "web_fetch: GitHub API fetch failed for %s, trying public fallback URLs",
+                            url,
+                        )
+                        continue
+                    if not is_primary_request and idx + 1 < len(fetch_candidates):
+                        continue
+                    raise
+            if response is None:
+                raise RuntimeError(
+                    f"Failed to fetch {url}: {last_exc or 'unknown error'}"
+                )
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch {url}: {exc}") from exc
         finally:
@@ -133,6 +205,7 @@ def build_web_fetch_tool(owner: Any) -> Any:
 
         content_type = response.headers.get("content-type", "")
         raw = response.text
+        logger.debug("web_fetch fetched url=%s via=%s", url, fetch_url)
 
         # For non-HTML content, return as-is.
         if "html" not in content_type and format != "html":
