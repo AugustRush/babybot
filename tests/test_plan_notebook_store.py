@@ -4,6 +4,7 @@ from pathlib import Path
 
 from babybot.agent_kernel.plan_notebook import create_root_notebook
 from babybot.memory_store import HybridMemoryStore
+from babybot.orchestration_router import RoutingDecision
 
 
 def _build_notebook():
@@ -75,6 +76,29 @@ def test_plan_notebook_store_searches_raw_event_text_with_like_fallback(tmp_path
 
     assert matches
     assert "本地没有" in matches[0]["detail"]
+
+
+def test_plan_notebook_store_serializes_structured_metadata_objects(tmp_path: Path) -> None:
+    from babybot.agent_kernel.plan_notebook_store import PlanNotebookStore
+
+    store = PlanNotebookStore(tmp_path / "plan_notebook.db")
+    notebook = _build_notebook()
+    notebook.metadata["routing_decision"] = RoutingDecision(
+        route_mode="debate",
+        need_clarification=False,
+        execution_style="direct_execute",
+        parallelism_hint="bounded_parallel",
+        worker_hint="allow",
+        explain="structured route",
+        decision_source="rule",
+    )
+
+    store.save_notebook(notebook, chat_key="feishu:c1")
+    loaded = store.load_notebook(notebook.notebook_id)
+
+    assert loaded is not None
+    assert loaded.metadata["routing_decision"]["route_mode"] == "debate"
+    assert loaded.metadata["routing_decision"]["decision_source"] == "rule"
 
 
 def test_memory_store_observe_notebook_completion_persists_summary_and_index(tmp_path: Path) -> None:

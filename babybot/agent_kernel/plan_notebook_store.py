@@ -4,11 +4,35 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
 from ..sqlite_utils import connect_sqlite
 from .plan_notebook import PlanNotebook
+
+
+def _json_safe(payload: Any) -> Any:
+    if payload is None or isinstance(payload, (bool, int, float, str)):
+        return payload
+    if isinstance(payload, Path):
+        return str(payload)
+    if isinstance(payload, dict):
+        return {str(key): _json_safe(value) for key, value in payload.items()}
+    if isinstance(payload, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in payload]
+    model_dump = getattr(payload, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _json_safe(model_dump())
+        except Exception:
+            return str(payload)
+    if is_dataclass(payload) and not isinstance(payload, type):
+        try:
+            return _json_safe(asdict(payload))
+        except Exception:
+            return str(payload)
+    return str(payload)
 
 
 class PlanNotebookStore:
@@ -27,7 +51,8 @@ class PlanNotebookStore:
 
     def save_notebook(self, notebook: PlanNotebook, *, chat_key: str = "") -> None:
         db = self._ensure_db()
-        payload = notebook.to_dict()
+        payload = _json_safe(notebook.to_dict())
+        notebook_metadata = _json_safe(notebook.metadata)
         db.execute(
             """
             INSERT INTO plan_notebooks (
@@ -50,7 +75,7 @@ class PlanNotebookStore:
                 notebook.flow_id,
                 notebook.plan_id,
                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                json.dumps(notebook.metadata, ensure_ascii=False, sort_keys=True),
+                json.dumps(notebook_metadata, ensure_ascii=False, sort_keys=True),
                 notebook.created_at,
                 notebook.updated_at,
             ),
@@ -234,7 +259,11 @@ class PlanNotebookStore:
                 str(event_payload.get("detail", "") or ""),
                 search_text,
                 float(event_payload.get("created_at", 0.0) or 0.0),
-                json.dumps(event_payload.get("metadata") or {}, ensure_ascii=False, sort_keys=True),
+                json.dumps(
+                    _json_safe(event_payload.get("metadata") or {}),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
             ),
         )
         if self._fts_enabled:
@@ -288,7 +317,11 @@ class PlanNotebookStore:
                 chat_key,
                 flow_id,
                 final_summary,
-                json.dumps(completion_summary, ensure_ascii=False, sort_keys=True),
+                json.dumps(
+                    _json_safe(completion_summary),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 search_text,
                 completion_summary.get("updated_at") or 0.0,
             ),

@@ -1370,7 +1370,12 @@ class OrchestratorAgent:
             flow_id=flow_id,
             metadata={
                 "chat_key": chat_key,
-                "routing_decision": routing_decision,
+                "routing_decision": (
+                    routing_decision.model_dump()
+                    if routing_decision is not None
+                    and hasattr(routing_decision, "model_dump")
+                    else routing_decision
+                ),
             },
         )
         policy_hints = [decomposition_hint]
