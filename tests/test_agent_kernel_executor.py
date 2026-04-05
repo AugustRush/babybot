@@ -96,6 +96,36 @@ class CountingViewTool(Tool):
         return ToolResult(ok=True, content=f"view:{args['file_path']}")
 
 
+class CountingShellTool(Tool):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.commands: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "_workspace_execute_shell_command"
+
+    @property
+    def description(self) -> str:
+        return "Execute a shell command in the workspace."
+
+    @property
+    def schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+            },
+            "required": ["command"],
+        }
+
+    async def invoke(self, args: dict, context: ToolContext) -> ToolResult:
+        del context
+        self.calls += 1
+        self.commands.append(str(args["command"]))
+        return ToolResult(ok=True, content=f"shell:{args['command']}")
+
+
 class RepeatedActionModel(ModelProvider):
     def __init__(self, rounds: int = 4) -> None:
         self.calls = 0
@@ -631,6 +661,158 @@ def test_single_agent_executor_blocks_extra_exploration_turn_before_finishing() 
         if msg.role == "system" and "探索预算已耗尽" in msg.content
     ]
     assert len(hard_stop_messages) == 1
+
+
+def test_single_agent_executor_keeps_shell_action_available_on_finalize_turn() -> None:
+    from babybot.agent_kernel.plan_notebook import create_root_notebook
+
+    class ExploringThenWritingShellModel(ModelProvider):
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.requests.append(request)
+            if (
+                request.messages
+                and request.messages[-1].role == "tool"
+                and request.messages[-1].name == "_workspace_execute_shell_command"
+            ):
+                return ModelResponse(text="本地文件已经写入，结束任务。")
+            if any(
+                msg.role == "system" and "探索预算已耗尽" in msg.content
+                for msg in request.messages
+            ):
+                tool_names = {tool["function"]["name"] for tool in request.tools}
+                assert "_workspace_execute_shell_command" in tool_names
+                assert "_workspace_view_text_file" not in tool_names
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="call-shell-write",
+                            name="_workspace_execute_shell_command",
+                            arguments={"command": "printf 'done' > output.txt"},
+                        ),
+                    ),
+                )
+            call_id = f"call-{len(self.requests)}"
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=call_id,
+                        name="_workspace_view_text_file",
+                        arguments={"file_path": f"skills/demo_{call_id}.md"},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    view_tool = CountingViewTool()
+    shell_tool = CountingShellTool()
+    registry.register(view_tool, group="code")
+    registry.register(shell_tool, group="code")
+    model = ExploringThenWritingShellModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+    notebook = create_root_notebook(goal="write local skill file", flow_id="flow-shell")
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="Skill writer",
+        objective="explore briefly, then write a local file",
+        owner="worker",
+    )
+    context = ExecutionContext(
+        session_id="s1",
+        state={
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": node.node_id,
+        },
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="先探索，再写入本地技能文件"),
+            context,
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert result.output == "本地文件已经写入，结束任务。"
+    assert view_tool.calls == 3
+    assert shell_tool.calls == 1
+    assert notebook.progress_marker_count(node.node_id) >= 1
+
+
+def test_single_agent_executor_still_rejects_read_only_shell_on_finalize_turn() -> (
+    None
+):
+    class ExploringThenReadOnlyShellModel(ModelProvider):
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            self.requests.append(request)
+            if any(
+                msg.role == "system" and "探索预算已耗尽" in msg.content
+                for msg in request.messages
+            ):
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        ModelToolCall(
+                            call_id="call-shell-read",
+                            name="_workspace_execute_shell_command",
+                            arguments={"command": "cat skills/still_reading.md"},
+                        ),
+                    ),
+                )
+            call_id = f"call-{len(self.requests)}"
+            return ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=call_id,
+                        name="_workspace_view_text_file",
+                        arguments={"file_path": f"skills/demo_{call_id}.md"},
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    view_tool = CountingViewTool()
+    shell_tool = CountingShellTool()
+    registry.register(view_tool, group="code")
+    registry.register(shell_tool, group="code")
+    model = ExploringThenReadOnlyShellModel()
+    executor = SingleAgentExecutor(
+        model=model,
+        tools=registry,
+        policy=ExecutorPolicy(max_steps=40, max_no_progress_turns=3),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            TaskContract(task_id="t1", description="继续探索并在最后尝试只读 shell"),
+            ExecutionContext(session_id="s1"),
+        )
+    )
+
+    assert result.status == "failed"
+    assert "No progress" in result.error
+    assert view_tool.calls == 3
+    assert shell_tool.calls == 0
 
 
 def test_single_agent_executor_collects_usage_metadata() -> None:

@@ -190,8 +190,6 @@ class LoopGuard:
         normalized = (tool_name or "").strip().lower().lstrip("_")
         if not normalized:
             return False
-        if normalized.endswith("execute_shell_command"):
-            return True
         leaf = normalized.split("__")[-1]
         if leaf in {"web_fetch", "web_search"}:
             return True
