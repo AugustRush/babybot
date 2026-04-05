@@ -32,7 +32,7 @@ def build_execution_plan(contract: TaskContract) -> ExecutionPlan:
         participants = list(contract.allowed_agents or ())
         step = PlanStep(
             step_id="step_debate",
-            kind="debate",
+            kind="team_debate",
             title="Structured debate",
             payload={
                 "participants": participants,
@@ -84,13 +84,14 @@ def compile_execution_plan_to_notebook(
     for step in plan.steps:
         notebook.add_child_node(
             parent_id=notebook.root_node_id,
-            kind="plan_step",
+            kind=step.kind,
             title=step.title,
             objective=step.title,
             owner="planner",
             metadata={
                 "step_id": step.step_id,
                 "step_kind": step.kind,
+                "execution_mode": step.kind,
                 "payload": dict(step.payload),
             },
         )

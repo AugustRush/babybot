@@ -1422,7 +1422,10 @@ class OrchestratorAgent:
                     ("execution_plan", execution_plan),
                     ("plan_notebook", plan_notebook),
                     ("plan_notebook_id", plan_notebook.notebook_id),
-                    ("current_notebook_node_id", plan_notebook.root_node_id),
+                    (
+                        "current_notebook_node_id",
+                        plan_notebook.primary_frontier_node_id(),
+                    ),
                     (
                         "notebook_context_budget",
                         max(1200, int(self.config.system.context_history_tokens)),

@@ -158,6 +158,7 @@ class CooperativeResult:
     tasks_failed: int
     tasks_total: int
     task_outputs: dict[str, str]
+    task_statuses: dict[str, dict[str, str]]
     mailbox_log: list[dict[str, str]]
     summary: str
     completed: bool = True
@@ -375,6 +376,7 @@ class TeamRunner:
         tasks: list[dict[str, Any]],
         *,
         on_task_complete: Any | None = None,
+        on_task_failed: Any | None = None,
     ) -> CooperativeResult:
         """Run cooperative task-based execution.
 
@@ -506,6 +508,10 @@ class TeamRunner:
                         "content": error_msg[:200],
                     }
                     mailbox_log.append(msg_entry)
+                    if on_task_failed is not None:
+                        _result = on_task_failed(aid, claimed.task_id, error_msg)
+                        if _inspect.isawaitable(_result):
+                            await _result
                     continue
 
                 task_list.complete(claimed.task_id, output=output)
@@ -553,6 +559,14 @@ class TeamRunner:
         task_outputs = {
             tid: t.output for tid, t in status.items() if t.status == "completed"
         }
+        task_statuses = {
+            tid: {
+                "status": t.status,
+                "assigned_to": t.assigned_to,
+                "output": t.output,
+            }
+            for tid, t in status.items()
+        }
         completed_count = sum(1 for t in status.values() if t.status == "completed")
         failed_count = sum(1 for t in status.values() if t.status == "failed")
         all_done = task_list.all_done()
@@ -590,6 +604,7 @@ class TeamRunner:
             tasks_failed=failed_count,
             tasks_total=len(tasks),
             task_outputs=task_outputs,
+            task_statuses=task_statuses,
             mailbox_log=mailbox_log,
             summary="\n".join(summary_parts),
             completed=all_done and failed_count == 0,

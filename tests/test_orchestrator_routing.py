@@ -441,7 +441,7 @@ def test_answer_with_dag_passes_execution_constraints_into_context() -> None:
     notebook = seen["plan_notebook"]
     assert notebook.goal == "两个专家讨论，一轮定胜负，总时长不超过10分钟。"
     assert seen["plan_notebook_id"] == notebook.notebook_id
-    assert seen["current_notebook_node_id"] == notebook.root_node_id
+    assert seen["current_notebook_node_id"] == notebook.primary_frontier_node_id()
     contract = seen["task_contract"]
     assert contract == TaskContract(
         chat_key="",

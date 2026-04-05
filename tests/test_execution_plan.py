@@ -31,7 +31,7 @@ def test_build_execution_plan_for_debate_carries_round_budget() -> None:
         steps=(
             PlanStep(
                 step_id="step_debate",
-                kind="debate",
+                kind="team_debate",
                 title="Structured debate",
                 payload={
                     "participants": ["judge_master"],
@@ -111,5 +111,36 @@ def test_compile_execution_plan_to_notebook_creates_root_and_step_nodes() -> Non
         node for node in notebook.nodes.values() if node.parent_id == notebook.root_node_id
     ]
     assert len(step_nodes) == 1
-    assert step_nodes[0].kind == "plan_step"
+    assert step_nodes[0].kind == "tool_workflow"
     assert step_nodes[0].title == "Tool-guided answer"
+
+
+def test_compile_execution_plan_to_notebook_promotes_debate_to_team_node() -> None:
+    contract = TaskContract(
+        chat_key="feishu:c1",
+        goal="两个专家讨论并给出结论",
+        mode="debate",
+        deliverable="final_answer",
+        round_budget=2,
+        termination_rule="round_budget",
+        allow_clarification=False,
+        allowed_tools=("dispatch_team", "reply_to_user"),
+        allowed_agents=("architect", "reviewer"),
+        metadata={},
+    )
+    plan = build_execution_plan(contract)
+
+    notebook = compile_execution_plan_to_notebook(
+        plan,
+        flow_id="flow-team-plan",
+        metadata={"chat_key": contract.chat_key},
+    )
+
+    step_nodes = [
+        node for node in notebook.nodes.values() if node.parent_id == notebook.root_node_id
+    ]
+
+    assert len(step_nodes) == 1
+    assert step_nodes[0].kind == "team_debate"
+    assert step_nodes[0].metadata["step_id"] == "step_debate"
+    assert step_nodes[0].metadata["payload"]["participants"] == ["architect", "reviewer"]

@@ -68,6 +68,7 @@ def test_build_task_contract_defaults_to_tool_workflow_tool_allowlist() -> None:
     assert contract.mode == "answer"
     assert contract.allowed_tools == (
         "dispatch_task",
+        "dispatch_team",
         "wait_for_tasks",
         "get_task_result",
         "reply_to_user",

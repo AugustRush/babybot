@@ -622,6 +622,8 @@ class PlanNotebook:
     def frontier_node_ids(self) -> list[str]:
         frontiers: list[str] = []
         for node_id, node in self.nodes.items():
+            if node_id == self.root_node_id or node.kind == "root":
+                continue
             if node.status in _TERMINAL_NODE_STATUSES:
                 continue
             if not node.deps:
@@ -634,6 +636,12 @@ class PlanNotebook:
             ):
                 frontiers.append(node_id)
         return frontiers
+
+    def primary_frontier_node_id(self) -> str:
+        frontier_ids = self.frontier_node_ids()
+        if frontier_ids:
+            return frontier_ids[0]
+        return self.root_node_id
 
     def progress_marker_count(self, node_id: str) -> int:
         node = self.get_node(node_id)

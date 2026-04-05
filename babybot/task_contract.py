@@ -20,6 +20,7 @@ _SINGLE_ROUND_KEYWORDS = ("一轮定胜负", "一轮", "单轮", "一回合")
 
 _ANSWER_ALLOWED_TOOLS = (
     "dispatch_task",
+    "dispatch_team",
     "wait_for_tasks",
     "get_task_result",
     "reply_to_user",

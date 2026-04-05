@@ -38,6 +38,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_EXECUTION_NODE_KINDS = {
+    "tool_workflow",
+    "team_debate",
+    "team_cooperative",
+    "plan_step",
+}
+_TEAM_NODE_KINDS = {"team_debate", "team_cooperative"}
+
 
 def _resolve_orchestrator_config(
     config: OrchestratorConfig | None,
@@ -1760,7 +1768,10 @@ class DynamicOrchestrator:
         notebook = context.state.get("plan_notebook")
         if isinstance(notebook, PlanNotebook):
             context.state.setdefault("plan_notebook_id", notebook.notebook_id)
-            context.state.setdefault("current_notebook_node_id", notebook.root_node_id)
+            context.state.setdefault(
+                "current_notebook_node_id",
+                notebook.primary_frontier_node_id(),
+            )
             context.state.setdefault("notebook_context_budget", 2400)
             return notebook
         notebook = create_root_notebook(
@@ -1773,7 +1784,7 @@ class DynamicOrchestrator:
         )
         context.state["plan_notebook"] = notebook
         context.state["plan_notebook_id"] = notebook.notebook_id
-        context.state["current_notebook_node_id"] = notebook.root_node_id
+        context.state["current_notebook_node_id"] = notebook.primary_frontier_node_id()
         context.state.setdefault("notebook_context_budget", 2400)
         return notebook
 
@@ -1793,53 +1804,273 @@ class DynamicOrchestrator:
                 return stripped[:120]
         return "Child task"
 
-    def _record_dispatch_in_notebook(
+    @staticmethod
+    def _current_notebook_node(
+        notebook: PlanNotebook,
+        context: ExecutionContext,
+    ) -> Any:
+        node_id = str(
+            context.state.get("current_notebook_node_id", "")
+            or notebook.primary_frontier_node_id()
+        )
+        if node_id in notebook.nodes:
+            return notebook.get_node(node_id)
+        return notebook.get_node(notebook.primary_frontier_node_id())
+
+    @staticmethod
+    def _child_notebook_nodes(notebook: PlanNotebook, parent_id: str) -> list[Any]:
+        return [
+            node
+            for node in notebook.nodes.values()
+            if str(node.parent_id or "") == str(parent_id)
+        ]
+
+    def _ensure_team_notebook_node(
         self,
         *,
+        notebook: PlanNotebook,
         context: ExecutionContext,
-        task_id: str,
-        description: str,
-        resource_ids: tuple[str, ...],
-        deps: list[str],
-        task_kind: str = "child_task",
+        topic: str,
+        mode: str,
+        agents: list[dict[str, Any]],
+        max_rounds: int,
+    ) -> Any:
+        current_node = self._current_notebook_node(notebook, context)
+        node_kind = "team_cooperative" if mode == "cooperative" else "team_debate"
+        node = current_node if current_node.kind == node_kind else None
+        if node is None:
+            node = notebook.add_child_node(
+                parent_id=current_node.node_id,
+                kind=node_kind,
+                title=self._task_title_from_description(topic) or "Team execution",
+                objective=str(topic or "").strip(),
+                owner="team",
+                metadata={
+                    "team_mode": mode,
+                    "agents": [
+                        {
+                            "id": str(agent.get("id", "") or "").strip(),
+                            "role": str(agent.get("role", "") or "").strip(),
+                        }
+                        for agent in agents
+                    ],
+                    "max_rounds": max_rounds,
+                },
+            )
+        if node.status == "pending":
+            notebook.transition_node(
+                node.node_id,
+                "running",
+                summary="已启动团队节点",
+                detail=str(topic or ""),
+                metadata={"team_mode": mode, "max_rounds": max_rounds},
+            )
+        return node
+
+    def _complete_converged_execution_nodes(self, notebook: PlanNotebook) -> None:
+        for node in notebook.nodes.values():
+            if node.kind not in _EXECUTION_NODE_KINDS:
+                continue
+            if node.status in {"completed", "failed", "cancelled"}:
+                continue
+            children = [
+                child
+                for child in self._child_notebook_nodes(notebook, node.node_id)
+                if child.kind != "scheduled_task"
+            ]
+            if children and any(
+                child.status not in {"completed", "failed", "cancelled"}
+                for child in children
+            ):
+                continue
+            summary = node.latest_summary or "执行节点完成"
+            detail = node.result_text or node.objective
+            notebook.transition_node(
+                node.node_id,
+                "completed",
+                summary=summary,
+                detail=detail,
+            )
+
+    @staticmethod
+    def _build_team_debate_payload(
+        *,
+        result: Any,
+        agents: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        last_arguments = [
+            {
+                "agent": entry["agent"],
+                "role": entry["role"],
+                "content": entry["content"][:500],
+            }
+            for entry in result.transcript[-len(agents) :]
+        ]
+        recommendation = str(result.summary or "").strip().splitlines()[0].strip()
+        disagreements = [
+            f"{entry['role']}: {entry['content'][:200]}" for entry in last_arguments
+        ]
+        return {
+            "topic": result.topic,
+            "rounds": result.rounds,
+            "summary": result.summary,
+            "completed": result.completed,
+            "termination_reason": result.termination_reason,
+            "transcript_length": len(result.transcript),
+            "recommendation": recommendation,
+            "disagreements": disagreements,
+            "last_arguments": last_arguments,
+        }
+
+    def _finalize_team_debate_node(
+        self,
+        *,
+        notebook: PlanNotebook,
+        node: Any,
+        payload: dict[str, Any],
     ) -> None:
-        notebook = self._ensure_plan_notebook(
-            str(context.state.get("original_goal", "") or description),
-            context,
-        )
-        parent_id = str(
-            context.state.get("current_notebook_node_id", "") or notebook.root_node_id
-        )
-        if parent_id not in notebook.nodes:
-            parent_id = notebook.root_node_id
-        task_map = self._notebook_task_map(context)
-        dep_node_ids = tuple(
-            task_map[dep_id] for dep_id in deps if dep_id in task_map and task_map[dep_id]
-        )
-        node = notebook.add_child_node(
-            parent_id=parent_id,
-            kind=task_kind,
-            title=self._task_title_from_description(description),
-            objective=str(description or "").strip(),
-            owner="subagent",
-            resource_ids=resource_ids,
-            deps=dep_node_ids,
-            metadata={
-                "task_id": task_id,
-                "dispatch_deps": list(deps),
-            },
+        recommendation = str(payload.get("recommendation", "") or "").strip()
+        if recommendation:
+            rationale = "\n".join(str(item) for item in payload.get("disagreements", []))
+            notebook.add_decision(
+                node_id=node.node_id,
+                summary=recommendation,
+                rationale=rationale,
+                metadata={
+                    "team_mode": "debate",
+                    "rounds": payload.get("rounds"),
+                    "termination_reason": payload.get("termination_reason"),
+                    "progress": True,
+                },
+            )
+        notebook.record_event(
+            node_id=node.node_id,
+            kind="summary",
+            summary=str(payload.get("summary", "") or "团队讨论完成")[:200],
+            detail=json.dumps(payload, ensure_ascii=False),
+            metadata={"team_mode": "debate", "progress": True},
         )
         notebook.transition_node(
             node.node_id,
-            "running",
-            summary="已派发子任务",
-            detail=task_id,
+            "completed" if payload.get("completed") else "failed",
+            summary=str(payload.get("recommendation") or payload.get("summary") or "团队讨论完成")[:200],
+            detail=str(payload.get("summary", "") or ""),
             metadata={
-                "task_id": task_id,
-                "resource_ids": list(resource_ids),
+                "team_mode": "debate",
+                "rounds": payload.get("rounds"),
+                "termination_reason": payload.get("termination_reason"),
             },
         )
-        task_map[task_id] = node.node_id
+        if not payload.get("completed"):
+            notebook.mark_needs_repair(
+                node.node_id,
+                message=str(payload.get("termination_reason", "") or "team debate incomplete"),
+            )
+
+    def _initialize_team_cooperative_children(
+        self,
+        *,
+        notebook: PlanNotebook,
+        node: Any,
+        tasks: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        task_nodes: dict[str, str] = {}
+        for task in tasks:
+            task_id = str(task.get("task_id", "") or "").strip()
+            if not task_id:
+                continue
+            dep_node_ids = tuple(
+                task_nodes[dep_id]
+                for dep_id in (task.get("deps") or [])
+                if dep_id in task_nodes
+            )
+            task_node = notebook.add_child_node(
+                parent_id=node.node_id,
+                kind="team_task",
+                title=task_id,
+                objective=str(task.get("description", "") or task_id),
+                owner="team",
+                deps=dep_node_ids,
+                metadata={"team_task_id": task_id},
+            )
+            task_nodes[task_id] = task_node.node_id
+        return task_nodes
+
+    def _finalize_team_cooperative_node(
+        self,
+        *,
+        notebook: PlanNotebook,
+        node: Any,
+        result: Any,
+        task_nodes: dict[str, str],
+    ) -> dict[str, Any]:
+        for task_id, task_payload in dict(result.task_statuses or {}).items():
+            node_id = task_nodes.get(task_id)
+            if not node_id or node_id not in notebook.nodes:
+                continue
+            status = str(task_payload.get("status", "") or "pending")
+            output = str(task_payload.get("output", "") or "")
+            if status == "completed":
+                notebook.transition_node(
+                    node_id,
+                    "completed",
+                    summary=f"团队子任务完成: {task_id}",
+                    detail=output,
+                )
+            elif status == "failed":
+                notebook.transition_node(
+                    node_id,
+                    "failed",
+                    summary=f"团队子任务失败: {task_id}",
+                    detail=output,
+                )
+                notebook.add_issue(
+                    node_id=node_id,
+                    title=f"团队子任务失败: {task_id}",
+                    detail=output,
+                    severity="high",
+                )
+            else:
+                notebook.transition_node(
+                    node_id,
+                    "cancelled",
+                    summary=f"团队子任务未完成: {task_id}",
+                    detail=output or status,
+                )
+        payload = {
+            "topic": result.topic,
+            "tasks_completed": result.tasks_completed,
+            "tasks_failed": result.tasks_failed,
+            "tasks_total": result.tasks_total,
+            "summary": result.summary,
+            "completed": result.completed,
+            "termination_reason": result.termination_reason,
+            "task_statuses": result.task_statuses,
+        }
+        notebook.record_event(
+            node_id=node.node_id,
+            kind="summary",
+            summary=str(result.summary or "团队协作完成")[:200],
+            detail=json.dumps(payload, ensure_ascii=False),
+            metadata={"team_mode": "cooperative", "progress": True},
+        )
+        notebook.transition_node(
+            node.node_id,
+            "completed" if result.completed else "failed",
+            summary=str(result.summary or "团队协作完成")[:200],
+            detail=str(result.summary or ""),
+            metadata={
+                "team_mode": "cooperative",
+                "tasks_completed": result.tasks_completed,
+                "tasks_failed": result.tasks_failed,
+            },
+        )
+        if not result.completed:
+            notebook.mark_needs_repair(
+                node.node_id,
+                message=str(result.termination_reason or "team cooperative incomplete"),
+            )
+        return payload
 
     def _update_notebook_from_task_payloads(
         self,
@@ -1918,7 +2149,7 @@ class DynamicOrchestrator:
     ) -> list[str]:
         blocking: list[str] = []
         for node_id, node in notebook.nodes.items():
-            if node.kind in {"root", "plan_step", "scheduled_task"}:
+            if node.kind in {"root", "scheduled_task"}:
                 continue
             if node.status in {"completed", "failed", "cancelled"}:
                 continue
@@ -1946,6 +2177,7 @@ class DynamicOrchestrator:
             str(context.state.get("original_goal", "") or reply_text),
             context,
         )
+        self._complete_converged_execution_nodes(notebook)
         if not notebook.completion_summary:
             notebook.set_completion_summary(
                 {
@@ -1965,7 +2197,7 @@ class DynamicOrchestrator:
         for node_id, node in notebook.nodes.items():
             if node.status in {"completed", "failed", "cancelled"}:
                 continue
-            if node.kind in {"root", "plan_step"}:
+            if node.kind == "root":
                 notebook.transition_node(
                     node_id,
                     "completed",
@@ -2492,6 +2724,7 @@ class DynamicOrchestrator:
                 str(context.state.get("original_goal", "") or ""),
                 context,
             )
+            self._complete_converged_execution_nodes(notebook)
             all_dead, dead_ids = runtime.all_tasks_dead_lettered_with_no_success()
             blocking_nodes = self._notebook_blocking_node_ids(notebook)
             if blocking_nodes:
@@ -2554,6 +2787,13 @@ class DynamicOrchestrator:
             tasks = args.get("tasks") or []
             if not tasks:
                 return "error: cooperative mode requires a non-empty 'tasks' list"
+        else:
+            tasks = []
+
+        notebook = self._ensure_plan_notebook(
+            str(context.state.get("original_goal", "") or topic),
+            context,
+        )
 
         logger.info(
             "Team dispatch: topic=%r agents=%d max_rounds=%d mode=%s",
@@ -2571,6 +2811,7 @@ class DynamicOrchestrator:
         )
         team_streaming = stream_callback is not None and reset_stream is not None
         runtime_event_callback = context.state.get("runtime_event_callback")
+        stage_name = "cooperative" if mode == "cooperative" else "debate"
         plan_step_id = ""
         execution_plan = context.state.get("execution_plan")
         if getattr(execution_plan, "steps", None):
@@ -2596,7 +2837,7 @@ class DynamicOrchestrator:
                 return
             payload: dict[str, Any] = {
                 "state": state,
-                "stage": "debate",
+                "stage": stage_name,
                 "message": text,
             }
             if plan_step_id:
@@ -2609,7 +2850,7 @@ class DynamicOrchestrator:
                 {
                     "event": event_name,
                     "flow_id": context.session_id,
-                    "task_id": "team_debate",
+                    "task_id": stage_name,
                     "payload": payload,
                 }
             )
@@ -2639,20 +2880,6 @@ class DynamicOrchestrator:
                 response = await self._gateway.generate(request, gen_ctx)
             return response.text
 
-        async def resource_executor(
-            resource_id: str, agent_id: str, prompt: str, ctx: dict[str, Any]
-        ) -> str:
-            """Resource-backed executor: runs through bridge with full tool access."""
-            task = TaskContract(
-                task_id=f"team_{agent_id}",
-                description=prompt,
-                metadata={"resource_id": resource_id},
-            )
-            result = await self._executor.execute(task, context)
-            if result.status != "succeeded":
-                return f"[error: {result.error}]"
-            return result.output
-
         # Resolve skill_id references and prepare per-agent executors
         enriched_agents: list[dict[str, Any]] = []
         skills = getattr(self._rm, "skills", {})
@@ -2670,11 +2897,6 @@ class DynamicOrchestrator:
                         agent_copy["description"] = skill.description
                     if not agent_copy.get("system_prompt") and skill.prompt:
                         agent_copy["system_prompt"] = skill.prompt
-            rid = agent_copy.get("resource_id")
-            if rid:
-                scope = self._rm.resolve_resource_scope(rid, require_tools=True)
-                if scope is not None:
-                    agent_copy["executor"] = functools.partial(resource_executor, rid)
             enriched_agents.append(agent_copy)
 
         if (
@@ -2694,6 +2916,41 @@ class DynamicOrchestrator:
                 ea.get("resource_id", ""),
             )
 
+        team_node = self._ensure_team_notebook_node(
+            notebook=notebook,
+            context=context,
+            topic=topic,
+            mode=mode,
+            agents=enriched_agents,
+            max_rounds=max_rounds,
+        )
+        team_context = ContextManager(context).fork(
+            session_id=f"{context.session_id}:{team_node.node_id}",
+        )
+        team_context.state["current_notebook_node_id"] = team_node.node_id
+
+        async def resource_executor(
+            resource_id: str, agent_id: str, prompt: str, ctx: dict[str, Any]
+        ) -> str:
+            """Resource-backed executor: runs through bridge with full tool access."""
+            task = TaskContract(
+                task_id=f"team_{agent_id}",
+                description=prompt,
+                metadata={"resource_id": resource_id, "team_node_id": team_node.node_id},
+            )
+            result = await self._executor.execute(task, team_context)
+            if result.status != "succeeded":
+                return f"[error: {result.error}]"
+            return result.output
+
+        for agent_copy in enriched_agents:
+            rid = agent_copy.get("resource_id")
+            if not rid:
+                continue
+            scope = self._rm.resolve_resource_scope(rid, require_tools=True)
+            if scope is not None:
+                agent_copy["executor"] = functools.partial(resource_executor, rid)
+
         # ── Cooperative mode: task-based parallel execution ──────────────
         if mode == "cooperative":
             return await self._run_team_cooperative(
@@ -2709,6 +2966,8 @@ class DynamicOrchestrator:
                 reset_stream=reset_stream,
                 _emit_team_event=_emit_team_event,
                 context=context,
+                notebook=notebook,
+                team_node=team_node,
             )
 
         # ── Debate mode (default) ───────────────────────────────────────
@@ -2716,6 +2975,17 @@ class DynamicOrchestrator:
         async def on_turn(agent_id: str, role: str, round_num: int, text: str) -> None:
             if heartbeat is not None:
                 heartbeat.beat()
+            notebook.record_event(
+                node_id=team_node.node_id,
+                kind="observation",
+                summary=f"Round {round_num}: {role}",
+                detail=str(text or ""),
+                metadata={
+                    "agent_id": agent_id,
+                    "role": role,
+                    "round": round_num,
+                },
+            )
             # Always send an intermediate message for each turn so the user
             # sees individual agent outputs regardless of streaming mode.
             if send_intermediate is not None:
@@ -2783,26 +3053,17 @@ class DynamicOrchestrator:
             message=result.summary[:200] or self._config.team_debate_ended_message,
             progress=1.0 if result.completed else None,
         )
-
-        return json.dumps(
-            {
-                "topic": result.topic,
-                "rounds": result.rounds,
-                "summary": result.summary,
-                "completed": result.completed,
-                "termination_reason": result.termination_reason,
-                "transcript_length": len(result.transcript),
-                "last_arguments": [
-                    {
-                        "agent": e["agent"],
-                        "role": e["role"],
-                        "content": e["content"][:500],
-                    }
-                    for e in result.transcript[-len(agents) :]
-                ],
-            },
-            ensure_ascii=False,
+        payload = self._build_team_debate_payload(
+            result=result,
+            agents=enriched_agents,
         )
+        self._finalize_team_debate_node(
+            notebook=notebook,
+            node=team_node,
+            payload=payload,
+        )
+        self._complete_converged_execution_nodes(notebook)
+        return json.dumps(payload, ensure_ascii=False)
 
     async def _run_team_cooperative(
         self,
@@ -2819,6 +3080,8 @@ class DynamicOrchestrator:
         reset_stream: Any,
         _emit_team_event: Any,
         context: ExecutionContext,
+        notebook: PlanNotebook,
+        team_node: Any,
     ) -> str:
         """Run team in cooperative (task-based) mode."""
         from .team import TeamRunner
@@ -2840,6 +3103,11 @@ class DynamicOrchestrator:
             ),
             progress=0.0,
         )
+        task_nodes = self._initialize_team_cooperative_children(
+            notebook=notebook,
+            node=team_node,
+            tasks=tasks,
+        )
 
         completed_count = {"n": 0}
 
@@ -2847,6 +3115,14 @@ class DynamicOrchestrator:
             completed_count["n"] += 1
             if heartbeat is not None:
                 heartbeat.beat()
+            node_id = task_nodes.get(task_id, "")
+            if node_id and node_id in notebook.nodes:
+                notebook.transition_node(
+                    node_id,
+                    "completed",
+                    summary=f"团队子任务完成: {task_id}",
+                    detail=str(output or ""),
+                )
             progress = completed_count["n"] / max(1, len(tasks))
             await _emit_team_event(
                 "progress",
@@ -2858,6 +3134,23 @@ class DynamicOrchestrator:
                 ),
                 progress=progress,
             )
+
+        async def on_task_failed(agent_id: str, task_id: str, error: str) -> None:
+            del agent_id
+            node_id = task_nodes.get(task_id, "")
+            if node_id and node_id in notebook.nodes:
+                notebook.transition_node(
+                    node_id,
+                    "failed",
+                    summary=f"团队子任务失败: {task_id}",
+                    detail=str(error or ""),
+                )
+                notebook.add_issue(
+                    node_id=node_id,
+                    title=f"团队子任务失败: {task_id}",
+                    detail=str(error or ""),
+                    severity="high",
+                )
 
         if team_streaming and reset_stream is not None:
             await reset_stream()
@@ -2872,6 +3165,7 @@ class DynamicOrchestrator:
             agents=enriched_agents,
             tasks=tasks,
             on_task_complete=on_task_complete,
+            on_task_failed=on_task_failed,
         )
 
         logger.info(
@@ -2891,24 +3185,19 @@ class DynamicOrchestrator:
             message=result.summary[:200] or self._config.team_coop_ended_message,
             progress=1.0 if result.completed else None,
         )
-
-        return json.dumps(
-            {
-                "mode": "cooperative",
-                "topic": result.topic,
-                "tasks_completed": result.tasks_completed,
-                "tasks_failed": result.tasks_failed,
-                "tasks_total": result.tasks_total,
-                "summary": result.summary,
-                "completed": result.completed,
-                "termination_reason": result.termination_reason,
-                "task_outputs": {
-                    tid: output[:500] for tid, output in result.task_outputs.items()
-                },
-                "mailbox_messages": len(result.mailbox_log),
-            },
-            ensure_ascii=False,
+        payload = self._finalize_team_cooperative_node(
+            notebook=notebook,
+            node=team_node,
+            result=result,
+            task_nodes=task_nodes,
         )
+        payload["mode"] = "cooperative"
+        payload["task_outputs"] = {
+            tid: output[:500] for tid, output in result.task_outputs.items()
+        }
+        payload["mailbox_messages"] = len(result.mailbox_log)
+        self._complete_converged_execution_nodes(notebook)
+        return json.dumps(payload, ensure_ascii=False)
 
     # DAG task events that carry meaningful user-facing progress.
     # "started" is included so the progress card updates when a subtask

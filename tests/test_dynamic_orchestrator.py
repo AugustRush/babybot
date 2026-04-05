@@ -20,8 +20,11 @@ from babybot.agent_kernel.dynamic_orchestrator import (
     InMemoryChildTaskBus,
     _build_resource_catalog,
 )
-from babybot.execution_plan import build_execution_plan
-from babybot.task_contract import build_task_contract
+from babybot.execution_plan import (
+    build_execution_plan,
+    compile_execution_plan_to_notebook,
+)
+from babybot.task_contract import TaskContract, build_task_contract
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -2266,6 +2269,86 @@ def test_dispatch_team_tool_recognized() -> None:
 
     tool_names = [t["function"]["name"] for t in _ORCHESTRATION_TOOLS]
     assert "dispatch_team" in tool_names
+
+
+def test_team_dispatch_creates_structured_notebook_node_inside_tool_workflow() -> None:
+    team_args = {
+        "topic": "Should we refactor?",
+        "agents": [
+            {"id": "pro", "role": "proponent", "description": "For refactoring"},
+            {"id": "con", "role": "opponent", "description": "Against refactoring"},
+        ],
+        "max_rounds": 1,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="We should refactor around notebook-owned execution."),
+            ModelResponse(text="Only if the extra runtime structure stays bounded."),
+            _reply_tool_call("Refactor with unified notebook control."),
+        ]
+    )
+    contract = TaskContract(
+        chat_key="feishu:c1",
+        goal="评估是否应该重构当前编排器",
+        mode="answer",
+        deliverable="final_answer",
+        round_budget=None,
+        termination_rule="final_answer",
+        allow_clarification=False,
+        allowed_tools=(
+            "dispatch_task",
+            "dispatch_team",
+            "wait_for_tasks",
+            "get_task_result",
+            "reply_to_user",
+        ),
+        allowed_agents=(),
+        metadata={},
+    )
+    execution_plan = build_execution_plan(contract)
+    notebook = compile_execution_plan_to_notebook(
+        execution_plan,
+        flow_id="flow-team-node",
+        metadata={"chat_key": contract.chat_key},
+    )
+    step_node = next(
+        node for node in notebook.nodes.values() if node.parent_id == notebook.root_node_id
+    )
+    context = ExecutionContext(
+        session_id="flow-team-node",
+        state={
+            "execution_plan": execution_plan,
+            "task_contract": contract,
+            "plan_notebook": notebook,
+            "plan_notebook_id": notebook.notebook_id,
+            "current_notebook_node_id": step_node.node_id,
+        },
+    )
+
+    orch = DynamicOrchestrator(resource_manager=DummyResourceManager(), gateway=gateway)
+    result = asyncio.run(orch.run("评估是否应该重构当前编排器", context))
+
+    assert result.conclusion == "Refactor with unified notebook control."
+    team_nodes = [
+        node
+        for node in notebook.nodes.values()
+        if node.parent_id == step_node.node_id and node.kind == "team_debate"
+    ]
+    assert len(team_nodes) == 1
+    assert team_nodes[0].status == "completed"
+    assert team_nodes[0].decisions
+    assert notebook.completion_summary["decision_register"]
 
 
 def test_team_dispatch_and_reply() -> None:
