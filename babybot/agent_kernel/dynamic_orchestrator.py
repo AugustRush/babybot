@@ -491,6 +491,49 @@ class ChildTaskEvent:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ChildTaskView:
+    resource_ids: tuple[str, ...]
+    primary_resource_id: str
+    execution_description: str
+    public_description: str
+    user_label: str
+    deps: tuple[str, ...] = ()
+    skill_ids: tuple[str, ...] = ()
+
+    def metadata_payload(self, *, notebook_node_id: str = "") -> dict[str, Any]:
+        return {
+            "resource_id": self.primary_resource_id,
+            "resource_ids": list(self.resource_ids),
+            "skill_ids": list(self.skill_ids),
+            "description": self.public_description,
+            "execution_description": self.execution_description,
+            "user_label": self.user_label,
+            "notebook_node_id": notebook_node_id,
+        }
+
+    def state_payload(self, **extra: Any) -> dict[str, Any]:
+        return {
+            "resource_id": self.primary_resource_id,
+            "resource_ids": list(self.resource_ids),
+            "description": self.public_description,
+            "execution_description": self.execution_description,
+            "user_label": self.user_label,
+            "deps": list(self.deps),
+            **extra,
+        }
+
+    def event_payload(self, **extra: Any) -> dict[str, Any]:
+        return {
+            "resource_id": self.primary_resource_id,
+            "resource_ids": list(self.resource_ids),
+            "description": self.public_description,
+            "user_label": self.user_label,
+            "deps": list(self.deps),
+            **extra,
+        }
+
+
 class InMemoryChildTaskBus:
     """Simple in-memory event sink for child-task lifecycle events."""
 
@@ -669,6 +712,13 @@ class InProcessChildTaskRuntime:
         if self._plan_step_id:
             normalized.setdefault("plan_step_id", self._plan_step_id)
         return normalized
+
+    def _task_event_payload(
+        self,
+        view: ChildTaskView,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        return self._event_payload(**view.event_payload(**payload))
 
     @staticmethod
     def _normalize_dispatch_description(description: str) -> str:
@@ -932,7 +982,15 @@ class InProcessChildTaskRuntime:
             include_tools=tuple(sorted(include_tools)),
             exclude_tools=tuple(sorted(exclude_tools)),
         )
-        primary_resource_id = resource_ids[0]
+        view = ChildTaskView(
+            resource_ids=tuple(resource_ids),
+            primary_resource_id=resource_ids[0],
+            execution_description=description,
+            public_description=public_description,
+            user_label=feedback_label,
+            deps=tuple(deps),
+            skill_ids=tuple(merged_skill_ids),
+        )
         notebook_node_id = ""
         notebook = context.state.get("plan_notebook")
         if isinstance(notebook, PlanNotebook):
@@ -952,8 +1010,10 @@ class InProcessChildTaskRuntime:
             node = notebook.add_child_node(
                 parent_id=parent_id,
                 kind=task_kind,
-                title=DynamicOrchestrator._task_title_from_description(public_description),
-                objective=public_description,
+                title=DynamicOrchestrator._task_title_from_description(
+                    view.public_description
+                ),
+                objective=view.public_description,
                 owner="subagent",
                 resource_ids=tuple(resource_ids),
                 deps=dep_node_ids,
@@ -983,13 +1043,7 @@ class InProcessChildTaskRuntime:
             timeout_s=self._coerce_timeout(args.get("timeout_s"))
             or self._default_timeout_s,
             metadata={
-                "resource_id": primary_resource_id,
-                "resource_ids": list(resource_ids),
-                "skill_ids": merged_skill_ids,
-                "description": public_description,
-                "execution_description": description,
-                "user_label": feedback_label,
-                "notebook_node_id": notebook_node_id,
+                **view.metadata_payload(notebook_node_id=notebook_node_id),
             },
         )
         child_context = ContextManager(context).fork(
@@ -1042,33 +1096,23 @@ class InProcessChildTaskRuntime:
                 flow_id=flow_id,
                 task_id=task_id,
                 event="queued",
-                payload=self._event_payload(
-                    resource_id=primary_resource_id,
-                    resource_ids=list(resource_ids),
-                    description=public_description,
-                    user_label=feedback_label,
-                    deps=list(deps),
+                payload=self._task_event_payload(
+                    view,
                     **_notebook_feedback_payload(),
                 ),
             )
         )
         self._update_task_state(
             task_id,
-            status="queued",
-            resource_id=primary_resource_id,
-            resource_ids=list(resource_ids),
-            description=public_description,
-            execution_description=description,
-            user_label=feedback_label,
-            deps=list(deps),
+            **view.state_payload(status="queued"),
         )
 
         async def _run_with_deps() -> None:
             progress_monitor = asyncio.create_task(
                 self._monitor_task_progress(
                     task_id=task_id,
-                    resource_id=primary_resource_id,
-                    description=public_description,
+                    resource_id=view.primary_resource_id,
+                    description=view.public_description,
                 )
             )
             if deps:
@@ -1085,10 +1129,8 @@ class InProcessChildTaskRuntime:
                             flow_id=flow_id,
                             task_id=task_id,
                             event="started",
-                            payload=self._event_payload(
-                                resource_id=primary_resource_id,
-                                description=public_description,
-                                user_label=feedback_label,
+                            payload=self._task_event_payload(
+                                view,
                                 **_notebook_feedback_payload(),
                             ),
                         )
@@ -1167,14 +1209,13 @@ class InProcessChildTaskRuntime:
                                 flow_id=flow_id,
                                 task_id=task_id,
                                 event="succeeded",
-                                payload=self._event_payload(
-                                    resource_id=primary_resource_id,
+                                payload=self._task_event_payload(
+                                    view,
                                     message="子任务已完成",
                                     status=result.status,
                                     error=result.error,
                                     output=result.output,
-                                    task_description=public_description,
-                                    user_label=feedback_label,
+                                    task_description=view.public_description,
                                     **_notebook_feedback_payload(),
                                 ),
                             )
@@ -1212,10 +1253,8 @@ class InProcessChildTaskRuntime:
                                 flow_id=flow_id,
                                 task_id=task_id,
                                 event="retrying",
-                                payload=self._event_payload(
-                                    resource_id=primary_resource_id,
-                                    description=public_description,
-                                    user_label=feedback_label,
+                                payload=self._task_event_payload(
+                                    view,
                                     attempt=attempt,
                                     max_attempts=max_attempts,
                                     error=result.error,
@@ -1241,16 +1280,15 @@ class InProcessChildTaskRuntime:
                             flow_id=flow_id,
                             task_id=task_id,
                             event="dead_lettered",
-                            payload=self._event_payload(
-                                resource_id=primary_resource_id,
+                            payload=self._task_event_payload(
+                                view,
                                 message="子任务执行失败",
                                 status=final_result.status,
                                 error=final_result.error,
                                 attempts=final_result.attempts,
                                 max_attempts=max_attempts,
                                 error_type=decision.error_type,
-                                task_description=public_description,
-                                user_label=feedback_label,
+                                task_description=view.public_description,
                                 **_notebook_feedback_payload(),
                             ),
                         )

@@ -2639,6 +2639,9 @@ def test_runtime_event_callback_receives_child_task_lifecycle_events() -> None:
     assert [event["event"] for event in events] == ["queued", "started", "succeeded"]
     assert all(event["flow_id"] == "flow-1" for event in events)
     assert all(event["payload"]["resource_id"] == "skill.weather" for event in events)
+    assert all(event["payload"]["description"] == "查询杭州天气" for event in events[:2])
+    assert all(event["payload"]["user_label"] == "查询杭州天气" for event in events)
+    assert events[2]["payload"]["task_description"] == "查询杭州天气"
 
 
 def test_scheduler_stage_blocks_new_non_scheduler_dispatches_after_it_succeeds() -> (
