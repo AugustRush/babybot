@@ -1088,6 +1088,63 @@ def test_force_converge_activates_after_repeated_dead_letters() -> None:
     assert context.state["orchestrator_force_converge"] == reason
 
 
+def test_force_converge_activates_immediately_after_exploration_stall_dead_letter() -> (
+    None
+):
+    context = ExecutionContext()
+    orch = DynamicOrchestrator(
+        resource_manager=DummyResourceManager(),
+        gateway=DummyGateway([]),
+    )
+    notebook = orch._ensure_plan_notebook(  # type: ignore[attr-defined]
+        "create local pdf skill",
+        context,
+    )
+    task_map = context.state.setdefault("notebook_task_map", {})
+    node = notebook.add_child_node(
+        parent_id=notebook.root_node_id,
+        kind="child_task",
+        title="explore remote reference",
+        objective="参考仓库创建本地 pdf 技能",
+        owner="subagent",
+        resource_ids=("skill.weather",),
+    )
+    task_map["task_0"] = node.node_id
+
+    class RuntimeStub:
+        in_flight: dict[str, Any] = {}
+        results = {
+            "task_0": TaskResult(
+                task_id="task_0",
+                status="failed",
+                error=(
+                    "No progress after 4 consecutive tool-only turns. "
+                    "Exploration budget was exhausted and the model still chose "
+                    "read/search/check tools instead of finishing or taking action."
+                ),
+                metadata={
+                    "resource_id": "skill.weather",
+                    "dead_lettered": True,
+                    "no_progress_turns": 4,
+                },
+            )
+        }
+
+        @staticmethod
+        def task_state_snapshot(task_id: str) -> dict[str, Any]:
+            del task_id
+            return {}
+
+    reason = orch._refresh_force_converge_state(  # type: ignore[attr-defined]
+        runtime=RuntimeStub(),  # type: ignore[arg-type]
+        context=context,
+    )
+
+    assert reason is not None
+    assert "convergence required" in reason
+    assert context.state["orchestrator_force_converge"] == reason
+
+
 def test_dispatch_task_rejected_when_orchestrator_force_converge_is_active() -> None:
     context = ExecutionContext(
         state={

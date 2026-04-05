@@ -2210,6 +2210,7 @@ class DynamicOrchestrator:
         current_node = self._current_notebook_node(notebook, context)
         task_map = self._notebook_task_map(context)
         dead_ids: list[str] = []
+        immediate_dead_ids: list[str] = []
         success_ids: list[str] = []
         pending_ids: list[str] = []
 
@@ -2235,6 +2236,12 @@ class DynamicOrchestrator:
                     and result.metadata.get("dead_lettered") is True
                 ):
                     dead_ids.append(task_id)
+                    no_progress_turns = int(
+                        result.metadata.get("no_progress_turns", 0) or 0
+                    )
+                    error_text = str(result.error or "")
+                    if no_progress_turns > 0 or "No progress after" in error_text:
+                        immediate_dead_ids.append(task_id)
                 continue
 
             if task_id in runtime.in_flight:
@@ -2243,19 +2250,32 @@ class DynamicOrchestrator:
                 if resource_id != "group.scheduler":
                     pending_ids.append(task_id)
 
-        if len(dead_ids) < threshold or success_ids or pending_ids:
+        if success_ids or pending_ids:
             return None
 
-        dead_preview = ", ".join(dead_ids[-threshold:])
-        reason = (
-            "convergence required: repeated child-task failures exhausted the retry "
-            f"budget for the current notebook node ({dead_preview}). "
-            "Do not dispatch more child tasks. Inspect existing task results and "
-            "reply with a concise blocker/failure summary."
-        )
+        if immediate_dead_ids:
+            dead_preview = ", ".join(immediate_dead_ids)
+            reason = (
+                "convergence required: a child task already exhausted its exploration "
+                f"budget without making progress ({dead_preview}). "
+                "Do not redispatch similar exploratory work. Inspect the existing "
+                "task result and reply with a concise blocker/failure summary, or "
+                "switch to a materially different action path."
+            )
+        else:
+            if len(dead_ids) < threshold:
+                return None
+            dead_preview = ", ".join(dead_ids[-threshold:])
+            reason = (
+                "convergence required: repeated child-task failures exhausted the retry "
+                f"budget for the current notebook node ({dead_preview}). "
+                "Do not dispatch more child tasks. Inspect existing task results and "
+                "reply with a concise blocker/failure summary."
+            )
         return reason, {
             "node_id": current_node.node_id,
             "dead_task_ids": dead_ids,
+            "immediate_dead_task_ids": immediate_dead_ids,
             "successful_task_ids": success_ids,
             "pending_task_ids": pending_ids,
         }
@@ -2277,6 +2297,10 @@ class DynamicOrchestrator:
             context.state.pop("orchestrator_force_converge", None)
             context.state.pop("orchestrator_force_converge_node_id", None)
             context.state.pop("orchestrator_force_converge_dead_task_ids", None)
+            context.state.pop(
+                "orchestrator_force_converge_immediate_dead_task_ids",
+                None,
+            )
             return None
 
         reason, metadata = payload
@@ -2284,6 +2308,9 @@ class DynamicOrchestrator:
         context.state["orchestrator_force_converge_node_id"] = metadata["node_id"]
         context.state["orchestrator_force_converge_dead_task_ids"] = list(
             metadata["dead_task_ids"]
+        )
+        context.state["orchestrator_force_converge_immediate_dead_task_ids"] = list(
+            metadata.get("immediate_dead_task_ids") or []
         )
         if current_reason == reason:
             return None
@@ -2303,6 +2330,9 @@ class DynamicOrchestrator:
                 metadata={
                     "force_converge": True,
                     "dead_task_ids": list(metadata["dead_task_ids"]),
+                    "immediate_dead_task_ids": list(
+                        metadata.get("immediate_dead_task_ids") or []
+                    ),
                 },
             )
         return reason
