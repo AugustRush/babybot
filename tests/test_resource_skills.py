@@ -2237,6 +2237,77 @@ def test_invoke_external_skill_function_preserves_stdout_when_result_is_empty(
     assert result == "Body PDF saved to /tmp/final.pdf"
 
 
+def test_invoke_external_skill_function_normalizes_relative_output_file_arguments(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = object.__new__(ResourceManager)
+    manager.config = type(
+        "DummyConfig",
+        (),
+        {
+            "system": SimpleNamespace(
+                shell_command_timeout=300,
+                python_executable="",
+                python_fallback_executables=[],
+            ),
+            "workspace_dir": tmp_path,
+        },
+    )()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_external_skill_output_file",
+        default=str(tmp_path / "output"),
+    )
+    (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        manager,
+        "_get_python_candidates",
+        lambda skill_runtime=None: [
+            {"executable": "/primary/python", "required_modules": (), "source": "auto"},
+        ],
+    )
+    monkeypatch.setattr(manager, "_probe_python_candidate", lambda candidate: None)
+
+    captured: dict[str, Any] = {}
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def communicate(self):
+            return (
+                b'__BABYBOT_RESULT__{"ok": true, "result": "done"}\n',
+                b"",
+            )
+
+        def kill(self) -> None:
+            return None
+
+    async def _fake_exec(program, *args, **kwargs):
+        del program, kwargs
+        captured["args"] = args
+        return _Proc()
+
+    monkeypatch.setattr("babybot.resource.asyncio.create_subprocess_exec", _fake_exec)
+
+    result = asyncio.run(
+        manager._invoke_external_skill_function(
+            script_path=str(tmp_path / "tool.py"),
+            function_name="generate_body_pdf",
+            arguments={"input_file": "test_content.md", "output_file": "final.pdf"},
+        )
+    )
+
+    assert result == "done"
+    forwarded_args = captured["args"]
+    forwarded_payload = json.loads(forwarded_args[-1])
+    assert forwarded_payload["input_file"] == "test_content.md"
+    assert forwarded_payload["output_file"] == str(
+        (tmp_path / "output" / "final.pdf").resolve()
+    )
+
+
 def test_callable_tool_relocates_external_artifact_into_workspace_output(
     tmp_path: Path,
 ) -> None:

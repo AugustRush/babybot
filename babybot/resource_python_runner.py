@@ -292,6 +292,7 @@ class ExternalPythonRunner:
         arguments = cli_spec.arguments
 
         async def _runner(**kwargs: Any) -> str:
+            kwargs = owner._normalize_external_tool_arguments(kwargs)
             argv_tail = [resolved]
             for spec in arguments:
                 if spec.name not in kwargs:
@@ -394,6 +395,7 @@ class ExternalPythonRunner:
         runtime: SkillRuntimeConfig | None = None,
         result_normalizer: Any,
     ) -> str:
+        arguments = owner._normalize_external_tool_arguments(arguments)
         runner = (
             "import asyncio, importlib.util, inspect, json, sys, traceback\n"
             "MARK='__BABYBOT_RESULT__'\n"

@@ -456,6 +456,9 @@ class ResourceManager:
     """Centralized resource manager without external agent frameworks."""
 
     _orchestration_tools = {"create_worker", "dispatch_workers"}
+    _EXTERNAL_OUTPUT_PATH_ARG_NAMES = frozenset(
+        {"output_path", "output_file", "save_path", "download_path"}
+    )
     _MEDIA_PATH_RE = re.compile(
         r"(?:^|[\s'\"(:：=])((?:/~|[~/])?[-\w./]+(?:\.(?:png|jpg|jpeg|gif|bmp|webp|pdf|txt|md|json|yaml|yml|csv|xlsx|pptx|docx|mp4|mp3|wav)))"
     )
@@ -1624,6 +1627,26 @@ class ResourceManager:
 
     def _normalize_artifact_path(self, resolved: Path) -> Path:
         return _normalize_artifact_path_for_manager(self, resolved)
+
+    def _normalize_external_tool_arguments(
+        self,
+        arguments: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        normalized = dict(arguments or {})
+        for key, value in list(normalized.items()):
+            if not isinstance(value, str):
+                continue
+            arg_name = str(key or "").strip().lower()
+            if arg_name not in self._EXTERNAL_OUTPUT_PATH_ARG_NAMES:
+                continue
+            candidate = value.strip()
+            if not candidate:
+                continue
+            resolved, error = self._resolve_workspace_file(candidate)
+            if resolved is None or error:
+                continue
+            normalized[key] = resolved
+        return normalized
 
     @staticmethod
     def _create_worker_executor(**kwargs: Any) -> Any:
