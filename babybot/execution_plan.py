@@ -27,21 +27,48 @@ class ExecutionPlan:
     stopping_condition: str
 
 
-def build_execution_plan(contract: TaskContract) -> ExecutionPlan:
+def _resolve_team_mode(contract: TaskContract) -> str | None:
+    metadata = dict(contract.metadata or {})
+    team_mode = str(metadata.get("team_mode", "") or "").strip().lower()
+    if team_mode in {"debate", "cooperative"}:
+        return team_mode
     if contract.mode == "debate":
-        participants = list(contract.allowed_agents or ())
-        step = PlanStep(
-            step_id="step_debate",
-            kind="team_debate",
-            title="Structured debate",
-            payload={
-                "participants": participants,
-                "round_budget": contract.round_budget,
-                "stopping_condition": contract.termination_rule,
-                "allowed_tools": list(contract.allowed_tools or ()),
-                "allowed_agents": list(contract.allowed_agents or ()),
-            },
+        return "debate"
+    if contract.mode in {"team", "cooperative"}:
+        return "cooperative"
+    return None
+
+
+def _build_team_step(contract: TaskContract, *, team_mode: str) -> PlanStep:
+    participants = list(contract.allowed_agents or ())
+    payload = {
+        "participants": participants,
+        "round_budget": contract.round_budget,
+        "stopping_condition": contract.termination_rule,
+        "allowed_tools": list(contract.allowed_tools or ()),
+        "allowed_agents": list(contract.allowed_agents or ()),
+    }
+    if team_mode == "cooperative":
+        payload["mode"] = team_mode
+        payload["tasks"] = list((contract.metadata or {}).get("team_tasks") or [])
+        return PlanStep(
+            step_id="step_team",
+            kind="team_cooperative",
+            title="Cooperative team execution",
+            payload=payload,
         )
+    return PlanStep(
+        step_id="step_debate",
+        kind="team_debate",
+        title="Structured debate",
+        payload=payload,
+    )
+
+
+def build_execution_plan(contract: TaskContract) -> ExecutionPlan:
+    team_mode = _resolve_team_mode(contract)
+    if team_mode is not None:
+        step = _build_team_step(contract, team_mode=team_mode)
         steps = (step,)
     else:
         step = PlanStep(

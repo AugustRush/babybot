@@ -1267,6 +1267,124 @@ def test_run_subagent_task_returns_collected_media_from_context(
     assert media == [str(image_path.resolve())]
 
 
+def test_run_subagent_task_result_extracts_hyphenated_artifact_paths_from_final_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "output" / "page-screenshot-2026-04-06.png"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(b"png")
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_hyphenated_artifacts",
+        default=str(tmp_path / "output"),
+    )
+    manager._get_output_dir = lambda: tmp_path / "output"
+    manager._build_task_lease = lambda lease: ToolLease()
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="worker",
+                status="succeeded",
+                output=f"截图已生成，请发送给用户：{artifact_path.resolve()}",
+            )
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    result = asyncio.run(manager.run_subagent_task_result("take screenshot"))
+
+    assert result.status == "succeeded"
+    assert result.artifacts == (str(artifact_path.resolve()),)
+
+
+def test_run_subagent_task_result_relocates_external_pdf_artifacts_from_final_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(suffix="-final-report.pdf", delete=False) as f:
+        f.write(b"%PDF-1.4")
+        external_path = Path(f.name).resolve()
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_external_pdf_artifacts",
+        default=str(output_dir),
+    )
+    manager._get_output_dir = lambda: output_dir
+    manager._build_task_lease = lambda lease: ToolLease()
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="worker",
+                status="succeeded",
+                output=f"PDF 文档已生成：{external_path}",
+            )
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    try:
+        result = asyncio.run(manager.run_subagent_task_result("build pdf"))
+    finally:
+        if external_path.exists():
+            external_path.unlink()
+
+    assert result.status == "succeeded"
+    assert len(result.artifacts) == 1
+    relocated = Path(result.artifacts[0])
+    assert relocated.parent == output_dir.resolve()
+    assert relocated.name == external_path.name
+    assert relocated.read_bytes() == b"%PDF-1.4"
+
+
 def test_run_subagent_task_propagates_channel_context_to_worker_context(
     tmp_path: Path,
     monkeypatch,

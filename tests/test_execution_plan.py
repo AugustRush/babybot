@@ -78,6 +78,57 @@ def test_build_execution_plan_for_single_answer_bypasses_debate() -> None:
     ]
 
 
+def test_build_execution_plan_for_team_cooperative_promotes_team_node() -> None:
+    contract = TaskContract(
+        chat_key="feishu:c1",
+        goal="多人分工生成 PDF 并回传附件",
+        mode="team",
+        deliverable="final_answer",
+        round_budget=None,
+        termination_rule="all_tasks_complete",
+        allow_clarification=False,
+        allowed_tools=("dispatch_team", "reply_to_user"),
+        allowed_agents=("researcher", "writer"),
+        metadata={
+            "team_mode": "cooperative",
+            "team_tasks": [
+                {"task_id": "research", "description": "整理提纲"},
+                {
+                    "task_id": "render",
+                    "description": "生成 PDF",
+                    "deps": ["research"],
+                },
+            ],
+        },
+    )
+
+    plan = build_execution_plan(contract)
+
+    assert plan.steps == (
+        PlanStep(
+            step_id="step_team",
+            kind="team_cooperative",
+            title="Cooperative team execution",
+            payload={
+                "mode": "cooperative",
+                "participants": ["researcher", "writer"],
+                "round_budget": None,
+                "stopping_condition": "all_tasks_complete",
+                "allowed_tools": ["dispatch_team", "reply_to_user"],
+                "allowed_agents": ["researcher", "writer"],
+                "tasks": [
+                    {"task_id": "research", "description": "整理提纲"},
+                    {
+                        "task_id": "render",
+                        "description": "生成 PDF",
+                        "deps": ["research"],
+                    },
+                ],
+            },
+        ),
+    )
+
+
 def test_compile_execution_plan_to_notebook_creates_root_and_step_nodes() -> None:
     contract = TaskContract(
         chat_key="feishu:c1",
@@ -144,3 +195,43 @@ def test_compile_execution_plan_to_notebook_promotes_debate_to_team_node() -> No
     assert step_nodes[0].kind == "team_debate"
     assert step_nodes[0].metadata["step_id"] == "step_debate"
     assert step_nodes[0].metadata["payload"]["participants"] == ["architect", "reviewer"]
+
+
+def test_compile_execution_plan_to_notebook_promotes_team_cooperative_node() -> None:
+    contract = TaskContract(
+        chat_key="feishu:c1",
+        goal="多人协作整理资料并生成 PDF",
+        mode="team",
+        deliverable="final_answer",
+        round_budget=None,
+        termination_rule="all_tasks_complete",
+        allow_clarification=False,
+        allowed_tools=("dispatch_team", "reply_to_user"),
+        allowed_agents=("researcher", "writer"),
+        metadata={
+            "team_mode": "cooperative",
+            "team_tasks": [
+                {"task_id": "research", "description": "整理资料"},
+                {"task_id": "render", "description": "生成 PDF", "deps": ["research"]},
+            ],
+        },
+    )
+    plan = build_execution_plan(contract)
+
+    notebook = compile_execution_plan_to_notebook(
+        plan,
+        flow_id="flow-team-coop-plan",
+        metadata={"chat_key": contract.chat_key},
+    )
+
+    step_nodes = [
+        node for node in notebook.nodes.values() if node.parent_id == notebook.root_node_id
+    ]
+
+    assert len(step_nodes) == 1
+    assert step_nodes[0].kind == "team_cooperative"
+    assert step_nodes[0].metadata["step_id"] == "step_team"
+    assert step_nodes[0].metadata["payload"]["tasks"] == [
+        {"task_id": "research", "description": "整理资料"},
+        {"task_id": "render", "description": "生成 PDF", "deps": ["research"]},
+    ]
