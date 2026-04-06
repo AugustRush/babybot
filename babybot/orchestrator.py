@@ -29,6 +29,11 @@ from .config import Config
 from .context import Tape, TapeStore, _extract_keywords
 from .context_views import build_context_view
 from .execution_plan import build_execution_plan, compile_execution_plan_to_notebook
+from .execution_outcome import (
+    build_execution_outcome,
+    compute_policy_reward,
+    summarize_task_results,
+)
 from .feedback_events import normalize_runtime_feedback_event, runtime_event_primary_label
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
@@ -942,47 +947,7 @@ class OrchestratorAgent:
 
     @staticmethod
     def _task_result_outcome_details(result: Any | None) -> dict[str, int]:
-        task_results = dict(getattr(result, "task_results", {}) or {})
-        retry_count = 0
-        dead_letter_count = 0
-        stalled_count = 0
-        tool_call_count = 0
-        tool_failure_count = 0
-        loop_guard_block_count = 0
-        max_step_exhausted_count = 0
-        for task_result in task_results.values():
-            attempts = max(1, int(getattr(task_result, "attempts", 1) or 1))
-            retry_count += max(0, attempts - 1)
-            metadata = dict(getattr(task_result, "metadata", {}) or {})
-            if metadata.get("dead_lettered") is True:
-                dead_letter_count += 1
-            error_text = str(getattr(task_result, "error", "") or "").strip().lower()
-            if (
-                metadata.get("stalled") is True
-                or metadata.get("error_type") == "stalled"
-                or "heartbeat stalled" in error_text
-            ):
-                stalled_count += 1
-            tool_call_count += max(0, int(metadata.get("tool_call_count", 0) or 0))
-            tool_failure_count += max(
-                0, int(metadata.get("tool_failure_count", 0) or 0)
-            )
-            loop_guard_block_count += max(
-                0, int(metadata.get("loop_guard_block_count", 0) or 0)
-            )
-            max_step_exhausted_count += max(
-                0, int(metadata.get("max_step_exhausted_count", 0) or 0)
-            )
-        return {
-            "task_result_count": len(task_results),
-            "retry_count": retry_count,
-            "dead_letter_count": dead_letter_count,
-            "stalled_count": stalled_count,
-            "tool_call_count": tool_call_count,
-            "tool_failure_count": tool_failure_count,
-            "loop_guard_block_count": loop_guard_block_count,
-            "max_step_exhausted_count": max_step_exhausted_count,
-        }
+        return summarize_task_results(result)
 
     @classmethod
     def _policy_reward(
@@ -992,29 +957,11 @@ class OrchestratorAgent:
         *,
         result: Any | None = None,
     ) -> float:
-        reward = 1.0 if final_status == "succeeded" else -1.0
-        event_retry_count = sum(
-            1 for event in events if event.get("event") == "retrying"
+        return compute_policy_reward(
+            events,
+            final_status=final_status,
+            result=result,
         )
-        event_dead_letter_count = sum(
-            1 for event in events if event.get("event") == "dead_lettered"
-        )
-        event_stalled_count = sum(
-            1 for event in events if event.get("event") == "stalled"
-        )
-        result_details = cls._task_result_outcome_details(result)
-        retry_count = max(event_retry_count, int(result_details["retry_count"]))
-        dead_letter_count = max(
-            event_dead_letter_count, int(result_details["dead_letter_count"])
-        )
-        stalled_count = max(event_stalled_count, int(result_details["stalled_count"]))
-        reward -= 0.15 * retry_count
-        reward -= 0.25 * dead_letter_count
-        reward -= 0.2 * stalled_count
-        reward -= 0.08 * int(result_details["tool_failure_count"] > 0)
-        reward -= 0.1 * int(result_details["loop_guard_block_count"] > 0)
-        reward -= 0.18 * int(result_details["max_step_exhausted_count"] > 0)
-        return max(-1.0, min(1.0, reward))
 
     @classmethod
     def _policy_outcome_details(
@@ -1025,40 +972,12 @@ class OrchestratorAgent:
         error: str | None = None,
         execution_elapsed_ms: float | None = None,
     ) -> dict[str, Any]:
-        event_retry_count = sum(
-            1 for event in events if event.get("event") == "retrying"
+        return build_execution_outcome(
+            events,
+            result=result,
+            error=error,
+            execution_elapsed_ms=execution_elapsed_ms,
         )
-        event_dead_letter_count = sum(
-            1 for event in events if event.get("event") == "dead_lettered"
-        )
-        event_stalled_count = sum(
-            1 for event in events if event.get("event") == "stalled"
-        )
-        result_details = cls._task_result_outcome_details(result)
-        payload = {
-            "retry_count": max(event_retry_count, int(result_details["retry_count"])),
-            "dead_letter_count": max(
-                event_dead_letter_count, int(result_details["dead_letter_count"])
-            ),
-            "stalled_count": max(
-                event_stalled_count, int(result_details["stalled_count"])
-            ),
-            "task_result_count": int(result_details["task_result_count"]),
-            "executor_step_count": sum(
-                1 for event in events if event.get("event") == "executor.step"
-            ),
-            "tool_call_count": int(result_details["tool_call_count"]),
-            "tool_failure_count": int(result_details["tool_failure_count"]),
-            "loop_guard_block_count": int(result_details["loop_guard_block_count"]),
-            "max_step_exhausted_count": int(result_details["max_step_exhausted_count"]),
-        }
-        if execution_elapsed_ms is not None:
-            payload["execution_elapsed_ms"] = round(
-                max(0.0, float(execution_elapsed_ms)), 2
-            )
-        if error:
-            payload["error"] = error
-        return payload
 
     async def _answer_with_dag(
         self,
