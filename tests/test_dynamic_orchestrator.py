@@ -186,6 +186,13 @@ def test_dynamic_orchestrator_reexports_child_task_runtime_types() -> None:
     assert InProcessChildTaskRuntime is KernelChildTaskRuntime
 
 
+def test_dynamic_orchestrator_reexports_team_runtime_type() -> None:
+    from babybot.agent_kernel.dynamic_orchestrator import TeamDispatchRuntime
+    from babybot.agent_kernel.team_runtime import TeamDispatchRuntime as ModuleTeamDispatchRuntime
+
+    assert TeamDispatchRuntime is ModuleTeamDispatchRuntime
+
+
 def test_plain_text_response() -> None:
     """Model responds with plain text (no tool calls) — treated as final."""
     gateway = DummyGateway([ModelResponse(text="直接回答")])
