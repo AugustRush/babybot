@@ -455,7 +455,9 @@ def test_message_bus_sends_final_reply_as_new_message_after_runtime_progress() -
     assert response.text == "最终结果"
     assert channel.created == ["处理中"]
     assert channel.patched[0] == "处理中，请稍候"
+    assert any("正在执行" in item for item in channel.patched)
     assert any("当前阶段：先查询杭州天气 (50%)" in item for item in channel.patched)
+    assert channel.patched[-1].splitlines()[0] == "处理完成"
     assert "已完成阶段：" in channel.patched[-1]
     assert "先查询杭州天气" in channel.patched[-1]
     assert len(channel.sent) == 1
@@ -490,11 +492,79 @@ def test_message_bus_merges_runtime_progress_into_single_stream_card_for_feishu(
     assert len(channel.created) == 1
     assert "当前阶段：" in channel.created[0]
     assert "先查询杭州天气" in channel.created[0]
+    assert channel.created[0].splitlines()[0] == "正在执行"
     assert len(channel.patched) >= 1
+    assert channel.patched[-1].splitlines()[0] == "处理完成"
     assert "已完成阶段：" in channel.patched[-1]
     assert "先查询杭州天气" in channel.patched[-1]
     assert len(channel.sent) == 1
     assert channel.sent[0].text == "最终结果"
+
+
+def test_message_bus_stream_card_title_shows_completed_count_while_still_running() -> None:
+    class _CompletedThenRunningOrchestrator:
+        async def process_task(
+            self,
+            user_input: str,
+            chat_key: str = "",
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            stream_callback: Any = None,
+            runtime_event_callback: Any = None,
+        ) -> TaskResponse:
+            del user_input, chat_key, heartbeat, media_paths, stream_callback
+            assert runtime_event_callback is not None
+            await runtime_event_callback(
+                {
+                    "flow_id": "flow-1",
+                    "task_id": "task-1",
+                    "event": "succeeded",
+                    "payload": {
+                        "stage": "task",
+                        "description": "阶段1",
+                        "output": "阶段1完成",
+                    },
+                }
+            )
+            await runtime_event_callback(
+                {
+                    "flow_id": "flow-1",
+                    "task_id": "task-2",
+                    "event": "started",
+                    "payload": {
+                        "stage": "task",
+                        "description": "阶段2",
+                    },
+                }
+            )
+            return TaskResponse(text="done")
+
+    channel = _FakeFeishuChannel(stream_reply=True)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_CompletedThenRunningOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> TaskResponse:
+        await bus.start()
+        try:
+            return await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    asyncio.run(_run())
+
+    assert any("正在执行，已完成 1 项" in item for item in channel.patched)
+    assert any("当前阶段：阶段2" in item for item in channel.patched)
+    assert any("1. 阶段1" in item for item in channel.patched)
 
 
 def test_message_bus_stream_card_completed_stage_list_keeps_last_five_items() -> None:
@@ -551,6 +621,7 @@ def test_message_bus_stream_card_completed_stage_list_keeps_last_five_items() ->
 
     assert len(channel.patched) >= 1
     final_card = channel.patched[-1]
+    assert final_card.splitlines()[0] == "处理完成"
     assert "阶段1" not in final_card
     for label in ("阶段2", "阶段3", "阶段4", "阶段5", "阶段6"):
         assert label in final_card

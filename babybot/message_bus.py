@@ -456,6 +456,7 @@ class MessageBus:
         _completed_stage_history: list[str] = []
         _active_stage_text: str = ""
         _failed_stage_text: str = ""
+        _lifecycle_status: str = "received"
         _COMPLETED_STAGE_LIMIT = 5
 
         async def _send_intermediate_message(
@@ -507,8 +508,24 @@ class MessageBus:
                 return f"{label}\n原因：{normalized_event.error}"
             return label
 
+        def _render_lifecycle_card_title() -> str:
+            completed_count = len(_completed_stage_history)
+            if _lifecycle_status == "failed":
+                return "处理失败"
+            if _lifecycle_status == "cancelled":
+                return "已取消"
+            if _lifecycle_status in {"queued", "planning"}:
+                return "正在准备"
+            if _lifecycle_status in {"running", "waiting_tool", "waiting_user", "repairing"}:
+                if completed_count > 0:
+                    return f"正在执行，已完成 {completed_count} 项"
+                return "正在执行"
+            if completed_count > 0:
+                return "处理完成"
+            return "收到请求"
+
         def _render_lifecycle_card_text() -> str:
-            lines = [f"{progress_spinner(progress_spinner_counter)} 收到，正在处理…"]
+            lines = [_render_lifecycle_card_title()]
             current_stage = _active_stage_text or (
                 "已中断" if _failed_stage_text else "等待最终汇总"
             )
@@ -635,7 +652,7 @@ class MessageBus:
         async def _runtime_event_callback(event: Any) -> None:
             nonlocal stream_detached, last_runtime_progress_key
             nonlocal progress_spinner_counter, _active_task_label
-            nonlocal _active_stage_text, _failed_stage_text
+            nonlocal _active_stage_text, _failed_stage_text, _lifecycle_status
             payload = _event_to_payload(event)
             runtime_events.append(payload)
             if isinstance(msg.metadata, dict):
@@ -683,6 +700,7 @@ class MessageBus:
                 stream_detached = True
             if stream_enabled and normalized_event.stage != "interactive_session":
                 stage_text = _format_lifecycle_stage_text(normalized_event)
+                _lifecycle_status = normalized_event.state or _lifecycle_status
                 if normalized_event.state in {
                     "queued",
                     "planning",
