@@ -165,7 +165,7 @@ def _collect_artifact_paths(
     path_re = media_path_re or ResourceManager._MEDIA_PATH_RE
 
     def _add_path(raw: str) -> None:
-        candidate = raw.strip().strip("\"'")
+        candidate = raw.strip().strip("\"'`")
         if not candidate:
             return
         path = Path(os.path.expanduser(candidate))
@@ -460,7 +460,7 @@ class ResourceManager:
         {"output_path", "output_file", "save_path", "download_path"}
     )
     _MEDIA_PATH_RE = re.compile(
-        r"(?:^|[\s'\"(:：=])((?:/~|[~/])?[-\w./]+(?:\.(?:png|jpg|jpeg|gif|bmp|webp|pdf|txt|md|json|yaml|yml|csv|xlsx|pptx|docx|mp4|mp3|wav)))"
+        r"(?:^|[\s'\"`(:：=])((?:/~|[~/])?[-\w./]+(?:\.(?:png|jpg|jpeg|gif|bmp|webp|pdf|txt|md|json|yaml|yml|csv|xlsx|pptx|docx|mp4|mp3|wav)))"
     )
 
     def __init__(self, config: Config | None = None):

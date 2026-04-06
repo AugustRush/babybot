@@ -1321,6 +1321,60 @@ def test_run_subagent_task_result_extracts_hyphenated_artifact_paths_from_final_
     assert result.artifacts == (str(artifact_path.resolve()),)
 
 
+def test_run_subagent_task_result_extracts_markdown_wrapped_artifact_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "output" / "baidu-news-screenshot.png"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(b"png")
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_markdown_artifacts",
+        default=str(tmp_path / "output"),
+    )
+    manager._get_output_dir = lambda: tmp_path / "output"
+    manager._build_task_lease = lambda lease: ToolLease()
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del task, context
+            return TaskResult(
+                task_id="worker",
+                status="succeeded",
+                output=f"截图已完成，截图路径：`{artifact_path.resolve()}`",
+            )
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    result = asyncio.run(manager.run_subagent_task_result("take screenshot"))
+
+    assert result.status == "succeeded"
+    assert result.artifacts == (str(artifact_path.resolve()),)
+
+
 def test_run_subagent_task_result_relocates_external_pdf_artifacts_from_final_output(
     tmp_path: Path,
     monkeypatch,
