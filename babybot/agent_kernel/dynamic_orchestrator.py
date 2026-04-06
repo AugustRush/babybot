@@ -721,6 +721,63 @@ class InProcessChildTaskRuntime:
         return self._event_payload(**view.event_payload(**payload))
 
     @staticmethod
+    def _notebook_feedback_payload(
+        notebook: PlanNotebook | Any,
+        notebook_node_id: str,
+    ) -> dict[str, Any]:
+        if not isinstance(notebook, PlanNotebook):
+            return {}
+        if not notebook_node_id or notebook_node_id not in notebook.nodes:
+            return {}
+        node = notebook.get_node(notebook_node_id)
+        completed_steps = [
+            candidate.title
+            for candidate in notebook.nodes.values()
+            if candidate.parent_id == node.parent_id and candidate.status == "completed"
+        ][-3:]
+        blockers = [
+            checkpoint.message
+            for checkpoint in node.checkpoints
+            if checkpoint.status == "open"
+        ]
+        blockers.extend(issue.title for issue in node.issues if issue.status == "open")
+        return {
+            "notebook_phase": node.status,
+            "notebook_owner": node.owner,
+            "notebook_completed_steps": completed_steps,
+            "notebook_blockers": blockers[:2],
+            "notebook_next_action": (
+                node.objective
+                if node.status not in {"completed", "failed", "cancelled"}
+                else ""
+            ),
+        }
+
+    async def _publish_task_event(
+        self,
+        *,
+        flow_id: str,
+        task_id: str,
+        event: str,
+        view: ChildTaskView,
+        notebook: PlanNotebook | Any = None,
+        notebook_node_id: str = "",
+        **payload: Any,
+    ) -> None:
+        await self._child_task_bus.publish(
+            ChildTaskEvent(
+                flow_id=flow_id,
+                task_id=task_id,
+                event=event,
+                payload=self._task_event_payload(
+                    view,
+                    **payload,
+                    **self._notebook_feedback_payload(notebook, notebook_node_id),
+                ),
+            )
+        )
+
+    @staticmethod
     def _normalize_dispatch_description(description: str) -> str:
         return " ".join(str(description or "").split()).strip().lower()
 
@@ -1059,48 +1116,13 @@ class InProcessChildTaskRuntime:
             task_id,
             parent=context.state.get("heartbeat"),
         )
-
-        def _notebook_feedback_payload() -> dict[str, Any]:
-            if not isinstance(notebook, PlanNotebook):
-                return {}
-            if not notebook_node_id or notebook_node_id not in notebook.nodes:
-                return {}
-            node = notebook.get_node(notebook_node_id)
-            completed_steps = [
-                candidate.title
-                for candidate in notebook.nodes.values()
-                if candidate.parent_id == node.parent_id and candidate.status == "completed"
-            ][-3:]
-            blockers = [
-                checkpoint.message
-                for checkpoint in node.checkpoints
-                if checkpoint.status == "open"
-            ]
-            blockers.extend(
-                issue.title for issue in node.issues if issue.status == "open"
-            )
-            return {
-                "notebook_phase": node.status,
-                "notebook_owner": node.owner,
-                "notebook_completed_steps": completed_steps,
-                "notebook_blockers": blockers[:2],
-                "notebook_next_action": (
-                    node.objective
-                    if node.status not in {"completed", "failed", "cancelled"}
-                    else ""
-                ),
-            }
-
-        await self._child_task_bus.publish(
-            ChildTaskEvent(
-                flow_id=flow_id,
-                task_id=task_id,
-                event="queued",
-                payload=self._task_event_payload(
-                    view,
-                    **_notebook_feedback_payload(),
-                ),
-            )
+        await self._publish_task_event(
+            flow_id=flow_id,
+            task_id=task_id,
+            event="queued",
+            view=view,
+            notebook=notebook,
+            notebook_node_id=notebook_node_id,
         )
         self._update_task_state(
             task_id,
@@ -1124,16 +1146,13 @@ class InProcessChildTaskRuntime:
                 attempt = 0
                 while True:
                     attempt += 1
-                    await self._child_task_bus.publish(
-                        ChildTaskEvent(
-                            flow_id=flow_id,
-                            task_id=task_id,
-                            event="started",
-                            payload=self._task_event_payload(
-                                view,
-                                **_notebook_feedback_payload(),
-                            ),
-                        )
+                    await self._publish_task_event(
+                        flow_id=flow_id,
+                        task_id=task_id,
+                        event="started",
+                        view=view,
+                        notebook=notebook,
+                        notebook_node_id=notebook_node_id,
                     )
                     self._update_task_state(
                         task_id,
@@ -1204,21 +1223,18 @@ class InProcessChildTaskRuntime:
                             attempts=result.attempts,
                             metadata=result.metadata,
                         )
-                        await self._child_task_bus.publish(
-                            ChildTaskEvent(
-                                flow_id=flow_id,
-                                task_id=task_id,
-                                event="succeeded",
-                                payload=self._task_event_payload(
-                                    view,
-                                    message="子任务已完成",
-                                    status=result.status,
-                                    error=result.error,
-                                    output=result.output,
-                                    task_description=view.public_description,
-                                    **_notebook_feedback_payload(),
-                                ),
-                            )
+                        await self._publish_task_event(
+                            flow_id=flow_id,
+                            task_id=task_id,
+                            event="succeeded",
+                            view=view,
+                            notebook=notebook,
+                            notebook_node_id=notebook_node_id,
+                            message="子任务已完成",
+                            status=result.status,
+                            error=result.error,
+                            output=result.output,
+                            task_description=view.public_description,
                         )
                         child_media = child_context.state.get(
                             "media_paths_collected", []
@@ -1248,20 +1264,17 @@ class InProcessChildTaskRuntime:
                             last_error=result.error,
                             error_type=decision.error_type,
                         )
-                        await self._child_task_bus.publish(
-                            ChildTaskEvent(
-                                flow_id=flow_id,
-                                task_id=task_id,
-                                event="retrying",
-                                payload=self._task_event_payload(
-                                    view,
-                                    attempt=attempt,
-                                    max_attempts=max_attempts,
-                                    error=result.error,
-                                    error_type=decision.error_type,
-                                    **_notebook_feedback_payload(),
-                                ),
-                            )
+                        await self._publish_task_event(
+                            flow_id=flow_id,
+                            task_id=task_id,
+                            event="retrying",
+                            view=view,
+                            notebook=notebook,
+                            notebook_node_id=notebook_node_id,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            error=result.error,
+                            error_type=decision.error_type,
                         )
                         delay_s = float(self._retry_delay_seconds(attempt - 1))
                         if delay_s > 0:
@@ -1275,23 +1288,20 @@ class InProcessChildTaskRuntime:
                         retryable=decision.retryable,
                         max_attempts=max_attempts,
                     )
-                    await self._child_task_bus.publish(
-                        ChildTaskEvent(
-                            flow_id=flow_id,
-                            task_id=task_id,
-                            event="dead_lettered",
-                            payload=self._task_event_payload(
-                                view,
-                                message="子任务执行失败",
-                                status=final_result.status,
-                                error=final_result.error,
-                                attempts=final_result.attempts,
-                                max_attempts=max_attempts,
-                                error_type=decision.error_type,
-                                task_description=view.public_description,
-                                **_notebook_feedback_payload(),
-                            ),
-                        )
+                    await self._publish_task_event(
+                        flow_id=flow_id,
+                        task_id=task_id,
+                        event="dead_lettered",
+                        view=view,
+                        notebook=notebook,
+                        notebook_node_id=notebook_node_id,
+                        message="子任务执行失败",
+                        status=final_result.status,
+                        error=final_result.error,
+                        attempts=final_result.attempts,
+                        max_attempts=max_attempts,
+                        error_type=decision.error_type,
+                        task_description=view.public_description,
                     )
                     break
             finally:
