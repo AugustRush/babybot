@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from babybot.runtime_job_store import RuntimeJobStore
 from babybot.orchestrator import OrchestratorAgent
@@ -225,3 +226,23 @@ def test_project_job_state_from_runtime_event_prefers_user_label_for_child_updat
 
     assert state == "running"
     assert message == "查询完整回复列表"
+
+
+def test_orchestrator_runtime_support_normalizes_runtime_event_objects() -> None:
+    from babybot.orchestrator_runtime_support import OrchestratorRuntimeSupport
+
+    event = SimpleNamespace(
+        event="progress",
+        task_id="task-1",
+        flow_id="flow-1",
+        payload={"stage": "task", "message": "处理中"},
+    )
+
+    payload = OrchestratorRuntimeSupport.runtime_event_payload(event)
+
+    assert payload == {
+        "event": "progress",
+        "task_id": "task-1",
+        "flow_id": "flow-1",
+        "payload": {"stage": "task", "message": "处理中"},
+    }

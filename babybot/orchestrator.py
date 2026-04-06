@@ -46,6 +46,7 @@ from .interactive_sessions.types import (
 from .model_gateway import OpenAICompatibleGateway
 from .orchestration_policy import ConservativePolicySelector, build_policy_state_bucket
 from .orchestration_policy_store import OrchestrationPolicyStore
+from .orchestrator_runtime_support import OrchestratorRuntimeSupport
 from .orchestration_router import (
     RoutingDecision,
     build_routing_intent_bucket,
@@ -59,7 +60,6 @@ from .orchestration_router import (
 from .orchestration_policy_types import PolicyDecisionRecord, PolicyOutcomeRecord
 from .resource import ResourceManager
 from .runtime_job_store import RuntimeJobStore
-from .runtime_jobs import JOB_STATES, project_job_state_from_runtime_event
 from .runtime_feedback_commands import parse_policy_command
 from .task_contract import build_task_contract
 from .task_evaluator import TaskEvaluationInput, TaskEvaluator
@@ -162,6 +162,17 @@ class OrchestratorAgent:
                 )
             },
             max_age_seconds=self.config.system.interactive_session_max_age_seconds,
+        )
+
+    def _get_runtime_support(self) -> OrchestratorRuntimeSupport:
+        return OrchestratorRuntimeSupport(
+            config=self.config,
+            tape_store=getattr(self, "tape_store", None),
+            memory_store=getattr(self, "memory_store", None),
+            runtime_job_store=getattr(self, "_runtime_job_store", None),
+            invoke_callback=self._invoke_callback,
+            spawn_background_task=self._spawn_background_task,
+            maybe_handoff=self._maybe_handoff,
         )
 
     @staticmethod
@@ -1728,26 +1739,15 @@ class OrchestratorAgent:
         user_input: str,
         media_paths: list[str] | None = None,
     ) -> Tape | None:
-        if not chat_key or self.tape_store is None:
-            return None
         logger.info("Loading tape for chat_key=%s", chat_key)
-        tape = self.tape_store.get_or_create(chat_key)
-        logger.info("Tape loaded, observing user message...")
-        if hasattr(self, "memory_store"):
-            self.memory_store.observe_user_message(chat_key, user_input)
-        pending_entries = []
-        if tape.last_anchor() is None:
-            anchor = tape.append("anchor", {"name": "session/start", "state": {}})
-            pending_entries.append(anchor)
-        content_for_tape = user_input
-        if media_paths:
-            content_for_tape = f"{user_input}\n[附带 {len(media_paths)} 张图片]"
-        user_entry = tape.append(
-            "message", {"role": "user", "content": content_for_tape}
+        tape = self._get_runtime_support().prepare_tape(
+            chat_key=chat_key,
+            user_input=user_input,
+            media_paths=media_paths,
         )
-        pending_entries.append(user_entry)
-        self.tape_store.save_entries(chat_key, pending_entries)
-        logger.info("Tape entries saved, proceeding to _answer_with_dag")
+        if tape is not None:
+            logger.info("Tape loaded, observing user message...")
+            logger.info("Tape entries saved, proceeding to _answer_with_dag")
         return tape
 
     def _create_runtime_job(
@@ -1758,22 +1758,12 @@ class OrchestratorAgent:
         media_paths: list[str] | None = None,
         job_metadata_override: dict[str, Any] | None = None,
     ) -> Any | None:
-        runtime_job_store = getattr(self, "_runtime_job_store", None)
-        if not chat_key or runtime_job_store is None:
-            return None
-        runtime_metadata = dict(job_metadata_override or {})
-        runtime_metadata.setdefault("media_paths", list(media_paths or []))
-        runtime_job = runtime_job_store.create(
+        return self._get_runtime_support().create_runtime_job(
             chat_key=chat_key,
-            goal=user_input,
-            metadata=runtime_metadata,
+            user_input=user_input,
+            media_paths=media_paths,
+            job_metadata_override=job_metadata_override,
         )
-        runtime_job_store.transition(
-            runtime_job.job_id,
-            "planning",
-            progress_message="已接收任务，准备执行",
-        )
-        return runtime_job
 
     @staticmethod
     async def _invoke_callback(
@@ -1795,52 +1785,12 @@ class OrchestratorAgent:
         runtime_job: Any | None,
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None,
     ) -> Callable[[Any], Awaitable[None] | None] | None:
-        runtime_job_store = getattr(self, "_runtime_job_store", None)
-        if runtime_job is None and (tape is None or not chat_key):
-            return runtime_event_callback
-
-        async def _record_runtime_event(event: Any) -> None:
-            payload = self._runtime_event_payload(event)
-            if runtime_job_store is not None and runtime_job is not None:
-                payload["job_id"] = str(payload.get("job_id", "") or runtime_job.job_id)
-                inner_payload = dict(payload.get("payload") or {})
-                inner_payload.setdefault("job_id", runtime_job.job_id)
-                payload["payload"] = inner_payload
-                state, progress_message = self._job_state_from_runtime_event(payload)
-                metadata_update: dict[str, Any] = {}
-                flow_id = str(payload.get("flow_id", "") or "").strip()
-                task_id = str(payload.get("task_id", "") or "").strip()
-                stage = str(inner_payload.get("stage", "") or "").strip()
-                if flow_id:
-                    metadata_update["flow_id"] = flow_id
-                if task_id:
-                    metadata_update["last_task_id"] = task_id
-                if stage:
-                    metadata_update["last_stage"] = stage
-                runtime_job_store.transition(
-                    runtime_job.job_id,
-                    state,
-                    progress_message=progress_message,
-                    metadata=metadata_update,
-                )
-            if tape is not None and chat_key:
-                entry = tape.append(
-                    "event",
-                    {
-                        "event": str(payload.get("event", "") or ""),
-                        "payload": dict(payload.get("payload") or {}),
-                    },
-                    {
-                        "task_id": str(payload.get("task_id", "") or ""),
-                        "flow_id": str(payload.get("flow_id", "") or ""),
-                    },
-                )
-                self.tape_store.save_entry(chat_key, entry)
-                if hasattr(self, "memory_store"):
-                    self.memory_store.observe_runtime_event(chat_key, payload)
-            await self._invoke_callback(runtime_event_callback, payload)
-
-        return _record_runtime_event
+        return self._get_runtime_support().build_runtime_event_recorder(
+            chat_key=chat_key,
+            tape=tape,
+            runtime_job=runtime_job,
+            runtime_event_callback=runtime_event_callback,
+        )
 
     def _record_assistant_reply(
         self,
@@ -1849,13 +1799,10 @@ class OrchestratorAgent:
         tape: Tape | None,
         text: str,
     ) -> None:
-        if not tape or not chat_key:
-            return
-        asst_entry = tape.append("message", {"role": "assistant", "content": text})
-        self.tape_store.save_entry(chat_key, asst_entry)
-        self._spawn_background_task(
-            self._maybe_handoff(tape, chat_key),
-            label=f"handoff:{chat_key}",
+        self._get_runtime_support().record_assistant_reply(
+            chat_key=chat_key,
+            tape=tape,
+            text=text,
         )
 
     async def process_task(
@@ -2114,24 +2061,11 @@ class OrchestratorAgent:
 
     @staticmethod
     def _runtime_event_payload(event: Any) -> dict[str, Any]:
-        if isinstance(event, dict):
-            payload = dict(event)
-        else:
-            payload = {
-                "event": getattr(event, "event", ""),
-                "task_id": getattr(event, "task_id", ""),
-                "flow_id": getattr(event, "flow_id", ""),
-                "payload": dict(getattr(event, "payload", {}) or {}),
-            }
-        payload["payload"] = dict(payload.get("payload") or {})
-        return payload
+        return OrchestratorRuntimeSupport.runtime_event_payload(event)
 
     @staticmethod
     def _job_state_from_runtime_event(event_payload: dict[str, Any]) -> tuple[str, str]:
-        state, progress_message = project_job_state_from_runtime_event(event_payload)
-        if state not in JOB_STATES:
-            return "running", progress_message
-        return state, progress_message
+        return OrchestratorRuntimeSupport.job_state_from_runtime_event(event_payload)
 
     def _resolve_job_target(
         self,
@@ -2139,59 +2073,16 @@ class OrchestratorAgent:
         chat_key: str,
         target: str,
     ) -> tuple[Any, str]:
-        normalized_target = str(target or "latest").strip() or "latest"
-        runtime_job_store = getattr(self, "_runtime_job_store", None)
-        if runtime_job_store is None:
-            return None, "当前未启用运行时作业跟踪。"
-        job = (
-            runtime_job_store.latest_for_chat(chat_key)
-            if normalized_target == "latest"
-            else runtime_job_store.get(normalized_target)
+        return self._get_runtime_support().resolve_job_target(
+            chat_key=chat_key,
+            target=target,
         )
-        if job is None:
-            return None, "未找到对应作业。"
-        return job, ""
 
     def _runtime_maintenance_report(self) -> str:
-        runtime_job_store = getattr(self, "_runtime_job_store", None)
-        report = (
-            runtime_job_store.run_maintenance(retention_seconds=0)
-            if runtime_job_store is not None
-            else {}
+        return self._get_runtime_support().runtime_maintenance_report(
+            recent_flows_by_chat=getattr(self, "_recent_flows_by_chat", {}) or {},
+            interactive_sessions=getattr(self, "_interactive_sessions", None),
         )
-        interactive_sessions = getattr(self, "_interactive_sessions", None)
-        stale_sessions = (
-            int(interactive_sessions.cleanup())
-            if interactive_sessions is not None
-            and hasattr(interactive_sessions, "cleanup")
-            else 0
-        )
-        recent_flows = getattr(self, "_recent_flows_by_chat", {}) or {}
-        known_flow_ids = (
-            runtime_job_store.known_flow_ids() if runtime_job_store is not None else set()
-        )
-        unmatched_recent_flows = sorted(
-            {
-                str(flow_id).strip()
-                for flows in recent_flows.values()
-                for flow_id in flows or []
-                if str(flow_id).strip() and str(flow_id).strip() not in known_flow_ids
-            }
-        )
-        lines = [
-            "[Runtime Maintenance]",
-            f"orphaned_jobs_pruned={int(report.get('orphaned_jobs_pruned', 0) or 0)}",
-            f"stale_interactive_sessions={stale_sessions}",
-            f"unmatched_recent_flows={len(unmatched_recent_flows)}",
-        ]
-        orphaned_job_ids = report.get("orphaned_job_ids") or []
-        if unmatched_recent_flows:
-            lines.append(f"flows={', '.join(unmatched_recent_flows[:10])}")
-        if orphaned_job_ids:
-            lines.append(
-                f"jobs={', '.join(str(item) for item in orphaned_job_ids[:10])}"
-            )
-        return "\n".join(lines)
 
     def _resolve_policy_feedback_flow_id(
         self,
