@@ -11,7 +11,7 @@ from .types import ExecutionContext, TaskResult
 logger = logging.getLogger(__name__)
 
 
-def _dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
+def dispatch_resource_ids(args: dict[str, Any]) -> tuple[str, ...]:
     resource_ids = args.get("resource_ids")
     if isinstance(resource_ids, (list, tuple)):
         normalized = tuple(
@@ -75,7 +75,7 @@ class ChildTaskRuntimeHelper:
         for tool_call in tool_calls:
             if tool_call.name != "dispatch_task":
                 continue
-            resource_ids = _dispatch_resource_ids(tool_call.arguments)
+            resource_ids = dispatch_resource_ids(tool_call.arguments)
             if not resource_ids or "group.scheduler" in resource_ids:
                 continue
             if tool_call.arguments.get("deps"):

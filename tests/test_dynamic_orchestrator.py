@@ -173,6 +173,19 @@ def test_direct_reply() -> None:
     assert len(rm.calls) == 0
 
 
+def test_dynamic_orchestrator_reexports_child_task_runtime_types() -> None:
+    from babybot.agent_kernel import ChildTaskEvent as KernelChildTaskEvent
+    from babybot.agent_kernel import InMemoryChildTaskBus as KernelChildTaskBus
+    from babybot.agent_kernel import InProcessChildTaskRuntime as KernelChildTaskRuntime
+    from babybot.agent_kernel.dynamic_orchestrator import ChildTaskEvent
+    from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
+    from babybot.agent_kernel.dynamic_orchestrator import InProcessChildTaskRuntime
+
+    assert ChildTaskEvent is KernelChildTaskEvent
+    assert InMemoryChildTaskBus is KernelChildTaskBus
+    assert InProcessChildTaskRuntime is KernelChildTaskRuntime
+
+
 def test_plain_text_response() -> None:
     """Model responds with plain text (no tool calls) — treated as final."""
     gateway = DummyGateway([ModelResponse(text="直接回答")])
