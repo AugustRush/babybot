@@ -3676,7 +3676,7 @@ def test_team_dispatch_with_skill_id() -> None:
 
 
 def test_team_dispatch_beats_heartbeat_and_streams() -> None:
-    """dispatch_team emits heartbeats and sends per-turn independent messages."""
+    """dispatch_team emits heartbeats and non-streaming progress via intermediate messages."""
     team_args = {
         "topic": "Tabs vs Spaces",
         "agents": [
@@ -3743,14 +3743,16 @@ def test_team_dispatch_beats_heartbeat_and_streams() -> None:
     assert result.conclusion == "Debate complete."
     # Heartbeat should have been beat at least once per LLM call (2 agent turns)
     assert beat_count["n"] >= 2, f"Expected >= 2 heartbeats, got {beat_count['n']}"
-    # Each agent turn should produce an independent message
-    assert len(intermediate_messages) == 2, (
-        f"Expected 2 independent messages, got {len(intermediate_messages)}"
+    # Non-streaming team mode emits kickoff / round progress / per-turn messages.
+    assert len(intermediate_messages) == 4, (
+        f"Expected 4 independent messages, got {len(intermediate_messages)}"
     )
-    assert "tabs-advocate" in intermediate_messages[0].lower()
-    assert "spaces-advocate" in intermediate_messages[1].lower()
-    # Each message is self-contained (not accumulated)
-    assert "spaces-advocate" not in intermediate_messages[0].lower()
+    assert "已启动 2 位专家讨论" in intermediate_messages[0]
+    assert "第 1/1 轮讨论进行中" in intermediate_messages[1]
+    assert "tabs-advocate" in intermediate_messages[2].lower()
+    assert "spaces-advocate" in intermediate_messages[3].lower()
+    # Each turn message remains self-contained (not accumulated)
+    assert "spaces-advocate" not in intermediate_messages[2].lower()
 
 
 def test_team_dispatch_streams_per_turn_and_resets() -> None:
@@ -3872,14 +3874,17 @@ def test_team_dispatch_no_stream_falls_back_to_intermediate() -> None:
     result = asyncio.run(orch.run("Tabs vs spaces?", context))
 
     assert result.conclusion == "Done."
-    # Should fall back to send_intermediate_message since stream_callback has no .reset
-    assert len(intermediate_messages) == 2
-    assert "tabs-fan" in intermediate_messages[0].lower()
-    assert "spaces-fan" in intermediate_messages[1].lower()
+    # Without team streaming, kickoff / round progress / per-turn messages all
+    # use send_intermediate_message.
+    assert len(intermediate_messages) == 4
+    assert "已启动 2 位专家讨论" in intermediate_messages[0]
+    assert "第 1/1 轮讨论进行中" in intermediate_messages[1]
+    assert "tabs-fan" in intermediate_messages[2].lower()
+    assert "spaces-fan" in intermediate_messages[3].lower()
 
 
-def test_team_dispatch_streaming_sends_immediate_kickoff_message() -> None:
-    """With stream mode enabled, dispatch_team should still send an immediate progress hint."""
+def test_team_dispatch_streaming_does_not_send_kickoff_intermediate_message() -> None:
+    """With stream mode enabled, kickoff progress stays on the lifecycle card."""
     team_args = {
         "topic": "Agent evolution",
         "agents": [
@@ -3934,13 +3939,11 @@ def test_team_dispatch_streaming_sends_immediate_kickoff_message() -> None:
     result = asyncio.run(orch.run("讨论一下", context))
 
     assert result.conclusion == "Done."
-    assert intermediate_messages
-    assert "已启动" in intermediate_messages[0]
-    assert "2 位专家" in intermediate_messages[0]
+    assert intermediate_messages == []
 
 
-def test_team_dispatch_streaming_sends_round_progress_messages() -> None:
-    """Streaming mode should still emit independent phase progress updates."""
+def test_team_dispatch_streaming_does_not_send_round_progress_messages() -> None:
+    """Streaming mode keeps round progress on the lifecycle card."""
     team_args = {
         "topic": "Agent evolution",
         "agents": [
@@ -3995,5 +3998,62 @@ def test_team_dispatch_streaming_sends_round_progress_messages() -> None:
     result = asyncio.run(orch.run("讨论一下", context))
 
     assert result.conclusion == "Done."
-    assert any("第 1/2 轮" in item for item in intermediate_messages)
-    assert any("第 2/2 轮" in item for item in intermediate_messages)
+    assert intermediate_messages == []
+
+
+def test_team_dispatch_streaming_does_not_fall_back_to_intermediate_messages() -> None:
+    team_args = {
+        "topic": "Agent evolution",
+        "agents": [
+            {"id": "architect", "role": "architect", "description": "Architecture"},
+            {"id": "researcher", "role": "researcher", "description": "Research"},
+        ],
+        "max_rounds": 2,
+    }
+    gateway = DummyGateway(
+        [
+            ModelResponse(
+                text="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id="call_team",
+                        name="dispatch_team",
+                        arguments=team_args,
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="架构观点"),
+            ModelResponse(text="研究观点"),
+            ModelResponse(text="架构补充"),
+            ModelResponse(text="研究补充"),
+            _reply_tool_call("Done."),
+        ]
+    )
+
+    intermediate_messages: list[str] = []
+
+    async def send_msg(text: str) -> None:
+        intermediate_messages.append(text)
+
+    async def fake_stream_callback(accumulated_text: str) -> None:
+        del accumulated_text
+
+    async def fake_reset() -> None:
+        return None
+
+    fake_stream_callback.reset = fake_reset  # type: ignore[attr-defined]
+
+    context = ExecutionContext(
+        state={
+            "stream_callback": fake_stream_callback,
+            "send_intermediate_message": send_msg,
+        }
+    )
+
+    rm = DummyResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gateway)
+    result = asyncio.run(orch.run("讨论一下", context))
+
+    assert result.conclusion == "Done."
+    assert intermediate_messages == []

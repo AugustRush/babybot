@@ -114,7 +114,7 @@ class TeamDispatchRuntime:
             text = str(message or "").strip()
             if (
                 event_name == "progress"
-                and team_streaming
+                and not team_streaming
                 and send_intermediate is not None
                 and text
             ):
@@ -269,7 +269,7 @@ class TeamDispatchRuntime:
                     "round": round_num,
                 },
             )
-            if send_intermediate is not None:
+            if send_intermediate is not None and not team_streaming:
                 header = f"**[{role} — Round {round_num}]**"
                 await send_intermediate(header + "\n" + text)
             if team_streaming:
