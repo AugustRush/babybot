@@ -357,6 +357,43 @@ class OrchestratorAgent:
                 completion_summary=completion_summary,
             )
 
+    @staticmethod
+    def _collect_response_media(
+        *,
+        context: ExecutionContext,
+        result: Any = None,
+    ) -> list[str]:
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        def _add_many(values: Any) -> None:
+            if not isinstance(values, (list, tuple, set)):
+                return
+            for value in values:
+                rendered = str(value or "").strip()
+                if rendered and rendered not in seen:
+                    seen.add(rendered)
+                    collected.append(rendered)
+
+        state_view = RuntimeState(context)
+        _add_many(state_view.collected_media_bucket())
+
+        task_results = getattr(result, "task_results", {}) if result is not None else {}
+        if isinstance(task_results, dict):
+            for task_result in task_results.values():
+                _add_many(getattr(task_result, "artifacts", ()))
+
+        notebook = state_view.notebook_binding().notebook
+        if notebook is not None:
+            for node in notebook.nodes.values():
+                for artifact in getattr(node, "artifacts", ()) or ():
+                    rendered = str(getattr(artifact, "path", "") or "").strip()
+                    if rendered and rendered not in seen:
+                        seen.add(rendered)
+                        collected.append(rendered)
+
+        return collected
+
     def _get_handoff_lock(self, chat_key: str) -> asyncio.Lock:
         handoff_locks = self._ensure_ordered_mapping(
             getattr(self, "_handoff_locks", OrderedDict())
@@ -1490,8 +1527,7 @@ class OrchestratorAgent:
             context=context,
             final_text=text,
         )
-        collected_media = RuntimeState(context).collected_media_bucket()
-        dedup_media = sorted(set(collected_media))
+        dedup_media = self._collect_response_media(context=context, result=result)
 
         return text, dedup_media
 

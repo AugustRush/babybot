@@ -371,6 +371,73 @@ def test_parallel_tasks() -> None:
     assert len(rm.calls) == 2
 
 
+def test_plain_text_final_response_preserves_completed_task_results() -> None:
+    class ArtifactResourceManager(DummyResourceManager):
+        async def run_subagent_task(
+            self,
+            task_description: str,
+            lease: dict[str, Any] | None = None,
+            agent_name: str = "Worker",
+            tape: Any = None,
+            tape_store: Any = None,
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            skill_ids: list[str] | None = None,
+        ) -> tuple[str, list[str]]:
+            del lease, agent_name, tape, tape_store, heartbeat, media_paths, skill_ids
+            self.calls.append({"task_description": task_description})
+            return "截图完成", ["/Users/shike/.babybot/workspace/output/news.png"]
+
+    class PlainTextFinalGateway(DummyGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._task_id = ""
+
+        async def generate(
+            self, request: ModelRequest, context: ExecutionContext
+        ) -> ModelResponse:
+            del context
+            if self._call_idx == 0:
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(
+                        _dispatch_tool_call(
+                            "skill.weather",
+                            "打开网易新闻并截图",
+                            call_id="c1",
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            if self._call_idx == 1:
+                for msg in request.messages:
+                    if msg.role == "tool" and msg.tool_call_id == "c1":
+                        self._task_id = msg.content
+                self._call_idx += 1
+                return ModelResponse(
+                    text="",
+                    tool_calls=(_wait_tool_call([self._task_id], call_id="c2"),),
+                    finish_reason="tool_calls",
+                )
+            self._call_idx += 1
+            return ModelResponse(text="截图已完成，附件请随回复带回。")
+
+    gw = PlainTextFinalGateway()
+    rm = ArtifactResourceManager()
+    orch = DynamicOrchestrator(resource_manager=rm, gateway=gw)
+
+    result = asyncio.run(orch.run("打开网易新闻截图发我", ExecutionContext()))
+
+    assert result.conclusion == "截图已完成，附件请随回复带回。"
+    assert len(result.task_results) == 1
+    child_result = next(iter(result.task_results.values()))
+    assert child_result.status == "succeeded"
+    assert child_result.artifacts == (
+        "/Users/shike/.babybot/workspace/output/news.png",
+    )
+
+
 def test_dependent_tasks() -> None:
     """dispatch A, dispatch B(deps=[A]), wait B, reply."""
 

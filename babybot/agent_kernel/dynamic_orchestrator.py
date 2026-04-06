@@ -708,7 +708,10 @@ class DynamicOrchestrator:
 
                 # Model responded with plain text (no tool calls)
                 if not response.tool_calls:
-                    return FinalResult(conclusion=response.text)
+                    return FinalResult(
+                        conclusion=response.text,
+                        task_results=runtime.results,
+                    )
 
                 reply_call_count = sum(
                     1

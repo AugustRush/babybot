@@ -16,7 +16,9 @@ from babybot.agent_kernel import (
     ModelRequest,
     ModelResponse,
     ModelToolCall,
+    TaskResult,
 )
+from babybot.agent_kernel.types import FinalResult
 from babybot.agent_kernel.dynamic_orchestrator import InMemoryChildTaskBus
 from babybot.agent_kernel.dynamic_orchestrator import ChildTaskEvent
 from babybot.context import TapeStore
@@ -178,6 +180,44 @@ def test_direct_reply_without_tools() -> None:
     assert media == []
     assert len(rm.calls) == 0
     assert gateway.structured_calls == []
+
+
+def test_answer_with_dag_collects_media_from_final_task_results_when_bucket_is_empty(
+    monkeypatch,
+) -> None:
+    gateway = _FakeGateway([])
+    rm = _FakeResourceManager()
+    agent = _make_agent(gateway, rm)
+
+    artifact_path = "/Users/shike/.babybot/workspace/output/163_news_screenshot.png"
+
+    class _FakeDynamicOrchestrator:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def run(self, goal: str, context: ExecutionContext) -> FinalResult:
+            del goal, context
+            return FinalResult(
+                conclusion="截图已完成",
+                task_results={
+                    "task_0": TaskResult(
+                        task_id="task_0",
+                        status="succeeded",
+                        output="done",
+                        artifacts=(artifact_path,),
+                    )
+                },
+            )
+
+    monkeypatch.setattr(
+        "babybot.orchestrator.DynamicOrchestrator",
+        _FakeDynamicOrchestrator,
+    )
+
+    text, media = asyncio.run(agent._answer_with_dag("截图发我"))
+
+    assert text == "截图已完成"
+    assert media == [artifact_path]
 
 
 def test_dispatch_subagent_with_resource_scope() -> None:
