@@ -454,14 +454,106 @@ def test_message_bus_sends_final_reply_as_new_message_after_runtime_progress() -
 
     assert response.text == "最终结果"
     assert channel.created == ["处理中"]
-    assert channel.patched == ["处理中，请稍候"]
-    assert len(channel.sent) == 3
-    assert "处理中" in channel.sent[0].text
-    assert "50%" in channel.sent[0].text
-    assert channel.sent_kwargs[0]["message_format"] == "post"
-    assert channel.sent[1].text == "阶段完成：先查询杭州天气"
-    assert channel.sent_kwargs[1]["message_format"] == "post"
-    assert channel.sent[2].text == "最终结果"
+    assert channel.patched[0] == "处理中，请稍候"
+    assert any("当前阶段：先查询杭州天气 (50%)" in item for item in channel.patched)
+    assert "已完成阶段：" in channel.patched[-1]
+    assert "先查询杭州天气" in channel.patched[-1]
+    assert len(channel.sent) == 1
+    assert channel.sent[0].text == "最终结果"
+
+
+def test_message_bus_merges_runtime_progress_into_single_stream_card_for_feishu() -> None:
+    channel = _FakeFeishuChannel(stream_reply=True)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_ProgressEventOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> TaskResponse:
+        await bus.start()
+        try:
+            return await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    response = asyncio.run(_run())
+
+    assert response.text == "最终结果"
+    assert len(channel.created) == 1
+    assert "当前阶段：" in channel.created[0]
+    assert "先查询杭州天气" in channel.created[0]
+    assert len(channel.patched) >= 1
+    assert "已完成阶段：" in channel.patched[-1]
+    assert "先查询杭州天气" in channel.patched[-1]
+    assert len(channel.sent) == 1
+    assert channel.sent[0].text == "最终结果"
+
+
+def test_message_bus_stream_card_completed_stage_list_keeps_last_five_items() -> None:
+    class _ManyCompletedOrchestrator:
+        async def process_task(
+            self,
+            user_input: str,
+            chat_key: str = "",
+            heartbeat: Any = None,
+            media_paths: list[str] | None = None,
+            stream_callback: Any = None,
+            runtime_event_callback: Any = None,
+        ) -> TaskResponse:
+            del user_input, chat_key, heartbeat, media_paths, stream_callback
+            assert runtime_event_callback is not None
+            for idx in range(6):
+                label = f"阶段{idx + 1}"
+                await runtime_event_callback(
+                    {
+                        "flow_id": "flow-1",
+                        "task_id": f"task-{idx + 1}",
+                        "event": "succeeded",
+                        "payload": {
+                            "stage": "task",
+                            "description": label,
+                            "output": f"{label}完成",
+                        },
+                    }
+                )
+            return TaskResponse(text="done")
+
+    channel = _FakeFeishuChannel(stream_reply=True)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_ManyCompletedOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> TaskResponse:
+        await bus.start()
+        try:
+            return await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    asyncio.run(_run())
+
+    assert len(channel.patched) >= 1
+    final_card = channel.patched[-1]
+    assert "阶段1" not in final_card
+    for label in ("阶段2", "阶段3", "阶段4", "阶段5", "阶段6"):
+        assert label in final_card
 
 
 def test_message_bus_dedupes_repeated_runtime_progress_messages() -> None:

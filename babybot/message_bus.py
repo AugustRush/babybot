@@ -19,6 +19,7 @@ from .feedback_events import (
     render_runtime_feedback_event,
     render_stage_result,
     progress_spinner,
+    runtime_event_primary_label,
 )
 from .heartbeat import Heartbeat
 
@@ -398,6 +399,11 @@ class MessageBus:
         )
         stream_message_id: str | None = lifecycle_card_id
         stream_last_patched = ""
+        lifecycle_card_last_patched = (
+            ack_text.strip()
+            if lifecycle_card_id and channel and self._config.system.send_ack and not is_scheduled
+            else ""
+        )
         interactive_last_sent_text = ""
         interactive_sent_partial = False
         stream_lock = asyncio.Lock()
@@ -446,6 +452,11 @@ class MessageBus:
         # always arrive before the final summary.
         _stage_tasks: set[asyncio.Task[None]] = set()
         _has_stage_messages: bool = False
+        _lifecycle_card_used: bool = False
+        _completed_stage_history: list[str] = []
+        _active_stage_text: str = ""
+        _failed_stage_text: str = ""
+        _COMPLETED_STAGE_LIMIT = 5
 
         async def _send_intermediate_message(
             text: str,
@@ -480,6 +491,66 @@ class MessageBus:
                     msg.chat_id,
                     exc_info=True,
                 )
+
+        def _format_lifecycle_stage_text(normalized_event: Any) -> str:
+            label = (
+                runtime_event_primary_label(normalized_event)
+                or normalized_event.message
+                or "执行中"
+            )
+            if (
+                isinstance(normalized_event.progress, (int, float))
+                and normalized_event.state not in {"completed", "cancelled"}
+            ):
+                label = f"{label} ({int(float(normalized_event.progress) * 100)}%)"
+            if normalized_event.state == "failed" and normalized_event.error:
+                return f"{label}\n原因：{normalized_event.error}"
+            return label
+
+        def _render_lifecycle_card_text() -> str:
+            lines = [f"{progress_spinner(progress_spinner_counter)} 收到，正在处理…"]
+            current_stage = _active_stage_text or (
+                "已中断" if _failed_stage_text else "等待最终汇总"
+            )
+            lines.extend(["", f"当前阶段：{current_stage}"])
+            if _completed_stage_history:
+                lines.extend(["", "已完成阶段："])
+                recent_items = _completed_stage_history[-_COMPLETED_STAGE_LIMIT:]
+                for idx, item in enumerate(recent_items, start=1):
+                    lines.append(f"{idx}. {item}")
+            if _failed_stage_text:
+                lines.extend(["", f"失败阶段：{_failed_stage_text}"])
+            return "\n".join(lines)
+
+        async def _patch_lifecycle_card(text: str) -> bool:
+            nonlocal lifecycle_card_id, stream_message_id
+            nonlocal lifecycle_card_last_patched, _lifecycle_card_used
+            if not text or channel is None or not stream_enabled:
+                return False
+            async with stream_lock:
+                if lifecycle_card_id is None and stream_message_id is not None:
+                    lifecycle_card_id = stream_message_id
+                    if not lifecycle_card_last_patched:
+                        lifecycle_card_last_patched = stream_last_patched
+                if lifecycle_card_id is None:
+                    lifecycle_card_id = await channel.create_stream_message(  # type: ignore[attr-defined]
+                        msg.chat_id,
+                        text,
+                        sender_id=msg.sender_id,
+                        metadata=msg.metadata,
+                    )
+                    if lifecycle_card_id:
+                        lifecycle_card_last_patched = text
+                        _lifecycle_card_used = True
+                        return True
+                    return False
+                if text == lifecycle_card_last_patched:
+                    return True
+                ok = await channel.patch_stream_message(lifecycle_card_id, text)  # type: ignore[attr-defined]
+                if ok:
+                    lifecycle_card_last_patched = text
+                    _lifecycle_card_used = True
+                return bool(ok)
 
         async def _schedule_stage_message(text: str) -> None:
             """Fire-and-forget a stage result message, tracked for later await."""
@@ -564,6 +635,7 @@ class MessageBus:
         async def _runtime_event_callback(event: Any) -> None:
             nonlocal stream_detached, last_runtime_progress_key
             nonlocal progress_spinner_counter, _active_task_label
+            nonlocal _active_stage_text, _failed_stage_text
             payload = _event_to_payload(event)
             runtime_events.append(payload)
             if isinstance(msg.metadata, dict):
@@ -609,6 +681,37 @@ class MessageBus:
                 and normalized_event.state in {"running", "completed", "failed"}
             ):
                 stream_detached = True
+            if stream_enabled and normalized_event.stage != "interactive_session":
+                stage_text = _format_lifecycle_stage_text(normalized_event)
+                if normalized_event.state in {
+                    "queued",
+                    "planning",
+                    "running",
+                    "waiting_tool",
+                    "waiting_user",
+                    "repairing",
+                }:
+                    _active_stage_text = stage_text
+                    _failed_stage_text = ""
+                elif normalized_event.state == "completed":
+                    _active_stage_text = ""
+                    if (
+                        stage_text
+                        and (
+                            not _completed_stage_history
+                            or _completed_stage_history[-1] != stage_text
+                        )
+                    ):
+                        _completed_stage_history.append(stage_text)
+                        if len(_completed_stage_history) > _COMPLETED_STAGE_LIMIT:
+                            del _completed_stage_history[
+                                :-_COMPLETED_STAGE_LIMIT
+                            ]
+                elif normalized_event.state in {"failed", "cancelled"}:
+                    _active_stage_text = ""
+                    _failed_stage_text = stage_text
+                await _patch_lifecycle_card(_render_lifecycle_card_text())
+                return
             # For terminal subtask events that carry output or an error,
             # schedule a separate stage result message (fire-and-forget, tracked).
             # Using _schedule_stage_message ensures these tasks are awaited
@@ -755,7 +858,12 @@ class MessageBus:
                 # Patch the lifecycle card only when no stage messages were
                 # sent.  If stage messages exist we use send_response instead
                 # so the final reply appears after them in the timeline.
-                if has_card and final_text and not _has_stage_messages:
+                if (
+                    has_card
+                    and final_text
+                    and not _has_stage_messages
+                    and not _lifecycle_card_used
+                ):
                     card_patched = bool(
                         await channel.patch_stream_message(  # type: ignore[attr-defined]
                             final_card_id,
