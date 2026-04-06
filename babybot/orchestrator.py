@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-import contextlib
 import inspect
 import json
 import logging
@@ -39,13 +38,11 @@ from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
 from .interactive_sessions.backends import ClaudeInteractiveBackend
-from .interactive_sessions.types import (
-    InteractiveOutputCallback,
-    InteractiveRequest,
-)
+from .interactive_sessions.types import InteractiveOutputCallback
 from .model_gateway import OpenAICompatibleGateway
 from .orchestration_policy import ConservativePolicySelector, build_policy_state_bucket
 from .orchestration_policy_store import OrchestrationPolicyStore
+from .orchestrator_interactive_support import OrchestratorInteractiveSessionSupport
 from .orchestrator_runtime_support import OrchestratorRuntimeSupport
 from .orchestration_router import (
     RoutingDecision,
@@ -173,6 +170,15 @@ class OrchestratorAgent:
             invoke_callback=self._invoke_callback,
             spawn_background_task=self._spawn_background_task,
             maybe_handoff=self._maybe_handoff,
+        )
+
+    def _get_interactive_support(self) -> OrchestratorInteractiveSessionSupport:
+        return OrchestratorInteractiveSessionSupport(
+            session_manager=self._interactive_sessions,
+            invoke_callback=self._invoke_callback,
+            prepare_tape=self._prepare_tape,
+            tape_store=getattr(self, "tape_store", None),
+            response_factory=TaskResponse,
         )
 
     @staticmethod
@@ -2033,13 +2039,7 @@ class OrchestratorAgent:
     def _parse_interactive_session_command(
         user_input: str,
     ) -> dict[str, str] | None:
-        text = (user_input or "").strip()
-        if not text.lower().startswith("@session"):
-            return None
-        parts = text.split()
-        action = parts[1].lower() if len(parts) >= 2 else "status"
-        backend_name = parts[2].lower() if len(parts) >= 3 else ""
-        return {"action": action, "backend_name": backend_name}
+        return OrchestratorInteractiveSessionSupport.parse_command(user_input)
 
     @staticmethod
     def _parse_policy_feedback_command(
@@ -2216,50 +2216,10 @@ class OrchestratorAgent:
     async def _handle_interactive_session_command(
         self, chat_key: str, control: dict[str, str]
     ) -> TaskResponse:
-        manager = self._interactive_sessions
-        action = control.get("action", "")
-        backend_name = control.get("backend_name", "")
-
-        if action == "start":
-            if not backend_name:
-                return TaskResponse(text="用法：@session start <backend>")
-            session = await manager.start(chat_key=chat_key, backend_name=backend_name)
-            label = session.backend_name.capitalize()
-            return TaskResponse(
-                text=(
-                    f"{label} 会话已启动（session_id={session.session_id}）。"
-                    "后续消息将直接发送到该交互会话。"
-                )
-            )
-        if action == "stop":
-            stopped = await manager.stop(chat_key, reason="user_stop")
-            return TaskResponse(
-                text="交互会话已关闭。" if stopped else "当前没有活动中的交互会话。"
-            )
-        if action == "status":
-            status = manager.status(chat_key)
-            if status is None:
-                return TaskResponse(text="当前没有活动中的交互会话。")
-            backend_bits: list[str] = []
-            backend_status = dict(status.backend_status or {})
-            mode = str(backend_status.get("mode", "") or status.mode).strip()
-            if mode:
-                backend_bits.append(f"mode={mode}")
-            pid = backend_status.get("pid", status.process_pid)
-            if pid:
-                backend_bits.append(f"pid={pid}")
-            alive = backend_status.get("alive")
-            if alive is not None:
-                backend_bits.append(f"alive={bool(alive)}")
-            return TaskResponse(
-                text=(
-                    f"当前交互会话：{status.backend_name} "
-                    f"(session_id={status.session_id}"
-                    + (f", {', '.join(backend_bits)}" if backend_bits else "")
-                    + ")"
-                )
-            )
-        return TaskResponse(text="支持的命令：@session start <backend> / status / stop")
+        return await self._get_interactive_support().handle_command(
+            chat_key=chat_key,
+            control=control,
+        )
 
     async def _handle_interactive_session_message(
         self,
@@ -2271,80 +2231,22 @@ class OrchestratorAgent:
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
         interactive_output_callback: InteractiveOutputCallback | None = None,
     ) -> TaskResponse | None:
-        task_contract = build_task_contract(
-            user_input=user_input,
-            chat_key=chat_key,
-        )
-        request = InteractiveRequest(
-            text=user_input,
-            media_paths=tuple(media_paths or ()),
-            contract_mode=task_contract.mode,
-        )
-        await self._invoke_callback(
-            runtime_event_callback,
-            {
-                "event": "running",
-                "task_id": "interactive_session",
-                "flow_id": f"interactive:{chat_key}",
-                "payload": {
-                    "stage": "interactive_session",
-                    "state": "running",
-                    "message": "交互会话处理中",
-                },
-            },
-        )
         try:
-            if heartbeat is not None:
-                async with heartbeat.keep_alive():
-                    reply = await self._interactive_sessions.send(
-                        chat_key,
-                        request,
-                        output_event_callback=interactive_output_callback,
-                    )
-            else:
-                reply = await self._interactive_sessions.send(
-                    chat_key,
-                    request,
-                    output_event_callback=interactive_output_callback,
-                )
+            return await self._get_interactive_support().handle_message(
+                chat_key=chat_key,
+                user_input=user_input,
+                media_paths=media_paths,
+                heartbeat=heartbeat,
+                runtime_event_callback=runtime_event_callback,
+                interactive_output_callback=interactive_output_callback,
+            )
         except RuntimeError:
             logger.warning(
                 "Interactive session send failed; falling back to DAG chat_key=%s",
                 chat_key,
                 exc_info=True,
             )
-            with contextlib.suppress(Exception):
-                await self._interactive_sessions.stop(chat_key, reason="backend_failed")
             return None
-        if reply.expired:
-            return None
-        tape = self._prepare_tape(
-            chat_key=chat_key,
-            user_input=user_input,
-            media_paths=media_paths,
-        )
-        if tape is not None:
-            assistant_entry = tape.append(
-                "message", {"role": "assistant", "content": reply.text}
-            )
-            self.tape_store.save_entries(chat_key, [assistant_entry])
-        await self._invoke_callback(
-            runtime_event_callback,
-            {
-                "event": "completed",
-                "task_id": "interactive_session",
-                "flow_id": f"interactive:{chat_key}",
-                "payload": {
-                    "stage": "interactive_session",
-                    "state": "completed",
-                    "message": "交互会话完成",
-                },
-            },
-        )
-        return TaskResponse(
-            text=reply.text,
-            media_paths=list(reply.media_paths or []),
-        )
 
     def reset(self) -> None:
         interactive_sessions = getattr(self, "_interactive_sessions", None)

@@ -116,6 +116,26 @@ class FakePolicyStore:
         }
 
 
+@pytest.mark.asyncio
+async def test_interactive_session_support_formats_status_text():
+    from babybot.orchestrator_interactive_support import (
+        OrchestratorInteractiveSessionSupport,
+    )
+
+    support = OrchestratorInteractiveSessionSupport(
+        session_manager=FakeSessionManager(active_session=True),
+    )
+
+    response = await support.handle_command(
+        chat_key="feishu:c1",
+        control={"action": "status", "backend_name": ""},
+    )
+
+    assert "当前交互会话：claude" in response.text
+    assert "resident" in response.text
+    assert "4321" in response.text
+
+
 def make_agent_with_session_manager(*, active_session: bool = False) -> OrchestratorAgent:
     agent = object.__new__(OrchestratorAgent)
     agent._interactive_sessions = FakeSessionManager(active_session=active_session)
