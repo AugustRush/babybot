@@ -692,7 +692,7 @@ def test_get_user_python_prefers_path_python3_over_hardcoded_system_python(
         },
     )()
     monkeypatch.setattr(
-        "babybot.resource.shutil.which",
+        "babybot.resource_python_runner.shutil.which",
         lambda name: {
             "python3": "/Users/test/miniconda3/bin/python3",
             "python": "/Users/test/miniconda3/bin/python",
@@ -2222,9 +2222,11 @@ def test_register_builtin_tools_does_not_collect_workspace_text_mutation_outputs
 
         assert result.ok is True
         assert result.artifacts == []
-        assert (workspace_dir / "test_content.md").read_text(
-            encoding="utf-8"
-        ).startswith("# PDF 测试内容")
+        assert (
+            (workspace_dir / "test_content.md")
+            .read_text(encoding="utf-8")
+            .startswith("# PDF 测试内容")
+        )
     finally:
         shutil.rmtree(workspace_dir, ignore_errors=True)
 
