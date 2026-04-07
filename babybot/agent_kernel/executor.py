@@ -8,7 +8,6 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
-from ..feedback_events import normalize_runtime_feedback_event, runtime_event_primary_label
 from .loop_guard import LoopGuard, LoopGuardConfig
 from .model import (
     ModelMessage,
@@ -21,51 +20,19 @@ from .plan_notebook import PlanNotebook
 from .runtime_state import RuntimeState
 from .skills import SkillPack, merge_leases, merge_prompts
 from .tools import ToolContext, ToolRegistry
+from .executor_history import (
+    _build_context_view_messages,
+    _build_history_messages,
+    _estimate_token_count,
+    _extract_keywords,
+    _history_entry_text,
+)
 from .types import AgentEvent, ExecutionContext, TaskContract, TaskResult, ToolLease
 
 if TYPE_CHECKING:
     from ..context import Entry
 
 logger = logging.getLogger(__name__)
-
-
-# ── Kernel-internal helpers (language-agnostic fallbacks) ────────────────────
-
-
-def _estimate_token_count(text: str) -> int:
-    """Cheap token-count estimate: ~3 characters per token."""
-    return max(1, len(str(text or "")) // 3)
-
-
-def _extract_keywords(text: str) -> list[str]:
-    """Very lightweight keyword extractor: unique words ≥ 3 chars."""
-    words = str(text or "").lower().split()
-    seen: set[str] = set()
-    result: list[str] = []
-    for w in words:
-        w = w.strip(".,!?;:\"'()[]{}，。！？；：")
-        if len(w) >= 3 and w not in seen:
-            seen.add(w)
-            result.append(w)
-    return result[:20]
-
-
-def _build_context_view_messages(
-    memory_store: Any,
-    chat_id: str,
-    query: str,
-) -> list[ModelMessage]:
-    """Delegate to application-layer context_views if available, else return []."""
-    try:
-        from ..context_views import build_context_view_messages  # type: ignore[import]
-
-        return build_context_view_messages(  # type: ignore[return-value]
-            memory_store=memory_store,
-            chat_id=chat_id,
-            query=query,
-        )
-    except Exception:
-        return []
 
 
 @dataclass
@@ -77,6 +44,53 @@ class ExecutorPolicy:
     max_no_progress_turns: int = 3
     max_tool_result_chars: int = 12000
     loop_guard: LoopGuardConfig = field(default_factory=LoopGuardConfig)
+
+
+@dataclass
+class ExecutionSession:
+    """All mutable state shared across loop iterations in execute().
+
+    Created once in _prepare(), passed through the entire loop.
+    This replaces 20+ scattered local variables.
+    """
+
+    # Conversation
+    messages: list[Any] = field(default_factory=list)
+    # Token tracking
+    usage_totals: dict[str, int] = field(default_factory=dict)
+    max_model_tokens: int = 0
+    # Loop guards
+    loop_guard: Any = None
+    blocked_tool_names: set[str] = field(default_factory=set)
+    no_progress_turns: int = 0
+    no_progress_limit: int = 5
+    # Counters
+    tool_call_count: int = 0
+    tool_failure_count: int = 0
+    loop_guard_block_count: int = 0
+    # Flags
+    exploration_finish_required: bool = False
+    # Tools (read-only after preparation)
+    available_tools: list[Any] = field(default_factory=list)
+    base_lease: Any = None
+    # Execution context
+    tool_context: Any = None
+    heartbeat: Any = None
+    tape: Any = None
+    tape_store: Any = None
+    notebook: Any = None
+    notebook_node_id: str = ""
+    max_steps: int = 30
+    task_id: str = ""
+
+
+@dataclass
+class ValidationResult:
+    """Result of validating a batch of tool calls."""
+
+    valid_calls: list[Any] = field(default_factory=list)
+    error_results: list[tuple[Any, str]] = field(default_factory=list)
+    forced_finalize_violations: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -304,9 +318,150 @@ class SingleAgentExecutor:
 
     # ── Main execution loop ──────────────────────────────────────────
 
-    async def execute(
-        self, task: TaskContract, context: ExecutionContext
-    ) -> TaskResult:
+    def _validate_tool_calls(
+        self,
+        tool_calls: list[Any],
+        *,
+        session: ExecutionSession,
+    ) -> ValidationResult:
+        """Run the 5 sequential validation checks on each tool call."""
+        result = ValidationResult()
+        for tool_call in tool_calls:
+            # Check 1: Exploration budget
+            if (
+                session.exploration_finish_required
+                and session.loop_guard.is_exploration_call(
+                    tool_call.name,
+                    tool_call.arguments,
+                )
+            ):
+                result.forced_finalize_violations.append(tool_call)
+                result.error_results.append(
+                    (
+                        tool_call,
+                        (
+                            "Exploration budget exhausted."
+                            "\n[Hint: Read/search/check tools are no longer allowed for this task. "
+                            "Return a concise conclusion or blocker summary, or switch to edit/write/action tools.]"
+                        ),
+                    )
+                )
+                continue
+
+            # Check 2: Loop guard
+            verdict = session.loop_guard.check_call(tool_call.name, tool_call.arguments)
+            if verdict.blocked:
+                session.loop_guard_block_count += 1
+                logger.warning(
+                    "Executor loop guard blocked task=%s tool=%s reason=%s",
+                    session.task_id,
+                    tool_call.name,
+                    verdict.reason,
+                )
+                if verdict.disable_tool:
+                    session.blocked_tool_names.add(tool_call.name)
+                remaining = [
+                    t["function"]["name"]
+                    for t in session.available_tools
+                    if t["function"]["name"] not in session.blocked_tool_names
+                ]
+                hint = f"Loop guard: {verdict.reason}"
+                if verdict.disable_tool:
+                    hint += (
+                        f"\nTool '{tool_call.name}' is now disabled for this task."
+                        f"\nYou MUST use a different tool. Available tools: {remaining}"
+                    )
+                else:
+                    hint += (
+                        "\nDo not repeat the same call immediately."
+                        f"\nAvailable tools: {remaining}"
+                    )
+                result.error_results.append((tool_call, hint))
+                continue
+
+            # Check 3: Tool registered and allowed
+            registered = self.tools.get(tool_call.name)
+            if not registered or not self._tool_allowed(
+                registered.group,
+                tool_call.name,
+                session.base_lease,
+            ):
+                logger.warning(
+                    "Executor tool unavailable task=%s tool=%s",
+                    session.task_id,
+                    tool_call.name,
+                )
+                result.error_results.append(
+                    (
+                        tool_call,
+                        (
+                            f"Tool unavailable: {tool_call.name}"
+                            "\n[Hint: This tool is not available. Use a different tool or approach.]"
+                        ),
+                    )
+                )
+                session.tool_failure_count += 1
+                continue
+
+            # Check 4: Argument parse error
+            if isinstance(tool_call.arguments, dict) and tool_call.arguments.get(
+                "__tool_argument_parse_error__"
+            ):
+                logger.warning(
+                    "Executor invalid arguments JSON task=%s tool=%s",
+                    session.task_id,
+                    tool_call.name,
+                )
+                result.error_results.append(
+                    (
+                        tool_call,
+                        (
+                            f"Tool argument JSON parse error for {tool_call.name}: "
+                            f"{tool_call.arguments.get('__raw_arguments__', '')}"
+                            "\n[Hint: Fix the JSON syntax in your tool arguments.]"
+                        ),
+                    )
+                )
+                session.tool_failure_count += 1
+                continue
+
+            # Check 5: Argument validation
+            tool_call.arguments = self._cast_tool_arguments(
+                schema=registered.tool.schema,
+                args=tool_call.arguments,
+            )
+            validation_error = self._validate_tool_arguments(
+                schema=registered.tool.schema,
+                args=tool_call.arguments,
+            )
+            if validation_error:
+                logger.warning(
+                    "Executor argument validation failed task=%s tool=%s error=%s",
+                    session.task_id,
+                    tool_call.name,
+                    validation_error,
+                )
+                result.error_results.append(
+                    (
+                        tool_call,
+                        (
+                            f"Tool argument validation failed for {tool_call.name}: {validation_error}"
+                            "\n[Hint: Check parameter types and values against the tool schema.]"
+                        ),
+                    )
+                )
+                session.tool_failure_count += 1
+                continue
+
+            result.valid_calls.append((tool_call, registered))
+        return result
+
+    def _prepare(
+        self,
+        task: TaskContract,
+        context: ExecutionContext,
+    ) -> ExecutionSession:
+        """Initialise all per-execution state and return an ExecutionSession."""
         self._emit(
             context, "agent_start", task_id=task.task_id, description=task.description
         )
@@ -370,19 +525,17 @@ class SingleAgentExecutor:
         max_model_tokens = int(context.state.get("max_model_tokens", 0) or 0)
         loop_guard = LoopGuard(self.policy.loop_guard)
         blocked_tool_names: set[str] = set()
-        no_progress_turns = 0
         no_progress_limit = max(1, int(self.policy.max_no_progress_turns))
-        tool_call_count = 0
-        tool_failure_count = 0
-        loop_guard_block_count = 0
-        exploration_finish_required = False
 
         tool_context = ToolContext(session_id=context.session_id, state=context.state)
         heartbeat = state_view.get("heartbeat")
         tape = state_view.get("tape")
         tape_store = state_view.get("tape_store")
         notebook, notebook_node_id = self._resolve_notebook_binding(context)
-        if notebook is not None and notebook.get_node(notebook_node_id).status == "pending":
+        if (
+            notebook is not None
+            and notebook.get_node(notebook_node_id).status == "pending"
+        ):
             self._transition_notebook_node(
                 context,
                 status="running",
@@ -390,839 +543,40 @@ class SingleAgentExecutor:
                 metadata={"source": "executor", "task_id": task.task_id},
             )
 
-        def _persist_tape_entries(entries: list[Entry]) -> None:
-            if not entries:
-                return
-            if tape is None:
-                return
-            if tape_store is None:
-                return
-            save_entries = getattr(tape_store, "save_entries", None)
-            save_entry = getattr(tape_store, "save_entry", None)
-            chat_id = getattr(tape, "chat_id", "")
-            if not chat_id:
-                return
-            if callable(save_entries):
-                save_entries(chat_id, entries)
-                return
-            if callable(save_entry):
-                for entry in entries:
-                    save_entry(chat_id, entry)
+        return ExecutionSession(
+            messages=messages,
+            usage_totals=usage_totals,
+            max_model_tokens=max_model_tokens,
+            loop_guard=loop_guard,
+            blocked_tool_names=blocked_tool_names,
+            no_progress_turns=0,
+            no_progress_limit=no_progress_limit,
+            tool_call_count=0,
+            tool_failure_count=0,
+            loop_guard_block_count=0,
+            exploration_finish_required=False,
+            available_tools=available_tools,
+            base_lease=base_lease,
+            tool_context=tool_context,
+            heartbeat=heartbeat,
+            tape=tape,
+            tape_store=tape_store,
+            notebook=notebook,
+            notebook_node_id=notebook_node_id,
+            max_steps=max(1, self.policy.max_steps),
+            task_id=task.task_id,
+        )
 
-        for step in range(1, max(1, self.policy.max_steps) + 1):
-            if heartbeat is not None:
-                heartbeat.beat()
+    async def execute(
+        self, task: TaskContract, context: ExecutionContext
+    ) -> TaskResult:
+        session = self._prepare(task, context)
+        state_view = RuntimeState(context)
 
-            # ── Turn start event ─────────────────────────────────
-            self._emit(context, "turn_start", task_id=task.task_id, step=step)
-            # Legacy event for backward compat
-            context.emit("executor.step", task_id=task.task_id, step=step)
-            turn_progress_before = self._progress_marker_count(context)
-            self._record_notebook_event(
-                context,
-                kind="observation",
-                summary=f"Turn {step} started",
-                metadata={
-                    "stage": "turn_start",
-                    "step": step,
-                    "task_id": task.task_id,
-                },
-            )
-            logger.info(
-                "Executor step=%d/%d task=%s",
-                step,
-                self.policy.max_steps,
-                task.task_id,
-            )
-
-            messages = loop_guard.compress_messages(messages)
-
-            # ── transformContext hook ─────────────────────────────
-            transform_fn = context.transform_context
-            if callable(transform_fn):
-                pre_count = len(messages)
-                messages = transform_fn(messages, context)
-                if len(messages) != pre_count:
-                    self._emit(
-                        context,
-                        "context_transform",
-                        task_id=task.task_id,
-                        step=step,
-                        messages_before=pre_count,
-                        messages_after=len(messages),
-                    )
-
-            runtime_hint_messages = self._consume_runtime_hint_messages(context.state)
-            if blocked_tool_names:
-                step_tools = [
-                    t
-                    for t in available_tools
-                    if t["function"]["name"] not in blocked_tool_names
-                ]
-            else:
-                step_tools = available_tools
-            if exploration_finish_required:
-                step_tools = list(self._filter_non_exploration_tools(step_tools))
-
-            # ── LLM request ──────────────────────────────────────
-            self._emit(
-                context,
-                "llm_request_start",
-                task_id=task.task_id,
-                step=step,
-                message_count=len(messages) + len(runtime_hint_messages),
-                tool_count=len(step_tools),
-            )
-            llm_start = time.perf_counter()
-            request_messages = tuple(messages)
-            if runtime_hint_messages:
-                if request_messages and request_messages[0].role == "system":
-                    request_messages = (
-                        request_messages[:1]
-                        + runtime_hint_messages
-                        + request_messages[1:]
-                    )
-                else:
-                    request_messages = runtime_hint_messages + request_messages
-            response = await self.model.generate(
-                ModelRequest(
-                    messages=request_messages,
-                    tools=step_tools,
-                    metadata={"task_id": task.task_id, "step": step},
-                ),
-                context,
-            )
-            llm_elapsed = time.perf_counter() - llm_start
-            self._accumulate_usage(usage_totals, response)
-            self._emit(
-                context,
-                "llm_request_end",
-                task_id=task.task_id,
-                step=step,
-                elapsed_s=round(llm_elapsed, 3),
-                has_tool_calls=bool(response.tool_calls),
-                finish_reason=response.finish_reason or "stop",
-            )
-
-            budget_error = self._check_token_budget(usage_totals, max_model_tokens)
-            if budget_error:
-                self._transition_notebook_node(
-                    context,
-                    status="failed",
-                    summary="Model token budget exceeded",
-                    detail=budget_error,
-                    metadata={"task_id": task.task_id},
-                )
-                result = TaskResult(
-                    task_id=task.task_id,
-                    status="failed",
-                    error=budget_error,
-                    metadata=self._build_usage_metadata(
-                        usage_totals,
-                        extra={
-                            "max_model_tokens": max_model_tokens,
-                            "notebook_node_id": notebook_node_id,
-                        },
-                    ),
-                )
-                self._emit(
-                    context,
-                    "agent_end",
-                    task_id=task.task_id,
-                    status="failed",
-                    error=budget_error,
-                )
+        for step in range(1, session.max_steps + 1):
+            result = await self._execute_turn(session, task, context, step, state_view)
+            if result is not None:
                 return result
-
-            if response.tool_calls:
-                tool_call_count += len(response.tool_calls)
-                self._record_notebook_event(
-                    context,
-                    kind="summary",
-                    summary=f"Model selected {len(response.tool_calls)} tool(s)",
-                    detail=self._summarize_notebook_text(response.text),
-                    metadata={
-                        "stage": "model_tool_decision",
-                        "step": step,
-                        "task_id": task.task_id,
-                        "tool_names": [tc.name for tc in response.tool_calls],
-                    },
-                )
-                logger.info(
-                    "Executor tool_calls task=%s step=%d calls=%s",
-                    task.task_id,
-                    step,
-                    [tc.name for tc in response.tool_calls],
-                )
-                if tape is not None:
-                    tape_entries: list[Entry] = []
-                    for tool_call in response.tool_calls:
-                        entry = tape.append(
-                            "tool_call",
-                            {
-                                "name": tool_call.name,
-                                "arguments": dict(tool_call.arguments),
-                                "call_id": tool_call.call_id,
-                            },
-                            {
-                                "task_id": task.task_id,
-                                "step": step,
-                            },
-                        )
-                        tape_entries.append(entry)
-                    _persist_tape_entries(tape_entries)
-                messages.append(
-                    ModelMessage(
-                        role="assistant",
-                        content=response.text,
-                        tool_calls=response.tool_calls,
-                    )
-                )
-                for tool_call in response.tool_calls:
-                    self._record_notebook_event(
-                        context,
-                        kind="tool_call",
-                        summary=tool_call.name,
-                        detail=_json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)[:2000],
-                        metadata={
-                            "step": step,
-                            "call_id": tool_call.call_id,
-                            "tool_name": tool_call.name,
-                            "exploration": loop_guard.is_exploration_call(
-                                tool_call.name,
-                                tool_call.arguments,
-                            ),
-                        },
-                    )
-                # Phase 1: serial validation — lightweight checks
-                error_results: list[tuple[ModelToolCall, str]] = []
-                valid_calls: list[tuple[ModelToolCall, Any]] = []
-                forced_finalize_violations: list[ModelToolCall] = []
-
-                for tool_call in response.tool_calls:
-                    if (
-                        exploration_finish_required
-                        and loop_guard.is_exploration_call(
-                            tool_call.name,
-                            tool_call.arguments,
-                        )
-                    ):
-                        forced_finalize_violations.append(tool_call)
-                        error_results.append(
-                            (
-                                tool_call,
-                                (
-                                    "Exploration budget exhausted."
-                                    "\n[Hint: Read/search/check tools are no longer allowed for this task. "
-                                    "Return a concise conclusion or blocker summary, or switch to edit/write/action tools.]"
-                                ),
-                            )
-                        )
-                        continue
-
-                    verdict = loop_guard.check_call(tool_call.name, tool_call.arguments)
-                    if verdict.blocked:
-                        loop_guard_block_count += 1
-                        logger.warning(
-                            "Executor loop guard blocked task=%s tool=%s reason=%s",
-                            task.task_id,
-                            tool_call.name,
-                            verdict.reason,
-                        )
-                        if verdict.disable_tool:
-                            blocked_tool_names.add(tool_call.name)
-                        remaining = [
-                            t["function"]["name"]
-                            for t in available_tools
-                            if t["function"]["name"] not in blocked_tool_names
-                        ]
-                        hint = f"Loop guard: {verdict.reason}"
-                        if verdict.disable_tool:
-                            hint += (
-                                f"\nTool '{tool_call.name}' is now disabled for this task."
-                                f"\nYou MUST use a different tool. Available tools: {remaining}"
-                            )
-                        else:
-                            hint += (
-                                "\nDo not repeat the same call immediately."
-                                f"\nAvailable tools: {remaining}"
-                            )
-                        error_results.append((tool_call, hint))
-                        continue
-
-                    registered = self.tools.get(tool_call.name)
-                    if not registered or not self._tool_allowed(
-                        registered.group,
-                        tool_call.name,
-                        base_lease,
-                    ):
-                        logger.warning(
-                            "Executor tool unavailable task=%s tool=%s",
-                            task.task_id,
-                            tool_call.name,
-                        )
-                        error_results.append(
-                            (
-                                tool_call,
-                                (
-                                    f"Tool unavailable: {tool_call.name}"
-                                    "\n[Hint: This tool is not available. Use a different tool or approach.]"
-                                ),
-                            )
-                        )
-                        tool_failure_count += 1
-                        continue
-
-                    if isinstance(
-                        tool_call.arguments, dict
-                    ) and tool_call.arguments.get("__tool_argument_parse_error__"):
-                        logger.warning(
-                            "Executor invalid arguments JSON task=%s tool=%s",
-                            task.task_id,
-                            tool_call.name,
-                        )
-                        error_results.append(
-                            (
-                                tool_call,
-                                (
-                                    f"Tool argument JSON parse error for {tool_call.name}: "
-                                    f"{tool_call.arguments.get('__raw_arguments__', '')}"
-                                    "\n[Hint: Fix the JSON syntax in your tool arguments.]"
-                                ),
-                            )
-                        )
-                        tool_failure_count += 1
-                        continue
-
-                    tool_call.arguments = self._cast_tool_arguments(
-                        schema=registered.tool.schema,
-                        args=tool_call.arguments,
-                    )
-                    validation_error = self._validate_tool_arguments(
-                        schema=registered.tool.schema,
-                        args=tool_call.arguments,
-                    )
-                    if validation_error:
-                        logger.warning(
-                            "Executor argument validation failed task=%s tool=%s error=%s",
-                            task.task_id,
-                            tool_call.name,
-                            validation_error,
-                        )
-                        error_results.append(
-                            (
-                                tool_call,
-                                (
-                                    f"Tool argument validation failed for {tool_call.name}: {validation_error}"
-                                    "\n[Hint: Check parameter types and values against the tool schema.]"
-                                ),
-                            )
-                        )
-                        tool_failure_count += 1
-                        continue
-
-                    valid_calls.append((tool_call, registered))
-
-                # Build a map of tool_call index → result message for ordering
-                tool_result_map: dict[str, ModelMessage] = {}
-
-                # Append error results immediately
-                for tc, err_output in error_results:
-                    self._record_notebook_event(
-                        context,
-                        kind="tool_result",
-                        summary=f"{tc.name} failed before execution",
-                        detail=err_output[:4000],
-                        metadata={
-                            "step": step,
-                            "call_id": tc.call_id,
-                            "tool_name": tc.name,
-                            "ok": False,
-                        },
-                    )
-                    tool_result_map[tc.call_id] = ModelMessage(
-                        role="tool",
-                        name=tc.name,
-                        content=err_output,
-                        tool_call_id=tc.call_id,
-                    )
-
-                exploration_only_turn = bool(valid_calls) and all(
-                    loop_guard.is_exploration_call(tc.name, tc.arguments)
-                    for tc, _ in valid_calls
-                )
-                if (
-                    exploration_finish_required
-                    and forced_finalize_violations
-                    and len(forced_finalize_violations) == len(response.tool_calls)
-                ):
-                    auto_summary = self._build_auto_converged_summary(
-                        task=task,
-                        messages=messages,
-                    )
-                    logger.warning(
-                        "Executor auto-converged task=%s turns=%d mode=forced_finalize_ignored",
-                        task.task_id,
-                        no_progress_turns,
-                    )
-                    self._record_notebook_event(
-                        context,
-                        kind="summary",
-                        summary="探索预算耗尽，自动收敛",
-                        detail=auto_summary,
-                        metadata={
-                            "stage": "auto_converged_summary",
-                            "step": step,
-                            "task_id": task.task_id,
-                            "auto_converged": True,
-                        },
-                        progress=True,
-                    )
-                    self._transition_notebook_node(
-                        context,
-                        status="completed",
-                        summary="探索预算耗尽，自动收敛",
-                        detail=auto_summary,
-                        metadata={
-                            "task_id": task.task_id,
-                            "auto_converged": True,
-                        },
-                    )
-                    result = TaskResult(
-                        task_id=task.task_id,
-                        status="succeeded",
-                        output=auto_summary,
-                        metadata=self._build_usage_metadata(
-                            usage_totals,
-                            extra={
-                                "no_progress_turns": no_progress_turns,
-                                "blocked_tools": sorted(blocked_tool_names),
-                                "tool_call_count": tool_call_count,
-                                "tool_failure_count": tool_failure_count,
-                                "loop_guard_block_count": loop_guard_block_count,
-                                "max_step_exhausted_count": 0,
-                                "notebook_node_id": notebook_node_id,
-                                "auto_converged": True,
-                                "completion_mode": "auto_summary_after_exploration_stall",
-                            },
-                        ),
-                    )
-                    self._emit(
-                        context,
-                        "agent_end",
-                        task_id=task.task_id,
-                        status="succeeded",
-                        output_len=len(auto_summary),
-                    )
-                    return result
-
-                # Phase 2: parallel execution of validated tool calls
-                if valid_calls:
-                    import asyncio as _aio
-
-                    def _collect_media(paths: list[str]) -> None:
-                        if not paths:
-                            return
-                        bucket = state_view.collected_media_bucket()
-                        existing = set(bucket)
-                        added: list[str] = []
-                        for path in paths:
-                            if path and path not in existing:
-                                bucket.append(path)
-                                existing.add(path)
-                                added.append(path)
-                                notebook, node_id = self._resolve_notebook_binding(
-                                    context
-                                )
-                                if notebook is not None:
-                                    notebook.add_artifact(
-                                        node_id=node_id,
-                                        path=path,
-                                        label="worker artifact",
-                                        metadata={
-                                            "progress": True,
-                                            "source": "tool_result",
-                                        },
-                                    )
-                        if added:
-                            state_view.append_runtime_hint(
-                                "Output artifacts detected:\n"
-                                + "\n".join(f"- {path}" for path in added)
-                                + "\nIf these satisfy the task, stop and return a concise final answer with the exact paths."
-                                " Do not spend more turns on read-only verification."
-                            )
-
-                    async def _invoke_one(
-                        tc: ModelToolCall,
-                        reg: Any,
-                    ) -> tuple[ModelToolCall, str, list[str], bool]:
-                        # ── before_tool_call hook ────────────────
-                        hook_before = context.before_tool_call
-                        if callable(hook_before):
-                            hook_before(tc.name, tc.arguments, context)
-
-                        # ── tool_execution_start event ───────────
-                        self._emit(
-                            context,
-                            "tool_execution_start",
-                            task_id=task.task_id,
-                            step=step,
-                            tool_name=tc.name,
-                            call_id=tc.call_id,
-                        )
-
-                        logger.info(
-                            "Executor invoke task=%s tool=%s args_keys=%s",
-                            task.task_id,
-                            tc.name,
-                            list(tc.arguments.keys()),
-                        )
-                        started = time.perf_counter()
-                        try:
-                            result = await reg.tool.invoke(tc.arguments, tool_context)
-                        except Exception as exc:
-                            elapsed = time.perf_counter() - started
-                            logger.exception(
-                                "Executor tool crashed task=%s tool=%s elapsed=%.2fs",
-                                task.task_id,
-                                tc.name,
-                                elapsed,
-                            )
-                            output = (
-                                f"Tool error: {exc}"
-                                "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
-                            )
-                            # ── tool_execution_end event (error) ─
-                            self._emit(
-                                context,
-                                "tool_execution_end",
-                                task_id=task.task_id,
-                                step=step,
-                                tool_name=tc.name,
-                                call_id=tc.call_id,
-                                ok=False,
-                                elapsed_s=round(elapsed, 3),
-                            )
-                            # ── after_tool_call hook ─────────────
-                            hook_after = context.after_tool_call
-                            if callable(hook_after):
-                                hook_after(tc.name, tc.arguments, None, context)
-                            return (tc, output, [], True)
-
-                        elapsed = time.perf_counter() - started
-                        output = (
-                            result.content
-                            if result.ok
-                            else (
-                                f"Tool error: {result.error}"
-                                "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
-                            )
-                        )
-                        if result.ok:
-                            logger.info(
-                                "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
-                                task.task_id,
-                                tc.name,
-                                result.ok,
-                                elapsed,
-                                len(output),
-                            )
-                        else:
-                            logger.warning(
-                                "Executor tool failed task=%s tool=%s elapsed=%.2fs error=%s",
-                                task.task_id,
-                                tc.name,
-                                elapsed,
-                                (result.error or "")[:500],
-                            )
-
-                        # ── tool_execution_end event (success) ───
-                        self._emit(
-                            context,
-                            "tool_execution_end",
-                            task_id=task.task_id,
-                            step=step,
-                            tool_name=tc.name,
-                            call_id=tc.call_id,
-                            ok=result.ok,
-                            elapsed_s=round(elapsed, 3),
-                            output_len=len(output),
-                        )
-                        # ── after_tool_call hook ─────────────────
-                        hook_after = context.after_tool_call
-                        if callable(hook_after):
-                            hook_after(tc.name, tc.arguments, result, context)
-
-                        return tc, output, list(result.artifacts or []), not result.ok
-
-                    done = await _aio.gather(
-                        *[_invoke_one(tc, reg) for tc, reg in valid_calls]
-                    )
-                    result_entries: list[Entry] = []
-                    for tc, output, artifacts, failed in done:
-                        if failed:
-                            tool_failure_count += 1
-                        _collect_media(artifacts)
-                        exploration_call = loop_guard.is_exploration_call(
-                            tc.name,
-                            tc.arguments,
-                        )
-                        progress = (not failed and not exploration_call) or bool(
-                            artifacts
-                        )
-                        self._record_notebook_event(
-                            context,
-                            kind="tool_result",
-                            summary=(
-                                f"{tc.name} succeeded"
-                                if not failed
-                                else f"{tc.name} failed"
-                            ),
-                            detail=output[:4000],
-                            metadata={
-                                "step": step,
-                                "call_id": tc.call_id,
-                                "tool_name": tc.name,
-                                "ok": not failed,
-                                "artifact_count": len(artifacts),
-                                "exploration": exploration_call,
-                            },
-                            progress=progress,
-                        )
-                        if tape is not None:
-                            entry = tape.append(
-                                "tool_result",
-                                {
-                                    "name": tc.name,
-                                    "ok": not output.startswith("Tool error:"),
-                                    "content_preview": output[:500],
-                                    "artifacts": artifacts,
-                                    "call_id": tc.call_id,
-                                },
-                                {
-                                    "task_id": task.task_id,
-                                    "step": step,
-                                },
-                            )
-                            result_entries.append(entry)
-                        tool_result_map[tc.call_id] = ModelMessage(
-                            role="tool",
-                            name=tc.name,
-                            content=self._truncate_tool_output_for_model(
-                                output,
-                                self.policy.max_tool_result_chars,
-                            ),
-                            tool_call_id=tc.call_id,
-                        )
-                    _persist_tape_entries(result_entries)
-
-                turn_made_progress = (
-                    self._progress_marker_count(context) > turn_progress_before
-                )
-                exploration_only_no_progress = (
-                    exploration_only_turn and not turn_made_progress
-                )
-                if turn_made_progress:
-                    no_progress_turns = 0
-                    exploration_finish_required = False
-                else:
-                    no_progress_turns += 1
-                    if exploration_only_turn:
-                        warning_turn = max(1, no_progress_limit - 1)
-                        if no_progress_limit > 1 and no_progress_turns == warning_turn:
-                            state_view.append_runtime_hint(
-                                "你已经连续 "
-                                f"{no_progress_turns} 轮只使用读取/搜索/检查类工具。"
-                                " 下一轮必须收敛：要么直接给出当前结论/缺口摘要，"
-                                "要么切换到编辑、写入或执行类工具，不要继续无边界探索。"
-                            )
-                    elif no_progress_turns >= no_progress_limit:
-                        last_issues = " | ".join(
-                            err_output.splitlines()[0][:200]
-                            for _, err_output in error_results[:3]
-                            if err_output
-                        )
-                        error = f"No progress after {no_progress_turns} consecutive tool-only turns."
-                        if last_issues:
-                            error += f" Last issues: {last_issues}"
-                        logger.warning(
-                            "Executor no-progress fail task=%s turns=%d issues=%s",
-                            task.task_id,
-                            no_progress_turns,
-                            last_issues,
-                        )
-                        self._transition_notebook_node(
-                            context,
-                            status="failed",
-                            summary="Executor stalled without notebook progress",
-                            detail=error,
-                            metadata={"task_id": task.task_id},
-                        )
-                        result = TaskResult(
-                            task_id=task.task_id,
-                            status="failed",
-                            error=error,
-                            metadata=self._build_usage_metadata(
-                                usage_totals,
-                                extra={
-                                    "no_progress_turns": no_progress_turns,
-                                    "blocked_tools": sorted(blocked_tool_names),
-                                    "tool_call_count": tool_call_count,
-                                    "tool_failure_count": tool_failure_count,
-                                    "loop_guard_block_count": loop_guard_block_count,
-                                    "max_step_exhausted_count": 0,
-                                    "notebook_node_id": notebook_node_id,
-                                },
-                            ),
-                        )
-                        self._emit(
-                            context,
-                            "agent_end",
-                            task_id=task.task_id,
-                            status="failed",
-                            error=error,
-                        )
-                        return result
-
-                # Append tool results in original tool_calls order
-                for tool_call in response.tool_calls:
-                    if tool_call.call_id in tool_result_map:
-                        messages.append(tool_result_map[tool_call.call_id])
-
-                # Allow one last convergence turn after the exploration budget
-                # is exhausted. That turn may finish directly or use action/edit
-                # tools, but exploration tools are removed from the offered set
-                # and rejected if the model still calls them.
-                if exploration_only_no_progress and no_progress_turns >= no_progress_limit:
-                    if not exploration_finish_required:
-                        exploration_finish_required = True
-                        state_view.append_runtime_hint(
-                            "探索预算已耗尽。下一轮必须直接给出当前结论/缺口摘要，"
-                            "或切换到编辑、写入、执行类工具。不要再调用读取、搜索、检查类工具。"
-                        )
-
-                # ── Turn end event ───────────────────────────────
-                self._emit(
-                    context,
-                    "turn_end",
-                    task_id=task.task_id,
-                    step=step,
-                    tool_calls=[tc.name for tc in response.tool_calls],
-                )
-
-                if heartbeat is not None:
-                    heartbeat.beat()
-                continue
-
-            text = response.text
-            if response.finish_reason == "length":
-                text = await self._continue_from_truncation(
-                    initial_text=text,
-                    messages=messages,
-                    context=context,
-                    task_id=task.task_id,
-                    step=step,
-                    usage_totals=usage_totals,
-                    max_model_tokens=max_model_tokens,
-                )
-                if text is None:
-                    error = (
-                        f"Model token budget exceeded "
-                        f"({usage_totals['total_tokens']}/{max_model_tokens})."
-                    )
-                    self._transition_notebook_node(
-                        context,
-                        status="failed",
-                        summary="Continuation exceeded token budget",
-                        detail=error,
-                        metadata={"task_id": task.task_id},
-                    )
-                    result = TaskResult(
-                        task_id=task.task_id,
-                        status="failed",
-                        error=error,
-                        metadata=self._build_usage_metadata(
-                            usage_totals,
-                            extra={
-                                "max_model_tokens": max_model_tokens,
-                                "tool_call_count": tool_call_count,
-                                "tool_failure_count": tool_failure_count,
-                                "loop_guard_block_count": loop_guard_block_count,
-                                "max_step_exhausted_count": 0,
-                                "notebook_node_id": notebook_node_id,
-                            },
-                        ),
-                    )
-                    self._emit(
-                        context,
-                        "agent_end",
-                        task_id=task.task_id,
-                        status="failed",
-                        error=error,
-                    )
-                    return result
-
-            text = text.strip()
-            if text:
-                exploration_finish_required = False
-                final_summary = self._summarize_notebook_text(text)
-                self._record_notebook_event(
-                    context,
-                    kind="summary",
-                    summary=final_summary or "Worker produced final output",
-                    detail=text,
-                    metadata={
-                        "stage": "final_answer",
-                        "step": step,
-                        "task_id": task.task_id,
-                    },
-                    progress=True,
-                )
-                self._transition_notebook_node(
-                    context,
-                    status="completed",
-                    summary=final_summary or "Worker completed",
-                    detail=text,
-                    metadata={
-                        "progress": True,
-                        "source": "executor",
-                        "task_id": task.task_id,
-                    },
-                )
-                logger.info(
-                    "Executor final answer task=%s step=%d output_len=%d",
-                    task.task_id,
-                    step,
-                    len(text),
-                )
-                # ── Turn end (final) + Agent end events ──────────
-                self._emit(
-                    context, "turn_end", task_id=task.task_id, step=step, final=True
-                )
-                self._emit(
-                    context,
-                    "agent_end",
-                    task_id=task.task_id,
-                    status="succeeded",
-                    output_len=len(text),
-                    total_tool_calls=tool_call_count,
-                )
-                return TaskResult(
-                    task_id=task.task_id,
-                    status="succeeded",
-                    output=text,
-                    metadata=self._build_usage_metadata(
-                        usage_totals,
-                        extra={
-                            "notebook_node_id": notebook_node_id,
-                            "notebook_summary": text,
-                            "tool_call_count": tool_call_count,
-                            "tool_failure_count": tool_failure_count,
-                            "loop_guard_block_count": loop_guard_block_count,
-                            "max_step_exhausted_count": 0,
-                        },
-                    ),
-                )
 
         logger.warning(
             "Executor exhausted steps task=%s max_steps=%d",
@@ -1240,22 +594,737 @@ class SingleAgentExecutor:
         self._emit(
             context, "agent_end", task_id=task.task_id, status="failed", error=error
         )
-        return TaskResult(
-            task_id=task.task_id,
+        return self._build_task_result(
+            session,
             status="failed",
             error=error,
-            metadata=self._build_usage_metadata(
-                usage_totals,
-                extra={
-                    "history": [self._dump_message(message) for message in messages],
-                    "tool_call_count": tool_call_count,
-                    "tool_failure_count": tool_failure_count,
-                    "loop_guard_block_count": loop_guard_block_count,
-                    "max_step_exhausted_count": 1,
-                    "notebook_node_id": notebook_node_id,
-                },
-            ),
+            extra_metadata={
+                "history": [
+                    self._dump_message(message) for message in session.messages
+                ],
+                "tool_call_count": session.tool_call_count,
+                "tool_failure_count": session.tool_failure_count,
+                "loop_guard_block_count": session.loop_guard_block_count,
+                "max_step_exhausted_count": 1,
+                "notebook_node_id": session.notebook_node_id,
+            },
         )
+
+    async def _execute_turn(
+        self,
+        session: ExecutionSession,
+        task: TaskContract,
+        context: ExecutionContext,
+        step: int,
+        state_view: RuntimeState,
+    ) -> TaskResult | None:
+        """Execute one step of the agent loop.
+
+        Returns a TaskResult to exit the loop early, or None to continue.
+        """
+        if session.heartbeat is not None:
+            session.heartbeat.beat()
+
+        # ── Turn start event ─────────────────────────────────
+        self._emit(context, "turn_start", task_id=task.task_id, step=step)
+        # Legacy event for backward compat
+        context.emit("executor.step", task_id=task.task_id, step=step)
+        turn_progress_before = self._progress_marker_count(context)
+        self._record_notebook_event(
+            context,
+            kind="observation",
+            summary=f"Turn {step} started",
+            metadata={
+                "stage": "turn_start",
+                "step": step,
+                "task_id": task.task_id,
+            },
+        )
+        logger.info(
+            "Executor step=%d/%d task=%s",
+            step,
+            self.policy.max_steps,
+            task.task_id,
+        )
+
+        session.messages = session.loop_guard.compress_messages(session.messages)
+
+        # ── transformContext hook ─────────────────────────────
+        transform_fn = context.transform_context
+        if callable(transform_fn):
+            pre_count = len(session.messages)
+            session.messages = transform_fn(session.messages, context)
+            if len(session.messages) != pre_count:
+                self._emit(
+                    context,
+                    "context_transform",
+                    task_id=task.task_id,
+                    step=step,
+                    messages_before=pre_count,
+                    messages_after=len(session.messages),
+                )
+
+        runtime_hint_messages = self._consume_runtime_hint_messages(context.state)
+        if session.blocked_tool_names:
+            step_tools = [
+                t
+                for t in session.available_tools
+                if t["function"]["name"] not in session.blocked_tool_names
+            ]
+        else:
+            step_tools = session.available_tools
+        if session.exploration_finish_required:
+            step_tools = list(self._filter_non_exploration_tools(step_tools))
+
+        # ── LLM request ──────────────────────────────────────
+        self._emit(
+            context,
+            "llm_request_start",
+            task_id=task.task_id,
+            step=step,
+            message_count=len(session.messages) + len(runtime_hint_messages),
+            tool_count=len(step_tools),
+        )
+        llm_start = time.perf_counter()
+        request_messages = tuple(session.messages)
+        if runtime_hint_messages:
+            if request_messages and request_messages[0].role == "system":
+                request_messages = (
+                    request_messages[:1] + runtime_hint_messages + request_messages[1:]
+                )
+            else:
+                request_messages = runtime_hint_messages + request_messages
+        response = await self.model.generate(
+            ModelRequest(
+                messages=request_messages,
+                tools=step_tools,
+                metadata={"task_id": task.task_id, "step": step},
+            ),
+            context,
+        )
+        llm_elapsed = time.perf_counter() - llm_start
+        self._accumulate_usage(session.usage_totals, response)
+        self._emit(
+            context,
+            "llm_request_end",
+            task_id=task.task_id,
+            step=step,
+            elapsed_s=round(llm_elapsed, 3),
+            has_tool_calls=bool(response.tool_calls),
+            finish_reason=response.finish_reason or "stop",
+        )
+
+        budget_error = self._check_token_budget(
+            session.usage_totals, session.max_model_tokens
+        )
+        if budget_error:
+            self._transition_notebook_node(
+                context,
+                status="failed",
+                summary="Model token budget exceeded",
+                detail=budget_error,
+                metadata={"task_id": task.task_id},
+            )
+            result = self._build_task_result(
+                session,
+                status="failed",
+                error=budget_error,
+                extra_metadata={
+                    "max_model_tokens": session.max_model_tokens,
+                    "notebook_node_id": session.notebook_node_id,
+                },
+            )
+            self._emit(
+                context,
+                "agent_end",
+                task_id=task.task_id,
+                status="failed",
+                error=budget_error,
+            )
+            return result
+
+        if response.tool_calls:
+            return await self._handle_tool_calls_branch(
+                session, task, context, step, response, state_view, turn_progress_before
+            )
+        return await self._handle_text_response_branch(
+            session, task, context, step, response
+        )
+
+    async def _handle_tool_calls_branch(
+        self,
+        session: ExecutionSession,
+        task: TaskContract,
+        context: ExecutionContext,
+        step: int,
+        response: ModelResponse,
+        state_view: RuntimeState,
+        turn_progress_before: int,
+    ) -> TaskResult | None:
+        """Handle the branch where the model returned tool calls.
+
+        Returns a TaskResult to exit the loop, or None to continue.
+        """
+        session.tool_call_count += len(response.tool_calls)
+        self._record_notebook_event(
+            context,
+            kind="summary",
+            summary=f"Model selected {len(response.tool_calls)} tool(s)",
+            detail=self._summarize_notebook_text(response.text),
+            metadata={
+                "stage": "model_tool_decision",
+                "step": step,
+                "task_id": task.task_id,
+                "tool_names": [tc.name for tc in response.tool_calls],
+            },
+        )
+        logger.info(
+            "Executor tool_calls task=%s step=%d calls=%s",
+            task.task_id,
+            step,
+            [tc.name for tc in response.tool_calls],
+        )
+        if session.tape is not None:
+            tape_entries: list[Entry] = []
+            for tool_call in response.tool_calls:
+                entry = session.tape.append(
+                    "tool_call",
+                    {
+                        "name": tool_call.name,
+                        "arguments": dict(tool_call.arguments),
+                        "call_id": tool_call.call_id,
+                    },
+                    {
+                        "task_id": task.task_id,
+                        "step": step,
+                    },
+                )
+                tape_entries.append(entry)
+            self._persist_tape_entries(session, tape_entries)
+        session.messages.append(
+            ModelMessage(
+                role="assistant",
+                content=response.text,
+                tool_calls=response.tool_calls,
+            )
+        )
+        for tool_call in response.tool_calls:
+            self._record_notebook_event(
+                context,
+                kind="tool_call",
+                summary=tool_call.name,
+                detail=_json.dumps(
+                    tool_call.arguments, ensure_ascii=False, sort_keys=True
+                )[:2000],
+                metadata={
+                    "step": step,
+                    "call_id": tool_call.call_id,
+                    "tool_name": tool_call.name,
+                    "exploration": session.loop_guard.is_exploration_call(
+                        tool_call.name,
+                        tool_call.arguments,
+                    ),
+                },
+            )
+        # Phase 1: serial validation — lightweight checks
+        validation = self._validate_tool_calls(response.tool_calls, session=session)
+        valid_calls = validation.valid_calls
+        error_results = validation.error_results
+        forced_finalize_violations = validation.forced_finalize_violations
+
+        # Build a map of tool_call index → result message for ordering
+        tool_result_map: dict[str, ModelMessage] = {}
+
+        # Append error results immediately
+        for tc, err_output in error_results:
+            self._record_notebook_event(
+                context,
+                kind="tool_result",
+                summary=f"{tc.name} failed before execution",
+                detail=err_output[:4000],
+                metadata={
+                    "step": step,
+                    "call_id": tc.call_id,
+                    "tool_name": tc.name,
+                    "ok": False,
+                },
+            )
+            tool_result_map[tc.call_id] = ModelMessage(
+                role="tool",
+                name=tc.name,
+                content=err_output,
+                tool_call_id=tc.call_id,
+            )
+
+        exploration_only_turn = bool(valid_calls) and all(
+            session.loop_guard.is_exploration_call(tc.name, tc.arguments)
+            for tc, _ in valid_calls
+        )
+        if (
+            session.exploration_finish_required
+            and forced_finalize_violations
+            and len(forced_finalize_violations) == len(response.tool_calls)
+        ):
+            auto_summary = self._build_auto_converged_summary(
+                task=task,
+                messages=session.messages,
+            )
+            logger.warning(
+                "Executor auto-converged task=%s turns=%d mode=forced_finalize_ignored",
+                task.task_id,
+                session.no_progress_turns,
+            )
+            self._record_notebook_event(
+                context,
+                kind="summary",
+                summary="探索预算耗尽，自动收敛",
+                detail=auto_summary,
+                metadata={
+                    "stage": "auto_converged_summary",
+                    "step": step,
+                    "task_id": task.task_id,
+                    "auto_converged": True,
+                },
+                progress=True,
+            )
+            self._transition_notebook_node(
+                context,
+                status="completed",
+                summary="探索预算耗尽，自动收敛",
+                detail=auto_summary,
+                metadata={
+                    "task_id": task.task_id,
+                    "auto_converged": True,
+                },
+            )
+            result = self._build_task_result(
+                session,
+                status="succeeded",
+                output=auto_summary,
+                extra_metadata={
+                    "no_progress_turns": session.no_progress_turns,
+                    "blocked_tools": sorted(session.blocked_tool_names),
+                    "tool_call_count": session.tool_call_count,
+                    "tool_failure_count": session.tool_failure_count,
+                    "loop_guard_block_count": session.loop_guard_block_count,
+                    "max_step_exhausted_count": 0,
+                    "notebook_node_id": session.notebook_node_id,
+                    "auto_converged": True,
+                    "completion_mode": "auto_summary_after_exploration_stall",
+                },
+            )
+            self._emit(
+                context,
+                "agent_end",
+                task_id=task.task_id,
+                status="succeeded",
+                output_len=len(auto_summary),
+            )
+            return result
+
+        # Phase 2: parallel execution of validated tool calls
+        if valid_calls:
+            import asyncio as _aio
+
+            def _collect_media(paths: list[str]) -> None:
+                if not paths:
+                    return
+                bucket = state_view.collected_media_bucket()
+                existing = set(bucket)
+                added: list[str] = []
+                for path in paths:
+                    if path and path not in existing:
+                        bucket.append(path)
+                        existing.add(path)
+                        added.append(path)
+                        notebook, node_id = self._resolve_notebook_binding(context)
+                        if notebook is not None:
+                            notebook.add_artifact(
+                                node_id=node_id,
+                                path=path,
+                                label="worker artifact",
+                                metadata={
+                                    "progress": True,
+                                    "source": "tool_result",
+                                },
+                            )
+                if added:
+                    state_view.append_runtime_hint(
+                        "Output artifacts detected:\n"
+                        + "\n".join(f"- {path}" for path in added)
+                        + "\nIf these satisfy the task, stop and return a concise final answer with the exact paths."
+                        " Do not spend more turns on read-only verification."
+                    )
+
+            async def _invoke_one(
+                tc: ModelToolCall,
+                reg: Any,
+            ) -> tuple[ModelToolCall, str, list[str], bool]:
+                # ── before_tool_call hook ────────────────
+                hook_before = context.before_tool_call
+                if callable(hook_before):
+                    hook_before(tc.name, tc.arguments, context)
+
+                # ── tool_execution_start event ───────────
+                self._emit(
+                    context,
+                    "tool_execution_start",
+                    task_id=task.task_id,
+                    step=step,
+                    tool_name=tc.name,
+                    call_id=tc.call_id,
+                )
+
+                logger.info(
+                    "Executor invoke task=%s tool=%s args_keys=%s",
+                    task.task_id,
+                    tc.name,
+                    list(tc.arguments.keys()),
+                )
+                started = time.perf_counter()
+                try:
+                    result = await reg.tool.invoke(tc.arguments, session.tool_context)
+                except Exception as exc:
+                    elapsed = time.perf_counter() - started
+                    logger.exception(
+                        "Executor tool crashed task=%s tool=%s elapsed=%.2fs",
+                        task.task_id,
+                        tc.name,
+                        elapsed,
+                    )
+                    output = (
+                        f"Tool error: {exc}"
+                        "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
+                    )
+                    # ── tool_execution_end event (error) ─
+                    self._emit(
+                        context,
+                        "tool_execution_end",
+                        task_id=task.task_id,
+                        step=step,
+                        tool_name=tc.name,
+                        call_id=tc.call_id,
+                        ok=False,
+                        elapsed_s=round(elapsed, 3),
+                    )
+                    # ── after_tool_call hook ─────────────
+                    hook_after = context.after_tool_call
+                    if callable(hook_after):
+                        hook_after(tc.name, tc.arguments, None, context)
+                    return (tc, output, [], True)
+
+                elapsed = time.perf_counter() - started
+                output = (
+                    result.content
+                    if result.ok
+                    else (
+                        f"Tool error: {result.error}"
+                        "\n[Hint: Analyze the error and try a different approach instead of retrying the same way.]"
+                    )
+                )
+                if result.ok:
+                    logger.info(
+                        "Executor tool done task=%s tool=%s ok=%s elapsed=%.2fs output_len=%d",
+                        task.task_id,
+                        tc.name,
+                        result.ok,
+                        elapsed,
+                        len(output),
+                    )
+                else:
+                    logger.warning(
+                        "Executor tool failed task=%s tool=%s elapsed=%.2fs error=%s",
+                        task.task_id,
+                        tc.name,
+                        elapsed,
+                        (result.error or "")[:500],
+                    )
+
+                # ── tool_execution_end event (success) ───
+                self._emit(
+                    context,
+                    "tool_execution_end",
+                    task_id=task.task_id,
+                    step=step,
+                    tool_name=tc.name,
+                    call_id=tc.call_id,
+                    ok=result.ok,
+                    elapsed_s=round(elapsed, 3),
+                    output_len=len(output),
+                )
+                # ── after_tool_call hook ─────────────────
+                hook_after = context.after_tool_call
+                if callable(hook_after):
+                    hook_after(tc.name, tc.arguments, result, context)
+
+                return tc, output, list(result.artifacts or []), not result.ok
+
+            done = await _aio.gather(*[_invoke_one(tc, reg) for tc, reg in valid_calls])
+            result_entries: list[Entry] = []
+            for tc, output, artifacts, failed in done:
+                if failed:
+                    session.tool_failure_count += 1
+                _collect_media(artifacts)
+                exploration_call = session.loop_guard.is_exploration_call(
+                    tc.name,
+                    tc.arguments,
+                )
+                progress = (not failed and not exploration_call) or bool(artifacts)
+                self._record_notebook_event(
+                    context,
+                    kind="tool_result",
+                    summary=(
+                        f"{tc.name} succeeded" if not failed else f"{tc.name} failed"
+                    ),
+                    detail=output[:4000],
+                    metadata={
+                        "step": step,
+                        "call_id": tc.call_id,
+                        "tool_name": tc.name,
+                        "ok": not failed,
+                        "artifact_count": len(artifacts),
+                        "exploration": exploration_call,
+                    },
+                    progress=progress,
+                )
+                if session.tape is not None:
+                    entry = session.tape.append(
+                        "tool_result",
+                        {
+                            "name": tc.name,
+                            "ok": not output.startswith("Tool error:"),
+                            "content_preview": output[:500],
+                            "artifacts": artifacts,
+                            "call_id": tc.call_id,
+                        },
+                        {
+                            "task_id": task.task_id,
+                            "step": step,
+                        },
+                    )
+                    result_entries.append(entry)
+                tool_result_map[tc.call_id] = ModelMessage(
+                    role="tool",
+                    name=tc.name,
+                    content=self._truncate_tool_output_for_model(
+                        output,
+                        self.policy.max_tool_result_chars,
+                    ),
+                    tool_call_id=tc.call_id,
+                )
+            self._persist_tape_entries(session, result_entries)
+
+        turn_made_progress = self._progress_marker_count(context) > turn_progress_before
+        exploration_only_no_progress = exploration_only_turn and not turn_made_progress
+        if turn_made_progress:
+            session.no_progress_turns = 0
+            session.exploration_finish_required = False
+        else:
+            session.no_progress_turns += 1
+            if exploration_only_turn:
+                warning_turn = max(1, session.no_progress_limit - 1)
+                if (
+                    session.no_progress_limit > 1
+                    and session.no_progress_turns == warning_turn
+                ):
+                    state_view.append_runtime_hint(
+                        "你已经连续 "
+                        f"{session.no_progress_turns} 轮只使用读取/搜索/检查类工具。"
+                        " 下一轮必须收敛：要么直接给出当前结论/缺口摘要，"
+                        "要么切换到编辑、写入或执行类工具，不要继续无边界探索。"
+                    )
+            elif session.no_progress_turns >= session.no_progress_limit:
+                last_issues = " | ".join(
+                    err_output.splitlines()[0][:200]
+                    for _, err_output in error_results[:3]
+                    if err_output
+                )
+                error = f"No progress after {session.no_progress_turns} consecutive tool-only turns."
+                if last_issues:
+                    error += f" Last issues: {last_issues}"
+                logger.warning(
+                    "Executor no-progress fail task=%s turns=%d issues=%s",
+                    task.task_id,
+                    session.no_progress_turns,
+                    last_issues,
+                )
+                self._transition_notebook_node(
+                    context,
+                    status="failed",
+                    summary="Executor stalled without notebook progress",
+                    detail=error,
+                    metadata={"task_id": task.task_id},
+                )
+                result = self._build_task_result(
+                    session,
+                    status="failed",
+                    error=error,
+                    extra_metadata={
+                        "no_progress_turns": session.no_progress_turns,
+                        "blocked_tools": sorted(session.blocked_tool_names),
+                        "tool_call_count": session.tool_call_count,
+                        "tool_failure_count": session.tool_failure_count,
+                        "loop_guard_block_count": session.loop_guard_block_count,
+                        "max_step_exhausted_count": 0,
+                        "notebook_node_id": session.notebook_node_id,
+                    },
+                )
+                self._emit(
+                    context,
+                    "agent_end",
+                    task_id=task.task_id,
+                    status="failed",
+                    error=error,
+                )
+                return result
+
+        # Append tool results in original tool_calls order
+        for tool_call in response.tool_calls:
+            if tool_call.call_id in tool_result_map:
+                session.messages.append(tool_result_map[tool_call.call_id])
+
+        # Allow one last convergence turn after the exploration budget
+        # is exhausted. That turn may finish directly or use action/edit
+        # tools, but exploration tools are removed from the offered set
+        # and rejected if the model still calls them.
+        if (
+            exploration_only_no_progress
+            and session.no_progress_turns >= session.no_progress_limit
+        ):
+            if not session.exploration_finish_required:
+                session.exploration_finish_required = True
+                state_view.append_runtime_hint(
+                    "探索预算已耗尽。下一轮必须直接给出当前结论/缺口摘要，"
+                    "或切换到编辑、写入、执行类工具。不要再调用读取、搜索、检查类工具。"
+                )
+
+        # ── Turn end event ───────────────────────────────
+        self._emit(
+            context,
+            "turn_end",
+            task_id=task.task_id,
+            step=step,
+            tool_calls=[tc.name for tc in response.tool_calls],
+        )
+
+        if session.heartbeat is not None:
+            session.heartbeat.beat()
+        return None  # continue the loop
+
+    async def _handle_text_response_branch(
+        self,
+        session: ExecutionSession,
+        task: TaskContract,
+        context: ExecutionContext,
+        step: int,
+        response: ModelResponse,
+    ) -> TaskResult | None:
+        """Handle the branch where the model returned text (no tool calls).
+
+        Returns a TaskResult to exit the loop, or None to continue.
+        """
+        text = response.text
+        if response.finish_reason == "length":
+            text = await self._continue_from_truncation(
+                initial_text=text,
+                messages=session.messages,
+                context=context,
+                task_id=task.task_id,
+                step=step,
+                usage_totals=session.usage_totals,
+                max_model_tokens=session.max_model_tokens,
+            )
+            if text is None:
+                error = (
+                    f"Model token budget exceeded "
+                    f"({session.usage_totals['total_tokens']}/{session.max_model_tokens})."
+                )
+                self._transition_notebook_node(
+                    context,
+                    status="failed",
+                    summary="Continuation exceeded token budget",
+                    detail=error,
+                    metadata={"task_id": task.task_id},
+                )
+                result = self._build_task_result(
+                    session,
+                    status="failed",
+                    error=error,
+                    extra_metadata={
+                        "max_model_tokens": session.max_model_tokens,
+                        "tool_call_count": session.tool_call_count,
+                        "tool_failure_count": session.tool_failure_count,
+                        "loop_guard_block_count": session.loop_guard_block_count,
+                        "max_step_exhausted_count": 0,
+                        "notebook_node_id": session.notebook_node_id,
+                    },
+                )
+                self._emit(
+                    context,
+                    "agent_end",
+                    task_id=task.task_id,
+                    status="failed",
+                    error=error,
+                )
+                return result
+
+        text = text.strip()
+        if text:
+            session.exploration_finish_required = False
+            final_summary = self._summarize_notebook_text(text)
+            self._record_notebook_event(
+                context,
+                kind="summary",
+                summary=final_summary or "Worker produced final output",
+                detail=text,
+                metadata={
+                    "stage": "final_answer",
+                    "step": step,
+                    "task_id": task.task_id,
+                },
+                progress=True,
+            )
+            self._transition_notebook_node(
+                context,
+                status="completed",
+                summary=final_summary or "Worker completed",
+                detail=text,
+                metadata={
+                    "progress": True,
+                    "source": "executor",
+                    "task_id": task.task_id,
+                },
+            )
+            logger.info(
+                "Executor final answer task=%s step=%d output_len=%d",
+                task.task_id,
+                step,
+                len(text),
+            )
+            # ── Turn end (final) + Agent end events ──────────
+            self._emit(context, "turn_end", task_id=task.task_id, step=step, final=True)
+            self._emit(
+                context,
+                "agent_end",
+                task_id=task.task_id,
+                status="succeeded",
+                output_len=len(text),
+                total_tool_calls=session.tool_call_count,
+            )
+            return self._build_task_result(
+                session,
+                status="succeeded",
+                output=text,
+                extra_metadata={
+                    "notebook_node_id": session.notebook_node_id,
+                    "notebook_summary": text,
+                    "tool_call_count": session.tool_call_count,
+                    "tool_failure_count": session.tool_failure_count,
+                    "loop_guard_block_count": session.loop_guard_block_count,
+                    "max_step_exhausted_count": 0,
+                },
+            )
+        return None  # empty text: continue the loop
 
     async def _continue_from_truncation(
         self,
@@ -1381,6 +1450,48 @@ class SingleAgentExecutor:
             metadata.update(extra)
         return metadata
 
+    def _build_task_result(
+        self,
+        session: ExecutionSession,
+        *,
+        status: str,
+        output: str = "",
+        error: str = "",
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> TaskResult:
+        """Thin wrapper: assemble TaskResult with accumulated usage metadata."""
+        return TaskResult(
+            task_id=session.task_id,
+            status=status,
+            output=output,
+            error=error,
+            metadata=self._build_usage_metadata(
+                session.usage_totals,
+                extra=extra_metadata or {},
+            ),
+        )
+
+    @staticmethod
+    def _persist_tape_entries(session: ExecutionSession, entries: list[Any]) -> None:
+        """Persist a batch of tape entries to the tape store in one call."""
+        if not entries:
+            return
+        if session.tape is None:
+            return
+        if session.tape_store is None:
+            return
+        save_entries = getattr(session.tape_store, "save_entries", None)
+        save_entry = getattr(session.tape_store, "save_entry", None)
+        chat_id = getattr(session.tape, "chat_id", "")
+        if not chat_id:
+            return
+        if callable(save_entries):
+            save_entries(chat_id, entries)
+            return
+        if callable(save_entry):
+            for entry in entries:
+                save_entry(chat_id, entry)
+
     @staticmethod
     def _cast_tool_arguments(
         schema: dict[str, Any], args: dict[str, Any]
@@ -1493,254 +1604,3 @@ class EchoModelProvider:
                 ),
             )
         return ModelResponse(text=last.content)
-
-
-def _history_entry_text(entry: object) -> str:
-    kind = getattr(entry, "kind", "")
-    payload = getattr(entry, "payload", {}) or {}
-    if kind == "message":
-        role = payload.get("role", "?")
-        content = payload.get("content", "")
-        return f"{role}: {content}"
-    if kind == "tool_result":
-        name = str(payload.get("name", "") or "?")
-        status = "ok" if payload.get("ok") else "failed"
-        preview = str(payload.get("content_preview", "") or "").strip()
-        artifacts = payload.get("artifacts") or []
-        suffix = (
-            f"\nartifacts: {', '.join(str(item) for item in artifacts)}"
-            if artifacts
-            else ""
-        )
-        return f"[tool_result][{status}] {name}: {preview}{suffix}".rstrip()
-    if kind == "tool_call":
-        name = str(payload.get("name", "") or "?")
-        arguments = payload.get("arguments", {})
-        return f"[tool_call] {name}: {_json.dumps(arguments, ensure_ascii=False)}"
-    if kind == "event":
-        event_name = str(payload.get("event", "") or "?")
-        event_payload = payload.get("payload") or {}
-        normalized = normalize_runtime_feedback_event(
-            {
-                "event": event_name,
-                "task_id": str(payload.get("task_id", "") or ""),
-                "flow_id": str(payload.get("flow_id", "") or ""),
-                "payload": dict(event_payload or {}),
-            }
-        )
-        description = runtime_event_primary_label(normalized)
-        error = str(normalized.error or "").strip()
-        output = str(normalized.output_summary or event_payload.get("output", "") or "").strip()
-        details_parts = [part for part in (description, output, error) if part]
-        details = (
-            " | ".join(details_parts)
-            if details_parts
-            else _json.dumps(event_payload, ensure_ascii=False)
-        )
-        return f"[event] {event_name}: {details}"
-    if kind == "anchor":
-        state = payload.get("state") or {}
-        summary = state.get("summary", "") if isinstance(state, dict) else ""
-        return f"[anchor_summary] {summary}".strip()
-    return ""
-
-
-def _build_history_messages(
-    tape: object,
-    token_budget: int,
-    query: str = "",
-    tape_store: object | None = None,
-    memory_store: object | None = None,
-) -> list[ModelMessage]:
-    """Build history context messages from a Tape.
-
-    Three sections (all sharing token_budget):
-    1. Anchor summary → system message
-    2. BM25 cross-anchor recall → [relevant_history] system message
-    3. Recent entries since anchor → user/assistant messages
-    """
-    messages: list[ModelMessage] = []
-
-    last_anchor = getattr(tape, "last_anchor", None)
-    if last_anchor is None:
-        return messages
-    anchor = last_anchor()
-    budget_remaining = max(0, int(token_budget))
-
-    chat_id = getattr(tape, "chat_id", "")
-    if memory_store is not None and chat_id:
-        load_assistant_profile = getattr(memory_store, "load_assistant_profile", None)
-        if callable(load_assistant_profile):
-            assistant_profile = str(load_assistant_profile() or "").strip()
-            if assistant_profile:
-                profile_text = "[Assistant Profile]\n" + assistant_profile
-                profile_cost = max(1, _estimate_token_count(profile_text))
-                if budget_remaining >= profile_cost:
-                    messages.append(ModelMessage(role="system", content=profile_text))
-                    budget_remaining -= profile_cost
-        memory_messages = _build_context_view_messages(
-            memory_store=memory_store,
-            chat_id=chat_id,
-            query=query,
-        )
-        for message in memory_messages:
-            cost = max(1, _estimate_token_count(message.content))
-            if budget_remaining < cost:
-                continue
-            messages.append(message)
-            budget_remaining -= cost
-
-    # 1. Anchor summary → system message (with structured fields if available)
-    if anchor is not None:
-        state = anchor.payload.get("state", {})
-        summary = state.get("summary", "") if isinstance(state, dict) else ""
-        if summary:
-            parts = [f"[conversation_context]\n{summary}"]
-            entities = state.get("entities")
-            if entities and isinstance(entities, list):
-                parts.append(f"key_entities: {', '.join(entities)}")
-            intent = state.get("user_intent")
-            if intent:
-                parts.append(f"user_intent: {intent}")
-            pending = state.get("pending")
-            if pending:
-                parts.append(f"pending: {pending}")
-            next_steps = state.get("next_steps")
-            if next_steps and isinstance(next_steps, list):
-                parts.append(
-                    f"next_steps: {', '.join(str(item) for item in next_steps)}"
-                )
-            open_questions = state.get("open_questions")
-            if open_questions and isinstance(open_questions, list):
-                parts.append(
-                    f"open_questions: {', '.join(str(item) for item in open_questions)}"
-                )
-            decisions = state.get("decisions")
-            if decisions and isinstance(decisions, list):
-                parts.append(f"decisions: {', '.join(str(item) for item in decisions)}")
-            artifacts = state.get("artifacts")
-            if artifacts and isinstance(artifacts, list):
-                parts.append(f"artifacts: {', '.join(str(item) for item in artifacts)}")
-            anchor_text = "\n".join(parts)
-            anchor_cost = len(anchor_text) // 3
-            if budget_remaining >= anchor_cost:
-                messages.append(ModelMessage(role="system", content=anchor_text))
-                budget_remaining -= anchor_cost
-
-    # Collect recent entries (for both section 2 exclusion and section 3)
-    entries_since = getattr(tape, "entries_since_anchor", None)
-    if entries_since is None:
-        return messages
-
-    recent = entries_since()
-    msg_entries = [e for e in recent if e.kind == "message"]
-    recent_state_entries = [e for e in recent if e.kind in {"tool_result", "event"}]
-    # Exclude the last user message (it's the current turn, added by executor)
-    if msg_entries and msg_entries[-1].payload.get("role") == "user":
-        msg_entries = msg_entries[:-1]
-
-    # 2. BM25 cross-anchor recall — search for relevant entries before the anchor
-    search_fn = getattr(tape_store, "search_relevant", None) if tape_store else None
-    chat_id = getattr(tape, "chat_id", None)
-    if search_fn and chat_id and query:
-        recent_ids = {e.entry_id for e in recent}
-        recall_budget = budget_remaining // 4  # Reserve up to 25% for recall
-        try:
-            recalled = search_fn(chat_id, query, limit=5, exclude_ids=recent_ids)
-        except Exception:
-            recalled = []
-
-        if recalled:
-            recall_lines: list[str] = []
-            recall_tokens = 0
-            for entry in recalled:
-                est = max(1, int(entry.token_estimate))
-                if recall_tokens + est > recall_budget:
-                    break
-                line = _history_entry_text(entry)
-                if not line:
-                    continue
-                recall_lines.append(line)
-                recall_tokens += est
-            if recall_lines:
-                messages.append(
-                    ModelMessage(
-                        role="system",
-                        content="[relevant_history]\n" + "\n".join(recall_lines),
-                    )
-                )
-                budget_remaining -= recall_tokens
-
-    # 2.5. Recent non-message execution state (tool results / failed events)
-    if recent_state_entries and budget_remaining > 0:
-        state_lines: list[str] = []
-        state_tokens = 0
-        for entry in recent_state_entries[-5:]:
-            if entry.kind == "event" and entry.payload.get("event") not in {
-                "failed",
-                "dead_lettered",
-                "stalled",
-            }:
-                continue
-            line = _history_entry_text(entry)
-            if not line:
-                continue
-            est = max(1, int(entry.token_estimate))
-            if state_tokens + est > max(1, budget_remaining // 3):
-                continue
-            state_lines.append(line)
-            state_tokens += est
-        if state_lines:
-            messages.append(
-                ModelMessage(
-                    role="system",
-                    content="[近期执行状态]\n" + "\n".join(state_lines),
-                )
-            )
-            budget_remaining -= state_tokens
-
-    # 3. Recent entries → hybrid recency+relevance scoring
-    if msg_entries and query:
-        kws = _extract_keywords(query)
-    else:
-        kws = []
-
-    n = len(msg_entries)
-    scored_entries: list[tuple[float, int, object]] = []
-    for idx, entry in enumerate(msg_entries):
-        # Recency: linear 0→1, most recent = 1.0
-        recency = (idx + 1) / n if n else 0.0
-        # Relevance: fraction of keywords found in content
-        if kws:
-            content = entry.payload.get("content", "")
-            hits = sum(1 for kw in kws if kw in content)
-            relevance = hits / len(kws)
-        else:
-            relevance = 0.0
-        # Weighted blend: recency dominates (0.6) to preserve conversation flow
-        score = 0.6 * recency + 0.4 * relevance
-        scored_entries.append((score, idx, entry))
-
-    # Sort by score descending, greedily pick within budget
-    scored_entries.sort(key=lambda x: x[0], reverse=True)
-    picked_indices: set[int] = set()
-    for score, idx, entry in scored_entries:
-        if budget_remaining <= 0:
-            break
-        est = max(1, int(entry.token_estimate))
-        if est > budget_remaining:
-            continue
-        budget_remaining -= est
-        picked_indices.add(idx)
-
-    # Emit in original chronological order
-    for idx, entry in enumerate(msg_entries):
-        if idx in picked_indices:
-            messages.append(
-                ModelMessage(
-                    role=entry.payload["role"],
-                    content=entry.payload["content"],
-                )
-            )
-
-    return messages
