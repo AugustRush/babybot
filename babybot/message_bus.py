@@ -890,7 +890,17 @@ class MessageBus:
                     )
 
                 if has_card and response.media_paths:
-                    # Media must always be sent as separate messages.
+                    # Media must always be sent as separate messages. If the
+                    # final text was not patched into the card, send it first
+                    # as its own message so attachments do not swallow the
+                    # textual conclusion.
+                    if not card_patched and final_text != interactive_last_sent_text:
+                        await channel.send_response(
+                            msg.chat_id,
+                            TaskResponse(text=final_text),
+                            sender_id=msg.sender_id,
+                            metadata=msg.metadata,
+                        )
                     await channel.send_response(
                         msg.chat_id,
                         TaskResponse(text="", media_paths=list(response.media_paths)),

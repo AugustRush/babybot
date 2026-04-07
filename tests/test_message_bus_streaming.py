@@ -150,6 +150,38 @@ class _StreamingProgressEventOrchestrator:
         return TaskResponse(text="最终结果")
 
 
+class _StreamingProgressWithMediaOrchestrator:
+    async def process_task(
+        self,
+        user_input: str,
+        chat_key: str = "",
+        heartbeat: Any = None,
+        media_paths: list[str] | None = None,
+        stream_callback: Any = None,
+        runtime_event_callback: Any = None,
+    ) -> TaskResponse:
+        del user_input, chat_key, heartbeat, media_paths
+        if stream_callback is not None:
+            await stream_callback("处理中")
+            await stream_callback("处理中，请稍候")
+        if runtime_event_callback is not None:
+            await runtime_event_callback({
+                "flow_id": "flow-1",
+                "task_id": "task-1",
+                "event": "progress",
+                "payload": {
+                    "resource_id": "skill.weather",
+                    "description": "先查询杭州天气",
+                    "status": "查询天气",
+                    "progress": 0.5,
+                },
+            })
+        return TaskResponse(
+            text="最终总结",
+            media_paths=["/tmp/a.png", "/tmp/b.png"],
+        )
+
+
 class _InteractiveStreamingOrchestrator:
     async def process_task(
         self,
@@ -499,6 +531,39 @@ def test_message_bus_merges_runtime_progress_into_single_stream_card_for_feishu(
     assert "先查询杭州天气" in channel.patched[-1]
     assert len(channel.sent) == 1
     assert channel.sent[0].text == "最终结果"
+
+
+def test_message_bus_keeps_final_text_when_stream_card_response_also_has_media() -> None:
+    channel = _FakeFeishuChannel(stream_reply=True)
+    bus = MessageBus(
+        config=_Config(),  # type: ignore[arg-type]
+        orchestrator=_StreamingProgressWithMediaOrchestrator(),  # type: ignore[arg-type]
+        channels={"feishu": channel},  # type: ignore[arg-type]
+    )
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_chat_1",
+        content="hello",
+        metadata={},
+    )
+
+    async def _run() -> TaskResponse:
+        await bus.start()
+        try:
+            return await bus.enqueue_and_wait(msg, timeout=3)
+        finally:
+            await bus.stop()
+
+    response = asyncio.run(_run())
+
+    assert response.text == "最终总结"
+    assert response.media_paths == ["/tmp/a.png", "/tmp/b.png"]
+    assert len(channel.sent) == 2
+    assert channel.sent[0].text == "最终总结"
+    assert channel.sent[0].media_paths == []
+    assert channel.sent[1].text == ""
+    assert channel.sent[1].media_paths == ["/tmp/a.png", "/tmp/b.png"]
 
 
 def test_message_bus_stream_card_title_shows_completed_count_while_still_running() -> None:
