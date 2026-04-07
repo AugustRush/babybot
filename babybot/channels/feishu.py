@@ -50,6 +50,19 @@ from .feishu_content_extractor import (
     _extract_share_card_content,
 )
 
+# ── Card / markdown builder helpers ──────────────────────────────────
+
+from .feishu_card_builder import (
+    _build_card_elements,
+    _build_single_stream_card,
+    _detect_msg_format,
+    _markdown_to_post,
+    _normalize_markdown_images,
+    _parse_md_table,
+    _split_elements_by_table_limit,
+    _split_headings,
+)
+
 
 # ── FeishuChannel ────────────────────────────────────────────────────
 
@@ -93,33 +106,6 @@ class FeishuChannel(BaseChannel):
         if file_type in {"opus", "mp4"}:
             return "media"
         return "file"
-
-    # Regex patterns for smart format detection and card building
-    _TABLE_RE = re.compile(
-        r"((?:^[ \t]*\|.+\|[ \t]*\n)(?:^[ \t]*\|[-:\s|]+\|[ \t]*\n)(?:^[ \t]*\|.+\|[ \t]*\n?)+)",
-        re.MULTILINE,
-    )
-    _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
-    _CODE_BLOCK_RE = re.compile(r"(```[\s\S]*?```)", re.MULTILINE)
-    _COMPLEX_MD_RE = re.compile(
-        r"```"
-        r"|^\|.+\|.*\n\s*\|[-:\s|]+\|"
-        r"|^#{1,6}\s+",
-        re.MULTILINE,
-    )
-    _SIMPLE_MD_RE = re.compile(
-        r"\*\*.+?\*\*"
-        r"|__.+?__"
-        r"|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"
-        r"|~~.+?~~",
-        re.DOTALL,
-    )
-    _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
-    _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
-    _LIST_RE = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)
-    _OLIST_RE = re.compile(r"^[\s]*\d+\.\s+", re.MULTILINE)
-    _TEXT_MAX_LEN = 200
-    _POST_MAX_LEN = 2000
 
     def __init__(self, config: FeishuConfig, manager: Any):
         super().__init__(config, manager)
@@ -612,145 +598,35 @@ class FeishuChannel(BaseChannel):
 
     @classmethod
     def _detect_msg_format(cls, content: str) -> str:
-        """Determine the optimal Feishu message format for *content*.
-
-        Returns "text", "post", or "interactive".
-        """
-        stripped = content.strip()
-        if cls._COMPLEX_MD_RE.search(stripped):
-            return "interactive"
-        if len(stripped) > cls._POST_MAX_LEN:
-            return "interactive"
-        if cls._SIMPLE_MD_RE.search(stripped):
-            return "interactive"
-        if cls._LIST_RE.search(stripped) or cls._OLIST_RE.search(stripped):
-            return "interactive"
-        if cls._MD_LINK_RE.search(stripped):
-            return "post"
-        if len(stripped) <= cls._TEXT_MAX_LEN:
-            return "text"
-        return "post"
+        return _detect_msg_format(content)
 
     @classmethod
     def _markdown_to_post(cls, content: str) -> str:
-        """Convert markdown content to Feishu post message JSON."""
-        lines = content.strip().split("\n")
-        paragraphs: list[list[dict]] = []
-        for line in lines:
-            elements: list[dict] = []
-            last_end = 0
-            for m in cls._MD_LINK_RE.finditer(line):
-                before = line[last_end : m.start()]
-                if before:
-                    elements.append({"tag": "text", "text": before})
-                elements.append({"tag": "a", "text": m.group(1), "href": m.group(2)})
-                last_end = m.end()
-            remaining = line[last_end:]
-            if remaining:
-                elements.append({"tag": "text", "text": remaining})
-            if not elements:
-                elements.append({"tag": "text", "text": ""})
-            paragraphs.append(elements)
-        post_body = {"zh_cn": {"content": paragraphs}}
-        return json.dumps(post_body, ensure_ascii=False)
+        return _markdown_to_post(content)
 
-    @classmethod
-    def _normalize_markdown_images(cls, content: str) -> str:
-        """Replace markdown image syntax to plain link text for Feishu compatibility."""
-
-        def _replace(match: re.Match[str]) -> str:
-            alt = (match.group(1) or "图片").strip() or "图片"
-            url = (match.group(2) or "").strip()
-            if url:
-                return f"[{alt}]({url})"
-            return alt
-
-        return cls._MD_IMAGE_RE.sub(_replace, content or "")
+    @staticmethod
+    def _normalize_markdown_images(content: str) -> str:
+        return _normalize_markdown_images(content)
 
     # ── Card building ────────────────────────────────────────────────
 
     @staticmethod
     def _parse_md_table(table_text: str) -> dict | None:
-        """Parse a markdown table into a Feishu table element."""
-        lines = [
-            _line.strip() for _line in table_text.strip().split("\n") if _line.strip()
-        ]
-        if len(lines) < 3:
-            return None
+        return _parse_md_table(table_text)
 
-        def split(_line: str) -> list[str]:
-            return [c.strip() for c in _line.strip("|").split("|")]
-
-        headers = split(lines[0])
-        rows = [split(_line) for _line in lines[2:]]
-        columns = [
-            {"tag": "column", "name": f"c{i}", "display_name": h, "width": "auto"}
-            for i, h in enumerate(headers)
-        ]
-        return {
-            "tag": "table",
-            "page_size": len(rows) + 1,
-            "columns": columns,
-            "rows": [
-                {f"c{i}": r[i] if i < len(r) else "" for i in range(len(headers))}
-                for r in rows
-            ],
-        }
-
-    def _build_card_elements(self, content: str) -> list[dict]:
-        """Split content into div/markdown + table elements for Feishu card."""
-        elements: list[dict] = []
-        last_end = 0
-        for m in self._TABLE_RE.finditer(content):
-            before = content[last_end : m.start()]
-            if before.strip():
-                elements.extend(self._split_headings(before))
-            elements.append(
-                self._parse_md_table(m.group(1))
-                or {"tag": "markdown", "content": m.group(1)}
-            )
-            last_end = m.end()
-        remaining = content[last_end:]
-        if remaining.strip():
-            elements.extend(self._split_headings(remaining))
-        return elements or [{"tag": "markdown", "content": content}]
+    @staticmethod
+    def _build_card_elements(content: str) -> list[dict]:
+        return _build_card_elements(content)
 
     @staticmethod
     def _split_elements_by_table_limit(
         elements: list[dict], max_tables: int = 1
     ) -> list[list[dict]]:
-        """Split card elements into groups with at most *max_tables* table each.
+        return _split_elements_by_table_limit(elements, max_tables)
 
-        Feishu cards have a hard limit of one table per card (API error 11310).
-        """
-        if not elements:
-            return [[]]
-        groups: list[list[dict]] = []
-        current: list[dict] = []
-        table_count = 0
-        for el in elements:
-            if el.get("tag") == "table":
-                if table_count >= max_tables:
-                    if current:
-                        groups.append(current)
-                    current = []
-                    table_count = 0
-                current.append(el)
-                table_count += 1
-            else:
-                current.append(el)
-        if current:
-            groups.append(current)
-        return groups or [[]]
-
-    def _build_single_stream_card(self, content: str) -> str | None:
-        """Build one interactive-card payload suitable for message patch."""
-        elements = self._build_card_elements(content)
-        chunks = self._split_elements_by_table_limit(elements)
-        if len(chunks) != 1:
-            return None
-        card = {"config": {"wide_screen_mode": True}, "elements": chunks[0]}
-        return json.dumps(card, ensure_ascii=False)
+    @staticmethod
+    def _build_single_stream_card(content: str) -> str | None:
+        return _build_single_stream_card(content)
 
     def _resolve_receive_target(
         self,
@@ -810,40 +686,9 @@ class FeishuChannel(BaseChannel):
             )
         )
 
-    def _split_headings(self, content: str) -> list[dict]:
-        """Split content by headings, converting headings to div elements."""
-        protected = content
-        code_blocks: list[str] = []
-        for m in self._CODE_BLOCK_RE.finditer(content):
-            code_blocks.append(m.group(1))
-            protected = protected.replace(
-                m.group(1), f"\x00CODE{len(code_blocks) - 1}\x00", 1
-            )
-
-        elements: list[dict] = []
-        last_end = 0
-        for m in self._HEADING_RE.finditer(protected):
-            before = protected[last_end : m.start()].strip()
-            if before:
-                elements.append({"tag": "markdown", "content": before})
-            text = m.group(2).strip()
-            elements.append(
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": f"**{text}**"},
-                }
-            )
-            last_end = m.end()
-        remaining = protected[last_end:].strip()
-        if remaining:
-            elements.append({"tag": "markdown", "content": remaining})
-
-        for i, cb in enumerate(code_blocks):
-            for el in elements:
-                if el.get("tag") == "markdown":
-                    el["content"] = el["content"].replace(f"\x00CODE{i}\x00", cb)
-
-        return elements or [{"tag": "markdown", "content": content}]
+    @staticmethod
+    def _split_headings(content: str) -> list[dict]:
+        return _split_headings(content)
 
     # ── Reply (outbound) ─────────────────────────────────────────────
 
