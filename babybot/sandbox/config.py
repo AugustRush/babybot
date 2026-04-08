@@ -78,8 +78,8 @@ class SandboxConfig:
     cpu_limit_seconds: int = 300
     # macOS: RLIMIT_AS doesn't work reliably; use RLIMIT_RSS instead
     memory_limit_mb: int = 512
-    max_file_descriptors: int = 256
-    max_child_processes: int = 64
+    max_file_descriptors: int = 1024
+    max_child_processes: int = 256
 
     # Legacy regex checks: kept as a *supplementary* fallback alongside AST
     legacy_regex_enabled: bool = True

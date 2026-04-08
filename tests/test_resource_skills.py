@@ -1439,6 +1439,222 @@ def test_run_subagent_task_result_relocates_external_pdf_artifacts_from_final_ou
     assert relocated.read_bytes() == b"%PDF-1.4"
 
 
+def test_after_tool_call_hook_extracts_media_from_workspace_tool_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The after_tool_call hook should detect media paths in workspace tool output
+    text even when the tool has collect_artifacts=False (e.g. _workspace_execute_shell_command)."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / "report.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_hook_media",
+        default=str(output_dir),
+    )
+    manager._get_output_dir = lambda: output_dir
+    manager._build_task_lease = lambda lease: ToolLease()
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+
+    from babybot.agent_kernel.tools import ToolResult as AgentToolResult
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del task
+            # Simulate a workspace tool that generates a PDF but has
+            # collect_artifacts=False — it returns no artifacts.
+            # The after_tool_call hook should detect the path in the
+            # tool output content.
+            fake_result = AgentToolResult(
+                ok=True,
+                content=f'{{"ok": true, "stdout": "Converted to {pdf_path.resolve()}", "stderr": ""}}',
+                artifacts=[],
+            )
+            hook = context.after_tool_call
+            if callable(hook):
+                hook(
+                    "_workspace_execute_shell_command",
+                    {"command": "wkhtmltopdf input.html output.pdf"},
+                    fake_result,
+                    context,
+                )
+            return TaskResult(task_id="worker", status="succeeded", output="done")
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    result = asyncio.run(manager.run_subagent_task_result("generate pdf"))
+
+    assert result.status == "succeeded"
+    assert len(result.artifacts) >= 1
+    # The PDF path should be extracted by the hook
+    assert str(pdf_path.resolve()) in result.artifacts
+
+
+def test_write_root_scoped_hook_catches_any_extension_in_output_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Files mentioned in tool output that exist inside write_root are collected
+    as artifacts regardless of extension — no regex extension list needed."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # Create a file with a non-standard extension inside write_root
+    custom_file = output_dir / "result.custom_ext"
+    custom_file.write_text("custom data")
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager.registry = __import__(
+        "babybot.agent_kernel", fromlist=["ToolRegistry"]
+    ).ToolRegistry()
+    manager.groups = {}
+    manager.skills = {}
+    manager._shared_gateway = object()
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_any_ext",
+        default=str(output_dir),
+    )
+    manager._get_output_dir = lambda: output_dir
+    manager._build_task_lease = lambda lease: ToolLease()
+    manager._build_worker_sys_prompt = lambda **kwargs: "sys"
+    manager.get_shared_gateway = lambda: object()
+
+    async def _select_skill_packs(task_description: str, skill_ids=None):
+        del task_description, skill_ids
+        return []
+
+    manager._select_skill_packs = _select_skill_packs
+
+    from babybot.agent_kernel.tools import ToolResult as AgentToolResult
+
+    class _FakeExecutor:
+        async def execute(self, task, context):
+            del task
+            # Simulate shell command output mentioning a file with
+            # non-standard extension inside write_root.
+            fake_result = AgentToolResult(
+                ok=True,
+                content=f'{{"ok": true, "stdout": "Saved to {custom_file.resolve()}"}}',
+                artifacts=[],
+            )
+            hook = context.after_tool_call
+            if callable(hook):
+                hook("_workspace_execute_shell_command", {}, fake_result, context)
+            return TaskResult(task_id="worker", status="succeeded", output="done")
+
+    monkeypatch.setattr(
+        "babybot.resource.create_worker_executor",
+        lambda **kwargs: _FakeExecutor(),
+    )
+
+    result = asyncio.run(manager.run_subagent_task_result("generate stuff"))
+
+    assert result.status == "succeeded"
+    # The custom-extension file inside write_root should be collected
+    assert str(custom_file.resolve()) in result.artifacts
+
+
+def test_after_tool_call_hook_skips_tools_with_existing_artifacts(
+    tmp_path: Path,
+) -> None:
+    """When a tool already returned artifacts, the hook should skip extraction."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_hook_skip",
+        default=str(output_dir),
+    )
+    manager._get_output_dir = lambda: output_dir
+
+    runtime = ResourceSubagentRuntime(manager)
+    ctx = runtime.build_execution_context("test-agent")
+
+    from babybot.agent_kernel.tools import ToolResult as AgentToolResult
+
+    # Tool already has artifacts — hook should not add more
+    fake_result = AgentToolResult(
+        ok=True,
+        content=f"File saved to {output_dir / 'existing.pdf'}",
+        artifacts=[str(output_dir / "existing.pdf")],
+    )
+    hook = ctx.after_tool_call
+    assert callable(hook)
+    hook("some_skill_tool", {}, fake_result, ctx)
+
+    # No extra paths added; the hook should have short-circuited
+    collected = ctx.state.get("media_paths_collected", [])
+    assert collected == []
+
+
+def test_after_tool_call_hook_ignores_failed_tool_results(
+    tmp_path: Path,
+) -> None:
+    """The hook should not extract media from failed tool results."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / "report.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    manager = object.__new__(ResourceManager)
+    manager.config = SimpleNamespace(
+        system=SimpleNamespace(context_history_tokens=2000),
+        workspace_dir=tmp_path,
+    )
+    manager._active_write_root = contextvars.ContextVar(
+        "active_write_root_test_hook_fail",
+        default=str(output_dir),
+    )
+    manager._get_output_dir = lambda: output_dir
+
+    runtime = ResourceSubagentRuntime(manager)
+    ctx = runtime.build_execution_context("test-agent")
+
+    from babybot.agent_kernel.tools import ToolResult as AgentToolResult
+
+    fake_result = AgentToolResult(
+        ok=False,
+        error=f"Tool error: failed to create {pdf_path.resolve()}",
+    )
+    hook = ctx.after_tool_call
+    assert callable(hook)
+    hook("_workspace_execute_shell_command", {}, fake_result, ctx)
+
+    collected = ctx.state.get("media_paths_collected", [])
+    assert collected == []
+
+
 def test_run_subagent_task_propagates_channel_context_to_worker_context(
     tmp_path: Path,
     monkeypatch,

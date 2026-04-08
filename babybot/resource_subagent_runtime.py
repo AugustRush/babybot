@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 import time
+from pathlib import Path
 from typing import Any
 
 from .agent_kernel import (
@@ -16,6 +18,10 @@ from .agent_kernel.lease_utils import filter_tool_lease, merge_tool_leases
 from .resource_protocols import SubagentHost
 
 logger = logging.getLogger(__name__)
+
+# Matches absolute paths (starting with /) in prose text.
+# No extension allow-list — any file that actually exists on disk qualifies.
+_ABS_PATH_RE = re.compile(r"(?:^|[\s'\"`(:：=])((?:/[\w.+\-]+)+)")
 
 
 class ResourceSubagentRuntime:
@@ -63,6 +69,81 @@ class ResourceSubagentRuntime:
             for pack in skill_packs
         ]
 
+    def _make_after_tool_call_hook(self, write_root: Path) -> Any:
+        """Create an after_tool_call hook that extracts file paths from tool outputs.
+
+        Workspace tools (``_workspace_write_text_file``,
+        ``_workspace_execute_shell_command``, etc.) have
+        ``collect_artifacts=False``, so files they produce are not
+        automatically tracked.  This hook scans tool output text for
+        **any** absolute file path that:
+
+        1. Actually exists on disk, and
+        2. Lives inside the *write_root* directory.
+
+        This is extension-agnostic — no regex extension list to maintain.
+        Only files the tool explicitly mentioned in its output are collected,
+        so intermediate/temp files the tool didn't report are excluded.
+        """
+        owner = self._owner
+        resolved_root = write_root.resolve()
+
+        def _after_tool_call(
+            tool_name: str,
+            args: Any,
+            result: Any,
+            context: ExecutionContext,
+        ) -> None:
+            if result is None:
+                return
+            if not getattr(result, "ok", False):
+                return
+            # If the tool already returned artifacts, the executor's
+            # _collect_media already handled them — skip.
+            if getattr(result, "artifacts", None):
+                return
+            content = getattr(result, "content", "") or ""
+            if not content:
+                return
+
+            # First try the owner's existing regex-based extraction
+            # (handles known extensions like .pdf, .png etc.)
+            found: list[str] = []
+            try:
+                found = owner._extract_media_from_text(content)
+            except Exception:
+                pass
+
+            # Then scan for any absolute path that exists on disk
+            # inside write_root — extension-agnostic.
+            for match in _ABS_PATH_RE.finditer(content):
+                candidate = match.group(1).rstrip(".,;:!?)")
+                try:
+                    resolved = Path(candidate).resolve()
+                except (OSError, ValueError):
+                    continue
+                try:
+                    if not resolved.is_file():
+                        continue
+                    if not str(resolved).startswith(str(resolved_root)):
+                        continue
+                except OSError:
+                    continue
+                path_str = str(resolved)
+                if path_str not in found:
+                    found.append(path_str)
+
+            if not found:
+                return
+            bucket: list[str] = context.state.setdefault("media_paths_collected", [])
+            existing = set(bucket)
+            for path in found:
+                if path and path not in existing:
+                    bucket.append(path)
+                    existing.add(path)
+
+        return _after_tool_call
+
     def build_execution_context(
         self,
         agent_name: str,
@@ -102,6 +183,9 @@ class ResourceSubagentRuntime:
                 ]
                 if value is not None
             },
+            after_tool_call=self._make_after_tool_call_hook(
+                self._owner._get_output_dir()
+            ),
         )
 
     async def run_subagent_task(

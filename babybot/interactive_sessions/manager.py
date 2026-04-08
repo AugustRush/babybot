@@ -131,7 +131,9 @@ class InteractiveSessionManager:
             mode=session.mode,
             runtime_root=session.runtime_root,
             process_pid=session.process_pid,
-            last_error=str(getattr(session.handle, "last_error", "") or session.last_error),
+            last_error=str(
+                getattr(session.handle, "last_error", "") or session.last_error
+            ),
             backend_status=backend_status,
         )
 
@@ -202,6 +204,17 @@ class InteractiveSessionManager:
             return False
         if self._is_expired(session):
             self._sessions.pop(chat_key, None)
+            # Stop the backend process to prevent orphaned subprocesses.
+            backend = self._backends.get(session.backend_name)
+            if backend is not None:
+                try:
+                    import asyncio as _aio
+
+                    loop = _aio.get_running_loop()
+                    loop.create_task(backend.stop(session.handle, reason="expired"))
+                except RuntimeError:
+                    # No running event loop — best-effort sync cleanup.
+                    pass
             lock = self._locks.get(chat_key)
             if lock is not None:
                 self._prune_lock(chat_key, lock)

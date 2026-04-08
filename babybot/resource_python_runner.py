@@ -345,6 +345,11 @@ class ExternalPythonRunner:
                     with contextlib.suppress(Exception):
                         await proc.communicate()
                     raise RuntimeError(f"CLI tool timeout after {timeout_s}s")
+                except Exception:
+                    proc.kill()
+                    with contextlib.suppress(Exception):
+                        await proc.communicate()
+                    raise
                 out_text = (stdout or b"").decode("utf-8", errors="ignore").strip()
                 err_text = (stderr or b"").decode("utf-8", errors="ignore").strip()
                 if proc.returncode != 0:
@@ -473,6 +478,11 @@ class ExternalPythonRunner:
                 except Exception:
                     pass
                 return f"Tool error: execution timeout after {timeout_s}s."
+            except Exception:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.communicate()
+                raise
 
             out_text = (stdout or b"").decode("utf-8", errors="ignore")
             err_text = (stderr or b"").decode("utf-8", errors="ignore")
