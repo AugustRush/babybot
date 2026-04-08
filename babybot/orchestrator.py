@@ -33,7 +33,10 @@ from .execution_outcome import (
     compute_policy_reward,
     summarize_task_results,
 )
-from .feedback_events import normalize_runtime_feedback_event, runtime_event_primary_label
+from .feedback_events import (
+    normalize_runtime_feedback_event,
+    runtime_event_primary_label,
+)
 from .memory_store import HybridMemoryStore
 from .heartbeat import TaskHeartbeatRegistry
 from .interactive_sessions import InteractiveSessionManager
@@ -42,8 +45,14 @@ from .interactive_sessions.types import InteractiveOutputCallback
 from .model_gateway import OpenAICompatibleGateway
 from .orchestration_policy import ConservativePolicySelector, build_policy_state_bucket
 from .orchestration_policy_store import OrchestrationPolicyStore
+from .orchestrator_command_dispatch import CommandDispatch
+from .orchestrator_handoff import HandoffManager
+from .orchestrator_inspect import InspectService
 from .orchestrator_interactive_support import OrchestratorInteractiveSessionSupport
+from .orchestrator_policy_engine import PolicyEngine
+from .orchestrator_routing_cascade import RoutingCascade
 from .orchestrator_runtime_support import OrchestratorRuntimeSupport
+from .orchestration_routing_result import RoutingResult
 from .orchestration_router import (
     RoutingDecision,
     build_routing_intent_bucket,
@@ -141,15 +150,56 @@ class OrchestratorAgent:
         )
         self._child_task_bus = InMemoryChildTaskBus()
         self._task_heartbeat_registry = TaskHeartbeatRegistry()
-        self._handoff_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._init_lock = asyncio.Lock()
         self._initialized = False
-        self._recent_flow_ids_by_chat: OrderedDict[str, str] = OrderedDict()
-        self._recent_flows_by_chat: OrderedDict[str, list[str]] = OrderedDict()
-        self._recent_policy_decisions_by_flow: OrderedDict[
-            str, list[dict[str, Any]]
-        ] = OrderedDict()
         self._background_tasks: set[asyncio.Task[Any]] = set()
+
+        # ── Service layer (single-responsibility components) ─────────────
+        self._inspect_service = InspectService(
+            policy_store=self._policy_store,
+            tape_store=self.tape_store,
+            memory_store=self.memory_store,
+            heartbeat_registry=self._task_heartbeat_registry,
+            child_task_bus=self._child_task_bus,
+        )
+        self._policy_engine = PolicyEngine(
+            config=self.config,
+            policy_store=self._policy_store,
+            inspect_service=self._inspect_service,
+        )
+        self._handoff_manager = HandoffManager(
+            gateway=self.gateway,
+            tape_store=self.tape_store,
+            memory_store=self.memory_store,
+            compact_threshold=self.config.system.context_compact_threshold,
+        )
+        self._routing_cascade = RoutingCascade(
+            policy_engine=self._policy_engine,
+            policy_store=self._policy_store,
+            gateway=self.gateway,
+            config=self.config,
+        )
+
+        # ── Command dispatch service ──────────────────────────────────────
+        self._command_dispatch = CommandDispatch(
+            inspect_service=self._inspect_service,
+            policy_store=self._policy_store,
+            job_store=self._runtime_job_store,
+            process_task_fn=self.process_task,
+            runtime_support_fn=self._get_runtime_support,
+            interactive_support_fn=self._get_interactive_support,
+            response_factory=TaskResponse,
+        )
+
+        # Backwards-compatibility shims: keep these attributes pointing at
+        # the data owned by InspectService so any code still referencing
+        # self._recent_flow_ids_by_chat etc. continues to work during the
+        # incremental migration.
+        self._recent_flow_ids_by_chat = self._inspect_service._recent_flow_ids_by_chat
+        self._recent_flows_by_chat = self._inspect_service._recent_flows_by_chat
+        self._recent_policy_decisions_by_flow = (
+            self._inspect_service._recent_policy_decisions_by_flow
+        )
 
     def _build_interactive_session_manager(self) -> InteractiveSessionManager:
         return InteractiveSessionManager(
@@ -162,6 +212,14 @@ class OrchestratorAgent:
         )
 
     def _get_runtime_support(self) -> OrchestratorRuntimeSupport:
+        handoff_fn = None
+        hm = getattr(self, "_handoff_manager", None)
+        if hm is not None:
+            handoff_fn = hm.maybe_handoff
+        else:
+            maybe_handoff_method = getattr(self, "_maybe_handoff", None)
+            if callable(maybe_handoff_method):
+                handoff_fn = maybe_handoff_method
         return OrchestratorRuntimeSupport(
             config=self.config,
             tape_store=getattr(self, "tape_store", None),
@@ -169,7 +227,7 @@ class OrchestratorAgent:
             runtime_job_store=getattr(self, "_runtime_job_store", None),
             invoke_callback=self._invoke_callback,
             spawn_background_task=self._spawn_background_task,
-            maybe_handoff=self._maybe_handoff,
+            maybe_handoff=handoff_fn,
         )
 
     def _get_interactive_support(self) -> OrchestratorInteractiveSessionSupport:
@@ -204,27 +262,62 @@ class OrchestratorAgent:
         return False
 
     def _remember_flow_id(self, chat_key: str, flow_id: str) -> None:
-        recent_flow_ids_by_chat = self._ensure_ordered_mapping(
-            getattr(self, "_recent_flow_ids_by_chat", OrderedDict())
-        )
-        self._recent_flow_ids_by_chat = recent_flow_ids_by_chat
-        recent_flows_by_chat = self._ensure_ordered_mapping(
-            getattr(self, "_recent_flows_by_chat", OrderedDict())
-        )
-        self._recent_flows_by_chat = recent_flows_by_chat
-        recent_flow_ids_by_chat.pop(chat_key, None)
-        recent_flow_ids_by_chat[chat_key] = flow_id
-        while len(recent_flow_ids_by_chat) > self._FLOW_CACHE_LIMIT:
-            recent_flow_ids_by_chat.popitem(last=False)
-        history = [
-            item
-            for item in recent_flows_by_chat.get(chat_key, [])
-            if item != flow_id
-        ]
-        history.insert(0, flow_id)
-        recent_flows_by_chat[chat_key] = history[:5]
-        while len(recent_flows_by_chat) > self._FLOW_CACHE_LIMIT:
-            recent_flows_by_chat.popitem(last=False)
+        svc = self._get_or_create_inspect_service()
+        if svc is not None:
+            svc.record_flow(chat_key, flow_id)
+
+    def _remember_flow_policy_decisions(
+        self,
+        flow_id: str,
+        events: list[dict[str, Any]],
+    ) -> None:
+        svc = self._get_or_create_inspect_service()
+        if svc is not None:
+            svc.record_policy_decisions(flow_id, events)
+
+    def _spawn_background_task(
+        self,
+        coro: Awaitable[Any],
+        *,
+        label: str,
+    ) -> asyncio.Task[Any]:
+        if not hasattr(self, "_background_tasks") or self._background_tasks is None:
+            self._background_tasks = set()
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Background task failed: %s", label)
+
+        task.add_done_callback(_on_done)
+        return task
+
+    def _get_handoff_lock(self, chat_key: str) -> asyncio.Lock:
+        """Get per-chat lock for handoff. Delegates to HandoffManager or falls back."""
+        hm = getattr(self, "_handoff_manager", None)
+        if hm is not None:
+            return hm._get_lock(chat_key)
+        # Fallback for partial test doubles: manage locks directly on the agent
+        handoff_locks = getattr(self, "_handoff_locks", None)
+        if not isinstance(handoff_locks, dict):
+            handoff_locks = {}
+            self._handoff_locks = handoff_locks
+        lock = handoff_locks.pop(chat_key, None)
+        if lock is None:
+            lock = asyncio.Lock()
+        handoff_locks[chat_key] = lock
+        # LRU eviction
+        limit = getattr(self, "_HANDOFF_LOCK_LIMIT", 256)
+        while len(handoff_locks) > limit:
+            oldest_key = next(iter(handoff_locks))
+            del handoff_locks[oldest_key]
+        return lock
 
     @staticmethod
     def _build_notebook_completion_summary(
@@ -233,7 +326,9 @@ class OrchestratorAgent:
         final_text: str,
     ) -> dict[str, Any]:
         existing = dict(notebook.completion_summary or {})
-        final_summary = str(existing.get("final_summary", "") or final_text or "").strip()
+        final_summary = str(
+            existing.get("final_summary", "") or final_text or ""
+        ).strip()
         decision_register = list(
             dict.fromkeys(
                 [
@@ -276,7 +371,11 @@ class OrchestratorAgent:
                             f"{node.title}: {node.latest_summary or node.result_text or node.objective}"
                             for node in notebook.nodes.values()
                             if node.node_id != notebook.root_node_id
-                            and str(node.latest_summary or node.result_text or node.objective).strip()
+                            and str(
+                                node.latest_summary
+                                or node.result_text
+                                or node.objective
+                            ).strip()
                         ]
                     )
                     if str(item).strip()
@@ -394,78 +493,49 @@ class OrchestratorAgent:
 
         return collected
 
-    def _get_handoff_lock(self, chat_key: str) -> asyncio.Lock:
-        handoff_locks = self._ensure_ordered_mapping(
-            getattr(self, "_handoff_locks", OrderedDict())
+    def _get_or_create_policy_engine(self) -> PolicyEngine | None:
+        """Returns _policy_engine, auto-creating a minimal one for partial test doubles."""
+        pe = getattr(self, "_policy_engine", None)
+        if pe is not None:
+            return pe
+        config = getattr(self, "config", None)
+        if config is None:
+            return None
+        policy_store = getattr(self, "_policy_store", None)
+        inspect_service = getattr(self, "_inspect_service", None)
+        pe = PolicyEngine(
+            config=config,
+            policy_store=policy_store,
+            inspect_service=inspect_service,
         )
-        self._handoff_locks = handoff_locks
-        lock = handoff_locks.pop(chat_key, None)
-        if lock is None:
-            lock = asyncio.Lock()
-        handoff_locks[chat_key] = lock
-        while len(handoff_locks) > self._HANDOFF_LOCK_LIMIT:
-            handoff_locks.popitem(last=False)
-        return lock
+        self._policy_engine = pe
+        return pe
 
-    def _remember_flow_policy_decisions(
-        self,
-        flow_id: str,
-        events: list[dict[str, Any]],
-    ) -> None:
-        if not flow_id:
-            return
-        policy_decisions_by_flow = self._ensure_ordered_mapping(
-            getattr(self, "_recent_policy_decisions_by_flow", OrderedDict())
+    def _get_or_create_routing_cascade(self) -> RoutingCascade:
+        """Returns _routing_cascade, auto-creating for partial test doubles."""
+        rc = getattr(self, "_routing_cascade", None)
+        if rc is not None:
+            return rc
+        rc = RoutingCascade(
+            policy_engine=self._get_or_create_policy_engine(),
+            policy_store=getattr(self, "_policy_store", None),
+            gateway=self.gateway,
+            config=self.config,
         )
-        self._recent_policy_decisions_by_flow = policy_decisions_by_flow
-        decisions: list[dict[str, Any]] = []
-        for event in events:
-            if event.get("event") != "policy_decision":
-                continue
-            decisions.append(
-                {
-                    "decision_kind": str(event.get("decision_kind", "") or "").strip(),
-                    "action_name": str(event.get("action_name", "") or "").strip(),
-                    "state_bucket": str(event.get("state_bucket", "") or "").strip(),
-                    "explain": str(event.get("explain", "") or "").strip(),
-                }
-            )
-        policy_decisions_by_flow.pop(flow_id, None)
-        policy_decisions_by_flow[flow_id] = decisions
-        while len(policy_decisions_by_flow) > self._FLOW_CACHE_LIMIT:
-            policy_decisions_by_flow.popitem(last=False)
-
-    def _spawn_background_task(
-        self,
-        coro: Awaitable[Any],
-        *,
-        label: str,
-    ) -> asyncio.Task[Any]:
-        if not hasattr(self, "_background_tasks") or self._background_tasks is None:
-            self._background_tasks = set()
-        task = asyncio.create_task(coro)
-        self._background_tasks.add(task)
-
-        def _on_done(done: asyncio.Task[Any]) -> None:
-            self._background_tasks.discard(done)
-            try:
-                done.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("Background task failed: %s", label)
-
-        task.add_done_callback(_on_done)
-        return task
+        self._routing_cascade = rc
+        return rc
 
     def _policy_learning_enabled(self) -> bool:
-        return bool(getattr(self.config.system, "policy_learning_enabled", False))
+        pe = self._get_or_create_policy_engine()
+        return pe.learning_enabled() if pe is not None else False
 
     def _routing_enabled(self) -> bool:
-        return bool(getattr(self.config.system, "routing_enabled", True))
+        pe = self._get_or_create_policy_engine()
+        return pe.routing_enabled() if pe is not None else True
 
     def _reflection_enabled(self) -> bool:
-        return bool(getattr(self.config.system, "reflection_enabled", False))
+        pe = self._get_or_create_policy_engine()
+        return pe.reflection_enabled() if pe is not None else False
 
     @staticmethod
     def _build_policy_state_features(
@@ -473,43 +543,18 @@ class OrchestratorAgent:
         *,
         media_paths: list[str] | None = None,
     ) -> dict[str, Any]:
-        text = str(user_input or "").strip()
-        task_shape = "single_step"
-        if any(token in text for token in ("然后", "再", "并且", "同时", "先")):
-            task_shape = "multi_step"
-        return {
-            "task_shape": task_shape,
-            "input_length": len(text),
-            "has_media": bool(media_paths),
-        }
+        # Kept for backward compat — delegates to PolicyEngine.build_state_features
+        return PolicyEngine.build_state_features(user_input, media_paths=media_paths)
 
     def _record_policy_decision(self, record: PolicyDecisionRecord) -> None:
-        if not self._policy_learning_enabled() or not record.chat_key:
-            return
-        policy_store = getattr(self, "_policy_store", None)
-        if policy_store is None:
-            return
-        policy_store.record_decision(
-            flow_id=record.flow_id,
-            chat_key=record.chat_key,
-            decision_kind=record.decision_kind,
-            action_name=record.action_name,
-            state_features=record.state_features,
-        )
+        pe = self._get_or_create_policy_engine()
+        if pe is not None:
+            pe.record_decision(record)
 
     def _record_policy_outcome(self, record: PolicyOutcomeRecord) -> None:
-        if not self._policy_learning_enabled() or not record.chat_key:
-            return
-        policy_store = getattr(self, "_policy_store", None)
-        if policy_store is None:
-            return
-        policy_store.record_outcome(
-            flow_id=record.flow_id,
-            chat_key=record.chat_key,
-            final_status=record.final_status,
-            reward=record.reward,
-            outcome=record.outcome,
-        )
+        pe = self._get_or_create_policy_engine()
+        if pe is not None:
+            pe.record_outcome(record)
 
     def _select_decomposition_action(
         self,
@@ -517,21 +562,19 @@ class OrchestratorAgent:
         user_input: str,
         media_paths: list[str] | None = None,
     ) -> tuple[str, dict[str, Any], str]:
-        features = self._build_policy_state_features(
-            user_input,
-            media_paths=media_paths,
+        pe = self._get_or_create_policy_engine()
+        if pe is not None:
+            return pe.select_decomposition(
+                user_input=user_input, media_paths=media_paths
+            )
+        features = PolicyEngine.build_state_features(
+            user_input, media_paths=media_paths
         )
-        selector = self._policy_selector()
-        action = selector.choose_decomposition(features=features)
-        return action.name, features, action.hint
+        return "direct", features, ""
 
     @staticmethod
     def _estimate_independent_subtasks(user_input: str) -> int:
-        text = str(user_input or "").strip()
-        count = 1
-        for token in ("同时", "分别", "并行", "并且"):
-            count += text.count(token)
-        return max(1, count)
+        return PolicyEngine.estimate_independent_subtasks(user_input)
 
     def _build_scheduling_state_features(
         self,
@@ -539,21 +582,20 @@ class OrchestratorAgent:
         *,
         media_paths: list[str] | None = None,
     ) -> dict[str, Any]:
-        features = self._build_policy_state_features(
-            user_input,
-            media_paths=media_paths,
-        )
-        features["independent_subtasks"] = self._estimate_independent_subtasks(
-            user_input
-        )
-        return features
+        pe = self._get_or_create_policy_engine()
+        if pe is not None:
+            return pe.build_scheduling_features(user_input, media_paths=media_paths)
+        return PolicyEngine.build_state_features(user_input, media_paths=media_paths)
 
     def _policy_selector(self) -> ConservativePolicySelector:
-        policy_store = getattr(self, "_policy_store", None)
-        if policy_store is None or not hasattr(policy_store, "summarize_action_stats"):
-            policy_store = _NULL_POLICY_STORE
+        # kept for backward compat — internal callers should prefer _policy_engine
+        store = getattr(self, "_policy_store", None)
+        if store is None or not hasattr(store, "summarize_action_stats"):
+            from .orchestrator_policy_engine import _NULL_POLICY_STORE
+
+            store = _NULL_POLICY_STORE
         return ConservativePolicySelector(
-            policy_store,
+            store,
             min_samples=int(
                 getattr(self.config.system, "policy_learning_min_samples", 0) or 0
             ),
@@ -564,28 +606,25 @@ class OrchestratorAgent:
         )
 
     def choose_scheduling_policy(self, *, features: dict[str, Any]) -> dict[str, Any]:
-        selection = self._policy_selector().select_scheduling(features=features)
+        pe = self._get_or_create_policy_engine()
+        if pe is not None:
+            return pe.choose_scheduling_policy(features=features)
         return {
-            "action_name": selection.action.name,
-            "hint": selection.action.hint,
-            "explain": selection.explain,
-            "state_bucket": selection.state_bucket,
+            "action_name": "serial",
+            "hint": "",
+            "explain": "no_engine",
+            "state_bucket": "default",
         }
 
     def choose_worker_policy(self, *, features: dict[str, Any]) -> dict[str, Any]:
-        if not self._policy_learning_enabled():
-            return {
-                "action_name": "allow_worker",
-                "hint": "",
-                "explain": "policy_learning_disabled",
-                "state_bucket": "disabled",
-            }
-        selection = self._policy_selector().select_worker_gate(features=features)
+        pe = self._get_or_create_policy_engine()
+        if pe is not None:
+            return pe.choose_worker_policy(features=features)
         return {
-            "action_name": selection.action.name,
-            "hint": selection.action.hint,
-            "explain": selection.explain,
-            "state_bucket": selection.state_bucket,
+            "action_name": "allow_worker",
+            "hint": "",
+            "explain": "no_engine",
+            "state_bucket": "default",
         }
 
     def _persist_policy_events(
@@ -595,53 +634,79 @@ class OrchestratorAgent:
         chat_key: str,
         events: list[dict[str, Any]],
     ) -> None:
-        if not self._policy_learning_enabled() or not chat_key:
+        pe = self._get_or_create_policy_engine()
+        if pe is not None:
+            pe.persist_policy_events(flow_id=flow_id, chat_key=chat_key, events=events)
+        else:
+            self._remember_flow_policy_decisions(flow_id, events)
+
+    def _record_routing_telemetry(
+        self,
+        *,
+        chat_key: str,
+        flow_id: str,
+        route_mode: str,
+        resolved_router_model: str,
+        routing_latency_ms: float,
+        routing_decision: RoutingDecision | None,
+        router_skip_reason: str,
+        should_use_model_router: bool,
+        intent_bucket: str,
+        reflection_hints_payload: list[dict[str, Any]],
+        scheduling_overridden: bool,
+        worker_overridden: bool,
+        execution_style_guardrail_reduced: bool,
+        relaxed_reflection_route_payload: Any,
+        guardrail_softened_scheduling: bool,
+        guardrail_softened_worker: bool,
+    ) -> None:
+        pe = self._get_or_create_policy_engine()
+        if pe is None:
             return
-        for event in events:
-            if event.get("event") != "policy_decision":
-                continue
-            self._record_policy_decision(
-                PolicyDecisionRecord(
-                    flow_id=flow_id,
-                    chat_key=chat_key,
-                    decision_kind=str(event.get("decision_kind", "") or "").strip(),
-                    action_name=str(event.get("action_name", "") or "").strip(),
-                    state_features=dict(event.get("state_features") or {}),
-                )
-            )
-        self._remember_flow_policy_decisions(flow_id, events)
+        pe.record_routing_telemetry(
+            chat_key=chat_key,
+            flow_id=flow_id,
+            route_mode=route_mode,
+            resolved_router_model=resolved_router_model,
+            routing_latency_ms=routing_latency_ms,
+            routing_decision=routing_decision,
+            router_skip_reason=router_skip_reason,
+            should_use_model_router=should_use_model_router,
+            intent_bucket=intent_bucket,
+            reflection_hints_payload=reflection_hints_payload,
+            scheduling_overridden=scheduling_overridden,
+            worker_overridden=worker_overridden,
+            execution_style_guardrail_reduced=execution_style_guardrail_reduced,
+            relaxed_reflection_route_payload=relaxed_reflection_route_payload,
+            guardrail_softened_scheduling=guardrail_softened_scheduling,
+            guardrail_softened_worker=guardrail_softened_worker,
+        )
+
+    async def _evaluate_task_run_async(
+        self,
+        *,
+        chat_key: str,
+        route_mode: str,
+        state_features: dict[str, Any],
+        routing_decision: RoutingDecision | None,
+        final_status: str,
+        outcome: dict[str, Any],
+    ) -> None:
+        pe = self._get_or_create_policy_engine()
+        if pe is None:
+            return
+        await pe.evaluate_task_run_async(
+            chat_key=chat_key,
+            route_mode=route_mode,
+            state_features=state_features,
+            routing_decision=routing_decision,
+            final_status=final_status,
+            outcome=outcome,
+        )
 
     @staticmethod
     def _routing_policy_hints(decision: RoutingDecision | None) -> list[str]:
-        if decision is None:
-            return []
-        hints: list[str] = []
-        explain = str(decision.explain or "").strip()
-        if explain:
-            hints.append(f"路由判定：{explain}")
-        execution_hints = {
-            "direct_execute": "路由建议：信息充分时可直接执行，但仍需避免猜测。",
-            "analyze_first": "路由建议：先分析边界与依赖，再开始执行。",
-            "retrieve_first": "路由建议：先补足上下文或外部信息，再执行。",
-            "verify_first": "路由建议：在收尾前优先做局部验证。",
-        }
-        parallel_hints = {
-            "serial": "路由建议：默认串行推进，优先保证收敛。",
-            "bounded_parallel": "路由建议：仅对明确独立子任务做有限并行。",
-        }
-        worker_hints = {
-            "allow": "路由建议：必要时可启用少量 worker。",
-            "deny": "路由建议：优先在当前主链路完成，不轻易扩散 worker。",
-        }
-        for mapping, key in (
-            (execution_hints, decision.execution_style),
-            (parallel_hints, decision.parallelism_hint),
-            (worker_hints, decision.worker_hint),
-        ):
-            hint = mapping.get(str(key or "").strip())
-            if hint and hint not in hints:
-                hints.append(hint)
-        return hints
+        return RoutingCascade.routing_policy_hints(decision)
 
     @staticmethod
     def _debug_policy_line(
@@ -669,49 +734,16 @@ class OrchestratorAgent:
         scheduling_policy: dict[str, Any],
         worker_policy: dict[str, Any],
     ) -> str:
-        routing_value = (
-            "/".join(
-                part
-                for part in (
-                    str(routing_decision.decision_source or "").strip(),
-                    str(routing_decision.route_mode or "").strip(),
-                    str(routing_decision.execution_style or "").strip(),
-                )
-                if part
-            )
-            if routing_decision is not None
-            else f"fallback/{str(route_mode or '').strip() or 'tool_workflow'}"
+        return InspectService.build_debug_policy_summary(
+            flow_id=flow_id,
+            decomposition_action=decomposition_action,
+            decomposition_hint=decomposition_hint,
+            route_mode=route_mode,
+            router_skip_reason=router_skip_reason,
+            routing_decision=routing_decision,
+            scheduling_policy=scheduling_policy,
+            worker_policy=worker_policy,
         )
-        routing_explain = (
-            str(routing_decision.explain or "").strip()
-            if routing_decision is not None
-            else f"router_skip_reason={str(router_skip_reason or 'fallback').strip()}"
-        )
-        lines = [
-            "调试：编排决策",
-            f"flow_id={str(flow_id or '').strip() or '-'}",
-            self._debug_policy_line(
-                "decomposition",
-                str(decomposition_action or "").strip(),
-                explain=decomposition_hint,
-            ),
-            self._debug_policy_line(
-                "routing",
-                routing_value,
-                explain=routing_explain,
-            ),
-            self._debug_policy_line(
-                "scheduling",
-                str(scheduling_policy.get("action_name", "") or "").strip(),
-                explain=str(scheduling_policy.get("explain", "") or ""),
-            ),
-            self._debug_policy_line(
-                "worker",
-                str(worker_policy.get("action_name", "") or "").strip(),
-                explain=str(worker_policy.get("explain", "") or ""),
-            ),
-        ]
-        return "\n".join(line for line in lines if line.strip())
 
     async def _maybe_send_debug_policy_summary(
         self,
@@ -746,12 +778,7 @@ class OrchestratorAgent:
 
     @staticmethod
     def _format_reflection_hint(payload: dict[str, Any]) -> str:
-        return (
-            "历史反思："
-            f"曾出现 {str(payload.get('failure_pattern', '') or 'unknown')}，"
-            f"下次优先考虑 {str(payload.get('recommended_action', '') or 'safe_action')} "
-            f"(置信度 {float(payload.get('confidence', 0.0) or 0.0):.2f})。"
-        )
+        return RoutingCascade.format_reflection_hint(payload)
 
     @staticmethod
     def _select_reflection_override(
@@ -759,11 +786,9 @@ class OrchestratorAgent:
         *,
         allowed_actions: set[str],
     ) -> str:
-        for payload in hints:
-            action = str(payload.get("recommended_action", "") or "").strip()
-            if action in allowed_actions:
-                return action
-        return ""
+        return RoutingCascade.select_reflection_override(
+            hints, allowed_actions=allowed_actions
+        )
 
     def _maybe_override_policy_from_reflection(
         self,
@@ -772,20 +797,11 @@ class OrchestratorAgent:
         preferred_action: str,
         hint_prefix: str,
     ) -> dict[str, Any]:
-        if not preferred_action:
-            return payload
-        explain = str(payload.get("explain", "") or "")
-        if (
-            "insufficient_samples" not in explain
-            and payload.get("state_bucket") != "global_default"
-        ):
-            return payload
-        return {
-            "action_name": preferred_action,
-            "hint": f"{hint_prefix}{preferred_action}",
-            "explain": f"reflection_override; preferred_action={preferred_action}; base={explain}",
-            "state_bucket": str(payload.get("state_bucket", "") or "reflection"),
-        }
+        return (
+            self._get_or_create_routing_cascade().maybe_override_policy_from_reflection(
+                payload, preferred_action=preferred_action, hint_prefix=hint_prefix
+            )
+        )
 
     @staticmethod
     def _maybe_soften_policy_from_guardrail(
@@ -796,70 +812,19 @@ class OrchestratorAgent:
         softened_action: str,
         hint: str,
     ) -> dict[str, Any]:
-        if not soften_default:
-            return payload
-        action_name = str(payload.get("action_name", "") or "").strip()
-        explain = str(payload.get("explain", "") or "")
-        if action_name != current_default_action:
-            return payload
-        if (
-            "insufficient_samples" not in explain
-            and payload.get("state_bucket") != "global_default"
-        ):
-            return payload
-        return {
-            "action_name": softened_action,
-            "hint": hint,
-            "explain": f"reflection_guardrail_softened; base={explain}",
-            "state_bucket": str(payload.get("state_bucket", "") or "guardrail"),
-        }
+        return RoutingCascade.maybe_soften_policy_from_guardrail(
+            payload,
+            soften_default=soften_default,
+            current_default_action=current_default_action,
+            softened_action=softened_action,
+            hint=hint,
+        )
 
     @staticmethod
     def _routing_decision_from_reflection(
         payload: dict[str, Any] | None,
     ) -> RoutingDecision | None:
-        if not isinstance(payload, dict):
-            return None
-        route_mode = str(payload.get("route_mode", "") or "").strip()
-        recommended_action = str(payload.get("recommended_action", "") or "").strip()
-        if route_mode not in {"tool_workflow", "answer", "debate"}:
-            return None
-        execution_style = (
-            recommended_action
-            if recommended_action
-            in {
-                "direct_execute",
-                "analyze_first",
-                "retrieve_first",
-                "verify_first",
-            }
-            else "analyze_first"
-        )
-        parallelism_hint = (
-            recommended_action
-            if recommended_action in {"serial", "bounded_parallel"}
-            else "serial"
-        )
-        worker_hint = (
-            "allow" if recommended_action in {"allow", "allow_worker"} else "deny"
-        )
-        samples = int(payload.get("samples", 0) or 0)
-        effective_samples = float(payload.get("effective_samples", 0.0) or 0.0)
-        min_samples_required = int(payload.get("min_samples_required", 0) or 0)
-        confidence = float(payload.get("confidence", 0.0) or 0.0)
-        return RoutingDecision(
-            route_mode=route_mode,
-            need_clarification=False,
-            execution_style=execution_style,
-            parallelism_hint=parallelism_hint,
-            worker_hint=worker_hint,
-            explain=(
-                "稳定成功经验直达"
-                + f"(samples={samples}, effective_samples={effective_samples:.2f}, "
-                + f"min_samples={min_samples_required}, confidence={confidence:.2f})"
-            ),
-            decision_source="reflection",
-        )
+        return RoutingCascade.routing_decision_from_reflection(payload)
 
     def _routing_decision_from_intent_cache(
         self,
@@ -867,141 +832,13 @@ class OrchestratorAgent:
         *,
         goal: str,
     ) -> RoutingDecision | None:
-        if not isinstance(payload, dict):
-            return None
-        route_mode = str(payload.get("route_mode", "") or "").strip()
-        execution_style = str(payload.get("execution_style", "") or "").strip()
-        if route_mode not in {"tool_workflow", "answer", "debate"}:
-            return None
-        if execution_style not in {
-            "direct_execute",
-            "analyze_first",
-            "retrieve_first",
-            "verify_first",
-        }:
-            execution_style = "analyze_first"
-        subtasks = int(
-            self._build_scheduling_state_features(goal).get("independent_subtasks", 1)
-            or 1
-        )
-        return RoutingDecision(
-            route_mode=route_mode,
-            need_clarification=False,
-            execution_style=execution_style,
-            parallelism_hint="bounded_parallel" if subtasks >= 2 else "serial",
-            worker_hint="deny",
-            explain=(
-                "稳定意图桶直达"
-                + f"(samples={int(payload.get('samples', 0) or 0)}, "
-                + f"wins={int(payload.get('wins', 0) or 0)})"
-            ),
-            decision_source="intent_cache",
-        )
-
-    def _record_routing_telemetry(
-        self,
-        *,
-        chat_key: str,
-        flow_id: str,
-        route_mode: str,
-        resolved_router_model: str,
-        routing_latency_ms: float,
-        routing_decision: RoutingDecision | None,
-        router_skip_reason: str,
-        should_use_model_router: bool,
-        intent_bucket: str,
-        reflection_hints_payload: list[dict[str, Any]],
-        scheduling_overridden: bool,
-        worker_overridden: bool,
-        execution_style_guardrail_reduced: bool,
-        relaxed_reflection_route_payload: Any,
-        guardrail_softened_scheduling: bool,
-        guardrail_softened_worker: bool,
-    ) -> None:
-        policy_store = getattr(self, "_policy_store", None)
-        if not chat_key or not hasattr(policy_store, "record_runtime_telemetry"):
-            return
-        policy_store.record_runtime_telemetry(
-            flow_id=flow_id,
-            chat_key=chat_key,
-            route_mode=route_mode,
-            router_model=resolved_router_model,
-            router_latency_ms=routing_latency_ms,
-            router_fallback=routing_decision is None,
-            router_source=(
-                routing_decision.decision_source
-                if routing_decision is not None
-                else (
-                    f"skipped:{router_skip_reason}"
-                    if self._routing_enabled() and not should_use_model_router
-                    else "fallback"
-                )
-            ),
-            execution_style=(
-                str(routing_decision.execution_style or "")
-                if routing_decision is not None
-                else ""
-            ),
-            intent_bucket=intent_bucket,
-            reflection_hint_count=len(reflection_hints_payload),
-            reflection_override_count=int(scheduling_overridden)
-            + int(worker_overridden),
-            execution_style_reflection_count=int(
-                routing_decision is not None
-                and routing_decision.decision_source == "reflection"
-            ),
-            parallelism_reflection_count=int(scheduling_overridden),
-            worker_reflection_count=int(worker_overridden),
-            execution_style_guardrail_reduce_count=int(
-                execution_style_guardrail_reduced
-                and relaxed_reflection_route_payload is not None
-                and routing_decision is None
-            ),
-            parallelism_guardrail_soften_count=int(guardrail_softened_scheduling),
-            worker_guardrail_soften_count=int(guardrail_softened_worker),
-        )
-
-    async def _evaluate_task_run_async(
-        self,
-        *,
-        chat_key: str,
-        route_mode: str,
-        state_features: dict[str, Any],
-        routing_decision: RoutingDecision | None,
-        final_status: str,
-        outcome: dict[str, Any],
-    ) -> None:
-        if not self._reflection_enabled():
-            return
-        policy_store = getattr(self, "_policy_store", None)
-        if not hasattr(policy_store, "record_reflection"):
-            return
-        TaskEvaluator(policy_store).evaluate(
-            TaskEvaluationInput(
-                chat_key=chat_key,
-                route_mode=route_mode,
-                state_features=state_features,
-                execution_style=(
-                    routing_decision.execution_style
-                    if routing_decision is not None
-                    else ""
-                ),
-                parallelism_hint=(
-                    routing_decision.parallelism_hint
-                    if routing_decision is not None
-                    else ""
-                ),
-                worker_hint=(
-                    routing_decision.worker_hint if routing_decision is not None else ""
-                ),
-                final_status=final_status,
-                outcome=outcome,
-            )
+        return self._get_or_create_routing_cascade().routing_decision_from_intent_cache(
+            payload, goal=goal
         )
 
     @staticmethod
     def _task_result_outcome_details(result: Any | None) -> dict[str, int]:
-        return summarize_task_results(result)
+        return PolicyEngine.summarize_task_results(result)
 
     @classmethod
     def _policy_reward(
@@ -1031,6 +868,28 @@ class OrchestratorAgent:
             result=result,
             error=error,
             execution_elapsed_ms=execution_elapsed_ms,
+        )
+
+    async def _resolve_routing(
+        self,
+        *,
+        chat_key: str,
+        user_input: str,
+        media_paths: list[str] | None,
+        scheduling_features: dict[str, Any],
+        execution_constraints: Any,
+        routing_snapshot: Any,
+        heartbeat: Any,
+    ) -> RoutingResult:
+        """Routing cascade — delegates to RoutingCascade."""
+        return await self._get_or_create_routing_cascade().resolve_routing(
+            chat_key=chat_key,
+            user_input=user_input,
+            media_paths=media_paths,
+            scheduling_features=scheduling_features,
+            execution_constraints=execution_constraints,
+            routing_snapshot=routing_snapshot,
+            heartbeat=heartbeat,
         )
 
     async def _answer_with_dag(
@@ -1107,111 +966,31 @@ class OrchestratorAgent:
             ),
             execution_constraints=execution_constraints,
         )
-        routing_decision = None
-        configured_router_model = str(
-            getattr(self.config.system, "routing_model_name", "") or ""
-        ).strip()
-        fallback_router_model = str(
-            getattr(getattr(self.config, "model", None), "model_name", "") or ""
-        ).strip()
-        resolved_router_model = configured_router_model or fallback_router_model
-        routing_timeout = float(getattr(self.config.system, "routing_timeout", 2.0) or 2.0)
-        runtime_telemetry_store = getattr(self, "_policy_store", None)
-        intent_bucket = build_routing_intent_bucket(
-            user_input,
-            has_media=bool(media_paths),
+        routing = await self._resolve_routing(
+            chat_key=chat_key,
+            user_input=user_input,
+            media_paths=media_paths,
+            scheduling_features=scheduling_features,
+            execution_constraints=execution_constraints,
+            routing_snapshot=routing_snapshot,
+            heartbeat=heartbeat,
         )
-        reflection_guardrails = {
-            "samples": 0,
-            "execution_style": {"injection_level": "normal", "soften_default": False},
-            "parallelism": {"injection_level": "normal", "soften_default": False},
-            "worker": {"injection_level": "normal", "soften_default": False},
-        }
-        if hasattr(runtime_telemetry_store, "recommend_reflection_guardrails"):
-            reflection_guardrails = (
-                runtime_telemetry_store.recommend_reflection_guardrails(
-                    chat_key=chat_key or None
-                )
-            )
-        if (
-            self._reflection_enabled()
-            and chat_key
-            and hasattr(runtime_telemetry_store, "recommend_route_from_reflections")
-        ):
-            execution_style_guardrail_reduced = (
-                str(
-                    reflection_guardrails.get("execution_style", {}).get(
-                        "injection_level", "normal"
-                    )
-                )
-                == "reduced"
-            )
-            relaxed_reflection_route_payload = (
-                runtime_telemetry_store.recommend_route_from_reflections(
-                    chat_key=chat_key,
-                    state_features=scheduling_features,
-                    min_confidence=0.55,
-                )
-            )
-            reflection_route_payload = relaxed_reflection_route_payload
-            if execution_style_guardrail_reduced:
-                reflection_route_payload = (
-                    runtime_telemetry_store.recommend_route_from_reflections(
-                        chat_key=chat_key,
-                        state_features=scheduling_features,
-                        min_confidence=0.72,
-                    )
-                )
-            routing_decision = self._routing_decision_from_reflection(
-                reflection_route_payload
-            )
-        else:
-            execution_style_guardrail_reduced = False
-            relaxed_reflection_route_payload = None
-        if (
-            routing_decision is None
-            and chat_key
-            and hasattr(runtime_telemetry_store, "recommend_route_from_intent_bucket")
-            and intent_bucket.startswith("other|")
-        ):
-            routing_decision = self._routing_decision_from_intent_cache(
-                runtime_telemetry_store.recommend_route_from_intent_bucket(
-                    chat_key=chat_key,
-                    intent_bucket=intent_bucket,
-                ),
-                goal=user_input,
-            )
-        if self._routing_enabled() and routing_decision is None:
-            routing_decision = match_rule_based_routing(routing_snapshot)
-        should_use_model_router = False
-        router_skip_reason = "disabled"
-        if self._routing_enabled() and routing_decision is None:
-            should_use_model_router, router_skip_reason = should_call_model_router(
-                routing_snapshot,
-                intent_bucket=intent_bucket,
-            )
-        if should_use_model_router and hasattr(
-            runtime_telemetry_store, "recommend_router_timeout"
-        ):
-            recommendation = runtime_telemetry_store.recommend_router_timeout(
-                base_timeout=routing_timeout,
-                chat_key=chat_key or None,
-                router_model=resolved_router_model,
-            )
-            routing_timeout = float(
-                recommendation.get("timeout_seconds", routing_timeout)
-                or routing_timeout
-            )
-        routing_started = time.perf_counter()
-        if should_use_model_router:
-            routing_decision = await route_task(
-                self.gateway,
-                routing_snapshot,
-                heartbeat=heartbeat,
-                model_name=configured_router_model,
-                timeout=routing_timeout,
-            )
-        routing_latency_ms = (time.perf_counter() - routing_started) * 1000.0
+        routing_decision = routing.routing_decision
+        route_mode = routing.route_mode
+        scheduling_policy = routing.scheduling_policy
+        worker_policy = routing.worker_policy
+        reflection_hints_payload = routing.reflection_hints_payload
+        resolved_router_model = routing.resolved_router_model
+        routing_latency_ms = routing.routing_latency_ms
+        router_skip_reason = routing.router_skip_reason
+        should_use_model_router = routing.should_use_model_router
+        intent_bucket = routing.intent_bucket
+        scheduling_overridden = routing.scheduling_overridden
+        worker_overridden = routing.worker_overridden
+        execution_style_guardrail_reduced = routing.execution_style_guardrail_reduced
+        relaxed_reflection_route_payload = routing.relaxed_reflection_route_payload
+        guardrail_softened_scheduling = routing.guardrail_softened_scheduling
+        guardrail_softened_worker = routing.guardrail_softened_worker
         task_contract = build_task_contract(
             user_input=user_input,
             chat_key=chat_key,
@@ -1231,94 +1010,6 @@ class OrchestratorAgent:
                 if routing_decision is not None
                 else None
             ),
-        )
-        route_mode = (
-            route_mode_to_step_kind(routing_decision.route_mode)
-            if routing_decision is not None
-            else ("debate" if task_contract.mode == "debate" else "tool_workflow")
-        )
-        reflection_hints_payload: list[dict[str, Any]] = []
-        if self._reflection_enabled() and hasattr(
-            runtime_telemetry_store, "list_reflection_hints"
-        ):
-            reflection_hints_payload = runtime_telemetry_store.list_reflection_hints(
-                route_mode=route_mode,
-                state_features=scheduling_features,
-                limit=int(getattr(self.config.system, "reflection_max_hints", 3) or 3),
-            )
-        scheduling_policy = self.choose_scheduling_policy(features=scheduling_features)
-        worker_policy = self.choose_worker_policy(features=scheduling_features)
-        guardrail_softened_scheduling = False
-        guardrail_softened_worker = False
-        if int(scheduling_features.get("independent_subtasks", 1) or 1) >= 2:
-            softened_scheduling_policy = self._maybe_soften_policy_from_guardrail(
-                scheduling_policy,
-                soften_default=bool(
-                    reflection_guardrails.get("parallelism", {}).get("soften_default")
-                ),
-                current_default_action="serial",
-                softened_action="bounded_parallel",
-                hint="guardrail 放宽默认调度：bounded_parallel",
-            )
-            guardrail_softened_scheduling = softened_scheduling_policy.get(
-                "action_name"
-            ) != scheduling_policy.get("action_name")
-            scheduling_policy = softened_scheduling_policy
-            softened_worker_policy = self._maybe_soften_policy_from_guardrail(
-                worker_policy,
-                soften_default=bool(
-                    reflection_guardrails.get("worker", {}).get("soften_default")
-                ),
-                current_default_action="deny_worker",
-                softened_action="allow_worker",
-                hint="guardrail 放宽默认 worker：allow_worker",
-            )
-            guardrail_softened_worker = softened_worker_policy.get(
-                "action_name"
-            ) != worker_policy.get("action_name")
-            worker_policy = softened_worker_policy
-        scheduling_base_action = str(scheduling_policy.get("action_name", "") or "")
-        worker_base_action = str(worker_policy.get("action_name", "") or "")
-        scheduling_policy = self._maybe_override_policy_from_reflection(
-            scheduling_policy,
-            preferred_action=self._select_reflection_override(
-                (
-                    reflection_hints_payload
-                    if str(
-                        reflection_guardrails.get("parallelism", {}).get(
-                            "injection_level", "normal"
-                        )
-                    )
-                    != "reduced"
-                    else []
-                ),
-                allowed_actions={"serial", "bounded_parallel"},
-            ),
-            hint_prefix="历史反思建议调度动作：",
-        )
-        worker_policy = self._maybe_override_policy_from_reflection(
-            worker_policy,
-            preferred_action=self._select_reflection_override(
-                (
-                    reflection_hints_payload
-                    if str(
-                        reflection_guardrails.get("worker", {}).get(
-                            "injection_level", "normal"
-                        )
-                    )
-                    != "reduced"
-                    else []
-                ),
-                allowed_actions={"allow_worker", "deny_worker"},
-            ),
-            hint_prefix="历史反思建议 worker 动作：",
-        )
-        scheduling_overridden = (
-            str(scheduling_policy.get("action_name", "") or "")
-            != scheduling_base_action
-        )
-        worker_overridden = (
-            str(worker_policy.get("action_name", "") or "") != worker_base_action
         )
         self._record_routing_telemetry(
             chat_key=chat_key,
@@ -1531,237 +1222,75 @@ class OrchestratorAgent:
 
         return text, dedup_media
 
+    def _get_or_create_inspect_service(self) -> InspectService | None:
+        """Returns _inspect_service, auto-creating a minimal one for partial test doubles."""
+        svc = getattr(self, "_inspect_service", None)
+        if svc is not None:
+            return svc
+        policy_store = getattr(self, "_policy_store", None)
+        tape_store = getattr(self, "tape_store", None)
+        memory_store = getattr(self, "memory_store", None)
+        heartbeat_registry = getattr(self, "_task_heartbeat_registry", None)
+        child_task_bus = getattr(self, "_child_task_bus", None)
+
+        class _NullRegistry:
+            def snapshot(self, _: str = "") -> dict:
+                return {}
+
+        class _NullBus:
+            def events_for(self, _: str = "") -> list:
+                return []
+
+        class _NullMemoryStore:
+            def list_memories(self, chat_id: str = "") -> list:
+                return []
+
+        class _NullPolicyStoreFallback:
+            def summarize_action_stats(self, *, decision_kind: str, **kw) -> dict:
+                return {}
+
+        svc = InspectService(
+            policy_store=policy_store or _NullPolicyStoreFallback(),
+            tape_store=tape_store,
+            memory_store=memory_store or _NullMemoryStore(),
+            heartbeat_registry=heartbeat_registry or _NullRegistry(),
+            child_task_bus=child_task_bus or _NullBus(),
+        )
+        # Seed caches from any existing agent attributes (test double compatibility)
+        existing_flow_ids = getattr(self, "_recent_flow_ids_by_chat", None)
+        if existing_flow_ids:
+            svc._recent_flow_ids_by_chat.update(existing_flow_ids)
+        existing_flows = getattr(self, "_recent_flows_by_chat", None)
+        if existing_flows:
+            svc._recent_flows_by_chat.update(existing_flows)
+        existing_decisions = getattr(self, "_recent_policy_decisions_by_flow", None)
+        if existing_decisions:
+            svc._recent_policy_decisions_by_flow.update(existing_decisions)
+        self._inspect_service = svc
+        # Make agent attributes point to the service's dicts (backward compat shim)
+        # so that any code still accessing self._recent_flow_ids_by_chat sees live data.
+        self._recent_flow_ids_by_chat = svc._recent_flow_ids_by_chat
+        self._recent_flows_by_chat = svc._recent_flows_by_chat
+        self._recent_policy_decisions_by_flow = svc._recent_policy_decisions_by_flow
+        return svc
+
     def inspect_runtime_flow(self, flow_id: str = "", chat_key: str = "") -> str:
-        resolved_flow_id = flow_id.strip()
-        resolved_chat_key = chat_key.strip()
-        if not resolved_flow_id and resolved_chat_key:
-            resolved_flow_id = self._recent_flow_ids_by_chat.get(resolved_chat_key, "")
-        if not resolved_flow_id:
-            return "暂无可观测的 flow。"
-        snapshot = self._task_heartbeat_registry.snapshot(resolved_flow_id)
-        events = self._child_task_bus.events_for(resolved_flow_id)
-        decision_cache = getattr(self, "_recent_policy_decisions_by_flow", {}) or {}
-        policy_decisions = list(decision_cache.get(resolved_flow_id, []) or [])
-        parts = ["[Runtime Flow]", f"flow_id={resolved_flow_id}"]
-        if resolved_chat_key:
-            parts.append(f"chat_key={resolved_chat_key}")
-        if policy_decisions:
-            lines = []
-            for item in policy_decisions[-8:]:
-                kind = str(item.get("decision_kind", "") or "").strip()
-                action = str(item.get("action_name", "") or "").strip()
-                state_bucket = str(item.get("state_bucket", "") or "").strip()
-                explain = str(item.get("explain", "") or "").strip()
-                suffix = []
-                if state_bucket:
-                    suffix.append(f"bucket={state_bucket}")
-                if explain:
-                    suffix.append(explain)
-                lines.append(
-                    f"- decision_kind={kind or '-'} action={action or '-'}"
-                    + (f" ({'; '.join(suffix)})" if suffix else "")
-                )
-            parts.append("[Policy Decisions]\n" + "\n".join(lines))
-        if snapshot:
-            lines = []
-            for task_id, state in sorted(snapshot.items()):
-                lines.append(
-                    f"- task_id={task_id} status={state.get('status', '')} progress={state.get('progress', None)}"
-                )
-            parts.append("[Tasks]\n" + "\n".join(lines))
-        if events:
-            lines = []
-            for event in events[-12:]:
-                normalized_event = normalize_runtime_feedback_event(
-                    {
-                        "event": event.event,
-                        "task_id": event.task_id,
-                        "flow_id": event.flow_id,
-                        "payload": dict(event.payload or {}),
-                    }
-                )
-                status = str(normalized_event.state or "")
-                progress = normalized_event.progress
-                desc = runtime_event_primary_label(normalized_event)
-                suffix = []
-                if desc:
-                    suffix.append(desc)
-                if status:
-                    suffix.append(f"status={status}")
-                if progress is not None:
-                    suffix.append(f"progress={progress}")
-                lines.append(
-                    f"- task_id={event.task_id} event={event.event}"
-                    + (f" ({', '.join(suffix)})" if suffix else "")
-                )
-            parts.append("[Recent Events]\n" + "\n".join(lines))
-        if len(parts) == 2:
-            parts.append("暂无 task/event 快照。")
-        return "\n".join(parts)
+        svc = self._get_or_create_inspect_service()
+        if svc is not None:
+            return svc.inspect_runtime_flow(flow_id=flow_id, chat_key=chat_key)
+        return "暂无可观测的 flow。"
 
     def inspect_chat_context(self, chat_key: str, query: str = "") -> str:
-        if not chat_key:
-            return "缺少 chat_key。"
-        view = build_context_view(
-            memory_store=self.memory_store, chat_id=chat_key, query=query
-        )
-        records = self.memory_store.list_memories(chat_id=chat_key)
-        parts = ["[Chat Context]", f"chat_key={chat_key}"]
-        if query:
-            parts.append(f"query={query}")
-        if view.hot:
-            parts.append("[Hot Context]\n- " + "\n- ".join(view.hot))
-        if view.warm:
-            parts.append("[Warm Context]\n- " + "\n- ".join(view.warm))
-        if view.cold:
-            parts.append("[Cold Context]\n- " + "\n- ".join(view.cold))
-        if records:
-            lines = [
-                f"- memory_type={record.memory_type} key={record.key} tier={record.tier} status={record.status} confidence={record.confidence:.2f} summary={record.summary}"
-                for record in records[:12]
-            ]
-            parts.append("[Memory Records]\n" + "\n".join(lines))
-        tape = self.tape_store.get_or_create(chat_key)
-        anchor = tape.last_anchor()
-        if anchor is not None:
-            summary = str((anchor.payload.get("state") or {}).get("summary", "") or "")
-            if summary:
-                parts.append(f"[Tape Summary]\n{summary}")
-        return "\n".join(parts)
+        svc = self._get_or_create_inspect_service()
+        if svc is not None:
+            return svc.inspect_chat_context(chat_key=chat_key, query=query)
+        return "缺少 chat_key。"
 
     def inspect_policy(self, chat_key: str = "", decision_kind: str = "") -> str:
-        kinds = (
-            [decision_kind.strip()]
-            if decision_kind.strip()
-            else ["decomposition", "scheduling", "worker"]
-        )
-        parts = ["[Policy]"]
-        if chat_key:
-            parts.append(f"chat_key={chat_key}")
-        for kind in kinds:
-            stats = self._policy_store.summarize_action_stats(decision_kind=kind)
-            parts.append(f"decision_kind={kind}")
-            if not stats:
-                parts.append("- no_stats")
-                continue
-            ranked = sorted(
-                stats.items(),
-                key=lambda item: (
-                    float(
-                        item[1].get("effective_samples", item[1].get("samples", 0.0))
-                        or 0.0
-                    ),
-                    float(item[1].get("mean_reward", 0.0) or 0.0),
-                ),
-                reverse=True,
-            )
-            for action_name, payload in ranked[:5]:
-                parts.append(
-                    "- "
-                    + f"action={action_name} "
-                    + f"samples={int(payload.get('samples', 0) or 0)} "
-                    + f"effective_samples={float(payload.get('effective_samples', payload.get('samples', 0.0)) or 0.0):.2f} "
-                    + f"mean_reward={float(payload.get('mean_reward', 0.0) or 0.0):.2f} "
-                    + f"recent_mean_reward={float(payload.get('recent_mean_reward', 0.0) or 0.0):.2f} "
-                    + f"drift_score={float(payload.get('drift_score', 0.0) or 0.0):.2f} "
-                    + f"failure_rate={float(payload.get('failure_rate', 0.0) or 0.0):.2f} "
-                    + f"avg_execution_elapsed_ms={float(payload.get('avg_execution_elapsed_ms', 0.0) or 0.0):.2f} "
-                    + f"avg_tool_call_count={float(payload.get('avg_tool_call_count', 0.0) or 0.0):.2f} "
-                    + f"tool_failure_rate={float(payload.get('tool_failure_rate', 0.0) or 0.0):.2f} "
-                    + f"loop_guard_block_rate={float(payload.get('loop_guard_block_rate', 0.0) or 0.0):.2f} "
-                    + f"max_step_exhausted_rate={float(payload.get('max_step_exhausted_rate', 0.0) or 0.0):.2f} "
-                    + f"feedback_score={float(payload.get('feedback_score', 0.0) or 0.0):.2f}"
-                )
-        telemetry_summary_fn = getattr(
-            self._policy_store, "summarize_runtime_telemetry", None
-        )
-        if callable(telemetry_summary_fn):
-            try:
-                telemetry = telemetry_summary_fn(chat_key=chat_key or None)
-            except TypeError:
-                telemetry = telemetry_summary_fn()
-
-            def _format_skip_breakdown(payload: dict[str, object]) -> str:
-                breakdown = payload.get("skip_breakdown")
-                if not isinstance(breakdown, dict) or not breakdown:
-                    return ""
-                items: list[str] = []
-                for reason, count in sorted(
-                    (
-                        (str(reason).strip() or "unknown", int(value or 0))
-                        for reason, value in breakdown.items()
-                    ),
-                    key=lambda item: (-item[1], item[0]),
-                ):
-                    items.append(f"{reason}:{count}")
-                return ",".join(items)
-
-            overall = telemetry.get("overall") if isinstance(telemetry, dict) else None
-            by_route_mode = (
-                telemetry.get("by_route_mode", {})
-                if isinstance(telemetry, dict)
-                else {}
-            )
-
-            # Fields shared by both overall and per-route-mode rows.
-            _TELEMETRY_FLOAT_FIELDS = (
-                "avg_router_latency_ms",
-                "avg_execution_elapsed_ms",
-                "avg_task_result_count",
-                "avg_executor_step_count",
-                "avg_tool_call_count",
-                "fallback_rate",
-                "skipped_rate",
-                "model_route_rate",
-                "rule_hit_rate",
-                "reflection_route_rate",
-                "reflection_match_rate",
-                "reflection_override_rate",
-                "tool_failure_rate",
-                "loop_guard_block_rate",
-                "max_step_exhausted_rate",
-                "dead_letter_rate",
-                "stalled_rate",
-                "execution_style_reflection_rate",
-                "parallelism_reflection_rate",
-                "worker_reflection_rate",
-                "execution_style_guardrail_reduce_rate",
-                "parallelism_guardrail_soften_rate",
-                "worker_guardrail_soften_rate",
-                "mean_reward",
-            )
-
-            def _format_telemetry_row(
-                payload: dict[str, Any],
-                *,
-                prefix: str = "",
-            ) -> str:
-                tokens: list[str] = []
-                if prefix:
-                    tokens.append(prefix)
-                tokens.append(f"runs={int(payload.get('runs', 0) or 0)}")
-                for field_name in _TELEMETRY_FLOAT_FIELDS:
-                    tokens.append(
-                        f"{field_name}={float(payload.get(field_name, 0.0) or 0.0):.2f}"
-                    )
-                skip_bd = _format_skip_breakdown(payload)
-                if skip_bd:
-                    tokens.append(f"skip_breakdown={skip_bd}")
-                return "- " + " ".join(tokens)
-
-            if isinstance(overall, dict) and int(overall.get("runs", 0) or 0) > 0:
-                parts.append("[Routing Telemetry]")
-                parts.append(_format_telemetry_row(overall))
-                if isinstance(by_route_mode, dict):
-                    for route_mode, payload in sorted(by_route_mode.items()):
-                        if not isinstance(payload, dict):
-                            continue
-                        parts.append(
-                            _format_telemetry_row(
-                                payload, prefix=f"route_mode={route_mode}"
-                            )
-                        )
-        return "\n".join(parts)
+        svc = self._get_or_create_inspect_service()
+        if svc is not None:
+            return svc.inspect_policy(chat_key=chat_key, decision_kind=decision_kind)
+        return "[Policy]\n- no_stats"
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -1947,153 +1476,61 @@ class OrchestratorAgent:
             return TaskResponse(text=f"处理任务时出错：{exc}", is_error=True)
 
     async def _maybe_handoff(self, tape: Tape, chat_key: str) -> None:
-        """Check if entries since last anchor exceed threshold; if so, create a new anchor."""
-        lock = self._get_handoff_lock(chat_key)
-        try:
-            async with lock:
-                threshold = self.config.system.context_compact_threshold
-
-                # Collect entries once, compute tokens from them
-                old_entries = tape.entries_since_anchor()
-                if not old_entries:
-                    return
-                total_tokens = sum(e.token_estimate for e in old_entries)
-                if total_tokens <= threshold:
-                    return
-
-                # Build text to summarize
-                lines: list[str] = []
-                for e in old_entries:
-                    if e.kind == "message":
-                        role = e.payload.get("role", "?")
-                        content = e.payload.get("content", "")
-                        lines.append(f"{role}: {content}")
-                if not lines:
-                    return
-
-                history_text = "\n".join(lines)
-                raw_summary = await self.gateway.complete(
-                    _SUMMARIZE_PROMPT, history_text
+        """Delegate to HandoffManager (lock-outside-LLM pattern)."""
+        hm = getattr(self, "_handoff_manager", None)
+        if hm is None:
+            # Auto-create for partial test doubles
+            config = getattr(self, "config", None)
+            threshold = (
+                getattr(
+                    getattr(config, "system", None), "context_compact_threshold", 4000
                 )
+                if config
+                else 4000
+            )
+            hm = HandoffManager(
+                gateway=getattr(self, "gateway", None),
+                tape_store=getattr(self, "tape_store", None),
+                memory_store=getattr(self, "memory_store", None),
+                compact_threshold=threshold,
+            )
+            self._handoff_manager = hm
+        await hm.maybe_handoff(tape, chat_key)
 
-                # Parse structured JSON from LLM, fallback to plain summary
-                structured: dict[str, Any] = {}
-                try:
-                    # Strip markdown code fences if present
-                    text = raw_summary.strip()
-                    if text.startswith("```"):
-                        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                    structured = json.loads(text)
-                except (json.JSONDecodeError, ValueError):
-                    structured = {"summary": raw_summary.strip()}
-
-                summary_text = structured.get("summary", raw_summary.strip())
-                entities = structured.get("entities", [])
-                next_steps = structured.get("next_steps", [])
-                artifacts = structured.get("artifacts", [])
-                open_questions = structured.get("open_questions", [])
-                decisions = structured.get("decisions", [])
-                if not isinstance(entities, list):
-                    entities = []
-                if not isinstance(next_steps, list):
-                    next_steps = []
-                if not isinstance(artifacts, list):
-                    artifacts = []
-                if not isinstance(open_questions, list):
-                    open_questions = []
-                if not isinstance(decisions, list):
-                    decisions = []
-
-                source_ids = [e.entry_id for e in old_entries]
-
-                # Detect topic shift: compare current segment keywords vs previous anchor summary
-                phase = "continuation"
-                prev_anchor = tape.last_anchor()
-                if prev_anchor:
-                    prev_summary = (prev_anchor.payload.get("state") or {}).get(
-                        "summary", ""
-                    )
-                    prev_kws = set(_extract_keywords(prev_summary, max_keywords=12))
-                    # Collect recent user messages for keyword comparison
-                    recent_user_text = " ".join(
-                        e.payload.get("content", "")
-                        for e in old_entries
-                        if e.kind == "message" and e.payload.get("role") == "user"
-                    )
-                    curr_kws = set(_extract_keywords(recent_user_text, max_keywords=12))
-                    if prev_kws and curr_kws:
-                        overlap = len(prev_kws & curr_kws) / max(
-                            len(prev_kws), len(curr_kws)
-                        )
-                        if overlap < 0.15:
-                            phase = "topic_shift"
-                            logger.info(
-                                "Topic shift detected chat_key=%s overlap=%.2f",
-                                chat_key,
-                                overlap,
-                            )
-
-                anchor = tape.append(
-                    "anchor",
-                    {
-                        "name": f"compact/{tape.turn_count()}",
-                        "state": {
-                            "summary": summary_text,
-                            "entities": entities,
-                            "user_intent": structured.get("user_intent", ""),
-                            "pending": structured.get("pending", ""),
-                            "next_steps": [str(item) for item in next_steps[:3]],
-                            "artifacts": [str(item) for item in artifacts[:5]],
-                            "open_questions": [
-                                str(item) for item in open_questions[:3]
-                            ],
-                            "decisions": [str(item) for item in decisions[:3]],
-                            "phase": phase,
-                            "source_ids": source_ids,
-                            "turn_count": tape.turn_count(),
-                        },
-                    },
-                )
-                self.tape_store.save_entry(chat_key, anchor)
-                if hasattr(self, "memory_store"):
-                    self.memory_store.observe_anchor_state(
-                        chat_key,
-                        anchor.payload.get("state") or {},
-                        source_ids=source_ids,
-                    )
-                tape.compact_entries()
-                logger.info(
-                    "Handoff created anchor chat_key=%s entry_id=%d summarized=%d entries",
-                    chat_key,
-                    anchor.entry_id,
-                    len(source_ids),
-                )
-        except Exception:
-            logger.exception("Error in _maybe_handoff for chat_key=%s", chat_key)
+    def _get_command_dispatch(self) -> CommandDispatch:
+        """Returns _command_dispatch, auto-creating for partial test doubles."""
+        cd = getattr(self, "_command_dispatch", None)
+        if cd is not None:
+            return cd
+        cd = CommandDispatch(
+            inspect_service=self._get_or_create_inspect_service(),
+            policy_store=getattr(self, "_policy_store", None),
+            job_store=getattr(self, "_runtime_job_store", None),
+            process_task_fn=self.process_task,
+            runtime_support_fn=self._get_runtime_support,
+            interactive_support_fn=self._get_interactive_support,
+            response_factory=TaskResponse,
+        )
+        self._command_dispatch = cd
+        return cd
 
     @staticmethod
     def _parse_interactive_session_command(
         user_input: str,
     ) -> dict[str, str] | None:
-        return OrchestratorInteractiveSessionSupport.parse_command(user_input)
+        return CommandDispatch.parse_interactive_command(user_input)
 
     @staticmethod
     def _parse_policy_feedback_command(
         user_input: str,
     ) -> dict[str, str] | None:
-        return parse_policy_command(user_input)
+        return CommandDispatch.parse_policy_command(user_input)
 
     @staticmethod
     def _parse_job_command(
         user_input: str,
     ) -> dict[str, str] | None:
-        text = (user_input or "").strip()
-        if not text.lower().startswith("@job"):
-            return None
-        parts = text.split()
-        action = parts[1].lower() if len(parts) >= 2 else "status"
-        target = parts[2].strip() if len(parts) >= 3 else "latest"
-        return {"action": action, "target": target}
+        return CommandDispatch.parse_job_command(user_input)
 
     @staticmethod
     def _runtime_event_payload(event: Any) -> dict[str, Any]:
@@ -2115,8 +1552,12 @@ class OrchestratorAgent:
         )
 
     def _runtime_maintenance_report(self) -> str:
+        recent_flows: dict[str, Any] = {}
+        svc = getattr(self, "_inspect_service", None)
+        if svc is not None:
+            recent_flows = dict(svc._recent_flows_by_chat)
         return self._get_runtime_support().runtime_maintenance_report(
-            recent_flows_by_chat=getattr(self, "_recent_flows_by_chat", {}) or {},
+            recent_flows_by_chat=recent_flows,
             interactive_sessions=getattr(self, "_interactive_sessions", None),
         )
 
@@ -2126,135 +1567,31 @@ class OrchestratorAgent:
         chat_key: str,
         target: str,
     ) -> tuple[str, str]:
-        normalized_target = str(target or "").strip()
-        store = getattr(self, "_runtime_job_store", None)
-        recent_latest = getattr(self, "_recent_flow_ids_by_chat", {}) or {}
-        recent_history = getattr(self, "_recent_flows_by_chat", {}) or {}
-        history = [
-            str(item).strip()
-            for item in recent_history.get(chat_key, []) or []
-            if str(item).strip()
-        ]
-        if normalized_target and normalized_target not in {"latest"}:
-            target_job = store.get(normalized_target) if store is not None else None
-            if target_job is not None:
-                flow_id = str(target_job.metadata.get("flow_id", "") or "").strip()
-                if flow_id:
-                    return flow_id, ""
-                return "", "该 job 尚未关联 flow_id，请指定 flow_id 再反馈。"
-        if not history:
-            latest = str(recent_latest.get(chat_key, "") or "").strip()
-            if latest:
-                history = [latest]
-        if normalized_target and normalized_target not in {"latest"}:
-            return normalized_target, ""
-        if not history:
-            return "", "当前会话没有可反馈的最近任务。"
-        if normalized_target == "latest" and len(history) > 1:
-            return "", "最近有多个运行记录，请指定 flow_id 再反馈。"
-        return history[0], ""
+        return self._get_command_dispatch()._resolve_policy_feedback_flow_id(
+            chat_key=chat_key, target=target
+        )
 
     async def _handle_policy_feedback_command(
         self,
         chat_key: str,
         control: dict[str, str],
     ) -> TaskResponse:
-        if control.get("action", "") == "inspect":
-            target = str(control.get("target", "") or "").strip()
-            if target and not any(
-                target == decision_kind
-                for decision_kind in ("decomposition", "scheduling", "worker")
-            ):
-                return TaskResponse(text=self.inspect_runtime_flow(flow_id=target))
-            return TaskResponse(
-                text=self.inspect_policy(
-                    chat_key=chat_key,
-                    decision_kind=target,
-                )
-            )
-        if control.get("action", "") != "feedback":
-            return TaskResponse(
-                text="支持的命令：@policy feedback <flow_id|latest> good|bad <reason> / @policy inspect [decision_kind|flow_id]"
-            )
-        rating = str(control.get("rating", "") or "").strip().lower()
-        reason = str(control.get("reason", "") or "").strip()
-        if rating not in {"good", "bad"} or not reason:
-            return TaskResponse(
-                text="用法：@policy feedback <flow_id|latest> good|bad <reason>"
-            )
-        if not chat_key:
-            return TaskResponse(text="缺少 chat_key，无法记录策略反馈。")
-        flow_id, error = self._resolve_policy_feedback_flow_id(
-            chat_key=chat_key,
-            target=str(control.get("target", "") or "").strip(),
+        return await self._get_command_dispatch().handle_policy_command(
+            chat_key, control
         )
-        if error:
-            return TaskResponse(text=error)
-        policy_store = getattr(self, "_policy_store", None)
-        if policy_store is None:
-            return TaskResponse(text="当前未启用策略反馈存储。")
-        policy_store.record_feedback(
-            flow_id=flow_id,
-            chat_key=chat_key,
-            rating=rating,
-            reason=reason,
-        )
-        return TaskResponse(text=f"已记录策略反馈：{rating}。")
 
     async def _handle_job_command(
         self,
         chat_key: str,
         control: dict[str, str],
     ) -> TaskResponse:
-        action = str(control.get("action", "") or "status").strip()
-        target = str(control.get("target", "") or "latest").strip()
-        if action == "cleanup":
-            return TaskResponse(text=self._runtime_maintenance_report())
-        if action not in {"status", "resume"}:
-            return TaskResponse(
-                text="支持的命令：@job status <job_id|latest> / @job resume <job_id|latest> / @job cleanup"
-            )
-        job, error = self._resolve_job_target(chat_key=chat_key, target=target)
-        if error:
-            return TaskResponse(text=error)
-        if job is None:
-            return TaskResponse(text="未找到对应作业。")
-        if action == "resume":
-            if job.state == "completed":
-                return TaskResponse(text="该作业已完成，无需恢复。")
-            if job.state == "running":
-                return TaskResponse(text="该作业仍在运行，请先使用 @job status 查询。")
-            runtime_job_store = getattr(self, "_runtime_job_store", None)
-            if runtime_job_store is None:
-                return TaskResponse(text="当前未启用运行时作业跟踪。")
-            runtime_job_store.transition(
-                job.job_id,
-                "repairing",
-                progress_message="准备恢复执行",
-                metadata={"resume_requested": True},
-            )
-            resume_metadata = dict(job.metadata)
-            resume_metadata["resumed_from"] = job.job_id
-            return await self.process_task(
-                job.goal,
-                chat_key=job.chat_key or chat_key,
-                media_paths=list(job.metadata.get("media_paths") or []),
-                job_metadata_override=resume_metadata,
-            )
-        return TaskResponse(
-            text=(
-                f"[Job]\njob_id={job.job_id}\nstate={job.state}\n"
-                f"progress={job.progress_message or '-'}\n"
-                f"flow_id={str(job.metadata.get('flow_id', '') or '-')}"
-            )
-        )
+        return await self._get_command_dispatch().handle_job_command(chat_key, control)
 
     async def _handle_interactive_session_command(
         self, chat_key: str, control: dict[str, str]
     ) -> TaskResponse:
-        return await self._get_interactive_support().handle_command(
-            chat_key=chat_key,
-            control=control,
+        return await self._get_command_dispatch().handle_interactive_command(
+            chat_key, control
         )
 
     async def _handle_interactive_session_message(
@@ -2267,22 +1604,14 @@ class OrchestratorAgent:
         runtime_event_callback: Callable[[Any], Awaitable[None] | None] | None = None,
         interactive_output_callback: InteractiveOutputCallback | None = None,
     ) -> TaskResponse | None:
-        try:
-            return await self._get_interactive_support().handle_message(
-                chat_key=chat_key,
-                user_input=user_input,
-                media_paths=media_paths,
-                heartbeat=heartbeat,
-                runtime_event_callback=runtime_event_callback,
-                interactive_output_callback=interactive_output_callback,
-            )
-        except RuntimeError:
-            logger.warning(
-                "Interactive session send failed; falling back to DAG chat_key=%s",
-                chat_key,
-                exc_info=True,
-            )
-            return None
+        return await self._get_command_dispatch().handle_interactive_message(
+            chat_key,
+            user_input,
+            media_paths=media_paths,
+            heartbeat=heartbeat,
+            runtime_event_callback=runtime_event_callback,
+            interactive_output_callback=interactive_output_callback,
+        )
 
     def reset(self) -> None:
         interactive_sessions = getattr(self, "_interactive_sessions", None)
