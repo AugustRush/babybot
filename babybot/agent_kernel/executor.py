@@ -391,15 +391,21 @@ class SingleAgentExecutor:
                     session.task_id,
                     tool_call.name,
                 )
-                result.error_results.append(
-                    (
-                        tool_call,
-                        (
-                            f"Tool unavailable: {tool_call.name}"
-                            "\n[Hint: This tool is not available. Use a different tool or approach.]"
-                        ),
+                hint_parts = [
+                    f"Tool unavailable: {tool_call.name}",
+                ]
+                if registered:
+                    hint_parts.append(
+                        f"This tool belongs to the '{registered.group}' group"
+                        f" which is not included in the current execution scope."
                     )
+                hint_parts.append(
+                    "[Hint: Only use tools listed in your current tool set."
+                    " Do NOT call tools you learned about through inspect_skills"
+                    " or other means — they may not be available in this context."
+                    " Try a different approach with available tools.]"
                 )
+                result.error_results.append((tool_call, "\n".join(hint_parts)))
                 session.tool_failure_count += 1
                 continue
 

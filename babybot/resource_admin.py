@@ -389,7 +389,9 @@ class ResourceAdminHelper:
         normalized_limit = max(1, min(int(limit or 50), 200))
         normalized_offset = max(0, int(offset or 0))
         rows: list[str] = []
-        for registered in sorted(self._owner.registry.list(), key=lambda item: item.tool.name):
+        for registered in sorted(
+            self._owner.registry.list(), key=lambda item: item.tool.name
+        ):
             tool_name = registered.tool.name
             tool_group = registered.group
             group_state = self._owner.groups.get(tool_group)
@@ -442,7 +444,9 @@ class ResourceAdminHelper:
         normalized_limit = max(1, min(int(limit or 50), 200))
         normalized_offset = max(0, int(offset or 0))
         rows: list[str] = []
-        for skill in sorted(self._owner.skills.values(), key=lambda item: item.name.lower()):
+        for skill in sorted(
+            self._owner.skills.values(), key=lambda item: item.name.lower()
+        ):
             if active_only and not skill.active:
                 continue
             haystack = f"{skill.name} {skill.description} {skill.source}".lower()
@@ -461,6 +465,9 @@ class ResourceAdminHelper:
                 f"- total={total} returned={len(window)} "
                 f"offset={normalized_offset} limit={normalized_limit}"
             ),
+            "- NOTE: Listed skills are registered globally."
+            " Their tools may NOT be callable from your current execution scope."
+            " Only use tools listed in your tool schema.",
         ]
         if not window:
             lines.append("- no matching skills")
@@ -503,4 +510,3 @@ class ResourceAdminHelper:
         self._owner._skill_load_errors.append(entry)
         if len(self._owner._skill_load_errors) > 50:
             self._owner._skill_load_errors = self._owner._skill_load_errors[-50:]
-
