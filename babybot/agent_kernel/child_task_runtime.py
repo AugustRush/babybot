@@ -233,7 +233,10 @@ class InProcessChildTaskRuntime:
                 state_resource_id = str(state.get("resource_id", "") or "").strip()
                 state_ids = (state_resource_id,) if state_resource_id else ()
             state_description = str(state.get("description", "") or "")
-            if self._dispatch_signature(state_ids, state_description) != target_signature:
+            if (
+                self._dispatch_signature(state_ids, state_description)
+                != target_signature
+            ):
                 continue
             state_status = str(state.get("status", "") or "").strip().lower()
             if (
@@ -256,7 +259,10 @@ class InProcessChildTaskRuntime:
                 ).strip()
                 metadata_ids = (metadata_resource_id,) if metadata_resource_id else ()
             metadata_description = str(metadata.get("description", "") or "")
-            if self._dispatch_signature(metadata_ids, metadata_description) != target_signature:
+            if (
+                self._dispatch_signature(metadata_ids, metadata_description)
+                != target_signature
+            ):
                 continue
             if result.status == "failed" and metadata.get("dead_lettered") is True:
                 last_error = str(result.error or "").strip()
@@ -475,7 +481,8 @@ class InProcessChildTaskRuntime:
         notebook = context.state.get("plan_notebook")
         if isinstance(notebook, PlanNotebook):
             parent_id = str(
-                context.state.get("current_notebook_node_id", "") or notebook.root_node_id
+                context.state.get("current_notebook_node_id", "")
+                or notebook.root_node_id
             )
             if parent_id not in notebook.nodes:
                 parent_id = notebook.root_node_id
@@ -581,19 +588,13 @@ class InProcessChildTaskRuntime:
                         attempts=attempt,
                         max_attempts=max_attempts,
                     )
-                    upstream_results = {
-                        dep_id: dep_result.output
-                        for dep_id in deps
-                        if (dep_result := self._results.get(dep_id)) is not None
-                        and dep_result.status == "succeeded"
-                    }
-                    execution_contract = replace(
-                        contract,
-                        metadata={
-                            **contract.metadata,
-                            "upstream_results": upstream_results,
-                        },
-                    )
+                    # NOTE: upstream_results are NOT injected into
+                    # contract.metadata here.  The full upstream outputs
+                    # are injected by _enrich_with_upstream in
+                    # dag_ports.py via the shared upstream_results bucket
+                    # in context.state.  Removing this redundant copy
+                    # saves tokens in the worker prompt.
+                    execution_contract = contract
                     try:
                         async with self._semaphore:
                             if execution_contract.timeout_s is not None:

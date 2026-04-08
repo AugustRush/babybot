@@ -842,11 +842,9 @@ class OpenAICompatibleGateway(ModelProvider):
                         )
                     break
                 except Exception as exc:
-                    if isinstance(exc, asyncio.TimeoutError):
-                        raise
-                    if (
-                        attempt >= _MODEL_RETRY_ATTEMPTS
-                        or not self._is_retryable_exception(exc)
+                    is_timeout = isinstance(exc, asyncio.TimeoutError)
+                    if attempt >= _MODEL_RETRY_ATTEMPTS or (
+                        not is_timeout and not self._is_retryable_exception(exc)
                     ):
                         raise
                     logger.warning(

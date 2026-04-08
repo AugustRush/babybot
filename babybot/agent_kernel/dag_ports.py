@@ -354,7 +354,10 @@ class ResourceBridgeExecutor:
         notebook_node_id = notebook_binding.node_id
         notebook_bound = notebook_binding.active
         notebook_task_map = state_view.notebook_task_map()
-        upstream = task.metadata.get("upstream_results") or state_view.upstream_results_bucket()
+        upstream = (
+            task.metadata.get("upstream_results")
+            or state_view.upstream_results_bucket()
+        )
         original_goal = str(state_view.get("original_goal", "") or "").strip()
         original_request_header = str(
             state_view.get("original_request_header", "--- original_request ---")
@@ -372,10 +375,14 @@ class ResourceBridgeExecutor:
             parts.append(original_goal)
             enriched = True
 
-        if task.deps and upstream:
+        if upstream:
             dep_lines: list[str] = []
             dep_enriched = False
-            for dep_id in task.deps:
+            # If the task has explicit deps, only include those.
+            # Otherwise include ALL available upstream results (for
+            # follow-up tasks dispatched after earlier tasks complete).
+            upstream_keys = list(task.deps) if task.deps else list(upstream.keys())
+            for dep_id in upstream_keys:
                 if notebook_bound and not (
                     str(dep_id).startswith("task_")
                     or (

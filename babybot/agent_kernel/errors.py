@@ -83,10 +83,14 @@ def classify_error(error: str | Exception) -> ErrorDecision:
                 suggested_action="Check credentials/permissions or endpoint configuration.",
             )
 
+    # 3. Unrecognized errors — default to retryable with one conservative
+    #    retry.  A false-negative (failing to retry a transient error) is
+    #    worse than a false-positive (one extra attempt for a permanent
+    #    error), so we err on the side of retrying.
     return ErrorDecision(
         error_type="unknown",
-        retryable=False,
-        suggested_action="Unknown failure; inspect logs before retrying.",
+        retryable=True,
+        suggested_action="Unknown failure; one conservative retry allowed.",
     )
 
 

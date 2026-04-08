@@ -22,6 +22,8 @@ class LoopGuardConfig:
     max_context_messages: int = 100
     max_exploration_streak: int = 6
     tail_budget_ratio: float = 0.6  # fraction of token budget for tail protection
+    # Circuit breaker: disable tool after N consecutive failures.
+    tool_circuit_break_threshold: int = 3
 
 
 @dataclass(frozen=True)
@@ -57,14 +59,42 @@ class LoopGuard:
             maxlen=max(2, config.ping_pong_window * 2)
         )
         self._exploration_streak = 0
+        # Circuit breaker state: consecutive failure count per tool.
+        self._consecutive_failures: dict[str, int] = {}
+        self._circuit_open: set[str] = set()
 
     @property
     def enabled(self) -> bool:
         return self._config.enabled
 
+    def record_tool_result(self, tool_name: str, *, ok: bool) -> None:
+        """Track tool success/failure for circuit breaker logic."""
+        if ok:
+            # Reset consecutive failure counter on success.
+            self._consecutive_failures.pop(tool_name, None)
+            self._circuit_open.discard(tool_name)
+        else:
+            count = self._consecutive_failures.get(tool_name, 0) + 1
+            self._consecutive_failures[tool_name] = count
+            threshold = self._config.tool_circuit_break_threshold
+            if threshold > 0 and count >= threshold:
+                self._circuit_open.add(tool_name)
+
     def check_call(self, tool_name: str, arguments: Any) -> LoopVerdict:
         if not self._config.enabled:
             return LoopVerdict()
+
+        # Circuit breaker: tool disabled after N consecutive failures.
+        if tool_name in self._circuit_open:
+            return LoopVerdict(
+                blocked=True,
+                reason=(
+                    f"Tool '{tool_name}' circuit-broken after "
+                    f"{self._consecutive_failures.get(tool_name, 0)} "
+                    f"consecutive failures. Use a different tool or approach."
+                ),
+                disable_tool=True,
+            )
 
         digest = self._call_digest(tool_name, arguments)
         self._call_counts[digest] = self._call_counts.get(digest, 0) + 1

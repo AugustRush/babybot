@@ -965,6 +965,14 @@ class DynamicOrchestrator:
                     upstream_results = self._recent_successful_upstream_results(
                         runtime.results
                     )
+                # Populate the shared upstream_results bucket so
+                # _enrich_with_upstream in dag_ports.py can inject them
+                # into the worker prompt (single injection point).
+                if upstream_results:
+                    bucket = context.state.setdefault("upstream_results", {})
+                    for tid, result in upstream_results.items():
+                        output = getattr(result, "output", result)
+                        bucket[tid] = str(output or "")
                 dispatch_args["__public_description"] = raw_description
                 dispatch_args["__feedback_label"] = feedback_label
                 dispatch_args["description"] = self._normalize_child_task_description(

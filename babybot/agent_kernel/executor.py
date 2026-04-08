@@ -1073,6 +1073,7 @@ class SingleAgentExecutor:
             for tc, output, artifacts, failed in done:
                 if failed:
                     session.tool_failure_count += 1
+                session.loop_guard.record_tool_result(tc.name, ok=not failed)
                 _collect_media(artifacts)
                 exploration_call = session.loop_guard.is_exploration_call(
                     tc.name,

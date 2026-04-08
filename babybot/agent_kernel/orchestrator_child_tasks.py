@@ -50,9 +50,7 @@ class ChildTaskRuntimeHelper:
     ) -> None:
         self._config = config
         self._is_maintenance_goal = is_maintenance_goal or _default_is_maintenance_goal
-        self._has_parallel_intent = (
-            has_parallel_intent or _default_has_parallel_intent
-        )
+        self._has_parallel_intent = has_parallel_intent or _default_has_parallel_intent
 
     def merge_dispatch_calls_for_maintenance(
         self,
@@ -109,7 +107,9 @@ class ChildTaskRuntimeHelper:
                 else str(goal or "").strip()
             )
         )
-        merged_resources = list(dict.fromkeys(rid for rid in merged_resource_ids if rid))
+        merged_resources = list(
+            dict.fromkeys(rid for rid in merged_resource_ids if rid)
+        )
         first_call_id = mergeable_ids[0]
         normalized_calls: list[ModelToolCall] = []
         merged_inserted = False
@@ -202,19 +202,19 @@ class ChildTaskRuntimeHelper:
             return raw_description
 
         original_goal = str(context.state.get("original_goal", "") or "").strip()
-        upstream_outputs: dict[str, Any] = {}
-        if upstream_results:
-            for tid, result in upstream_results.items():
-                output_snippet = str(result.output or "").strip()
-                if output_snippet:
-                    upstream_outputs[tid] = output_snippet
+
+        # NOTE: upstream_results are intentionally NOT passed to the
+        # prompt builder here.  The full (untruncated) upstream outputs
+        # are injected later by _enrich_with_upstream in dag_ports.py,
+        # so including a 300-char truncated copy here would be redundant
+        # and waste tokens.
 
         try:
             built = builder(
                 raw_description=raw_description,
                 original_goal=original_goal,
                 resource_ids=resource_ids,
-                upstream_results=upstream_outputs,
+                upstream_results={},
             )
         except Exception:
             logger.exception("build_child_task_prompt raised; using raw description")

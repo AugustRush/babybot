@@ -1006,7 +1006,22 @@ class OrchestratorAgent:
                 else None
             ),
             metadata_overrides=(
-                {"routing_decision": routing_decision.model_dump()}
+                {
+                    "routing_decision": routing_decision.model_dump(),
+                    # Activate the direct_answer fast path in
+                    # ResourceBridgeExecutor for trivial social messages.
+                    # This skips tool-calling and just does a direct LLM
+                    # completion, saving 2-3 LLM round-trips.
+                    **(
+                        {"direct_answer": True}
+                        if (
+                            routing_decision.route_mode == "answer"
+                            and routing_decision.execution_style == "direct_execute"
+                            and routing_decision.decision_source == "rule"
+                        )
+                        else {}
+                    ),
+                }
                 if routing_decision is not None
                 else None
             ),
