@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _SUMMARIZE_PROMPT = (
     "CRITICAL: 仅输出纯文本 JSON，禁止调用任何工具，禁止任何 markdown 代码块包裹。\n\n"
+    "如果提供了 '## 上一次摘要'，请在其基础上整合新对话内容，保留仍然相关的信息，更新已完成的事项，移除已过时的内容。\n\n"
     "请将以下对话历史浓缩为 JSON 格式（用中文填写），严格按以下结构输出，不要输出其他内容：\n"
     '{"summary":"不超过200字的摘要，保留关键事实和已完成操作",'
     '"entities":["提到的关键实体，如人名、物品、话题等，最多5个"],'
@@ -109,7 +110,26 @@ class HandoffManager:
                         or ""
                     )
             # ── Phase B: LLM call outside lock ────────────────────────
-            raw_summary = await self._gateway.complete(_SUMMARIZE_PROMPT, history_text)
+            # Build user content with optional previous summary for
+            # incremental updates instead of rebuilding from scratch.
+            if prev_summary:
+                prev_state = (
+                    (prev_anchor.payload.get("state") or {}) if prev_anchor else {}
+                )
+                prev_context_parts = [f"## 上一次摘要\n{prev_summary}"]
+                # Add structured context from previous anchor
+                for key in ("entities", "artifacts", "decisions"):
+                    items = prev_state.get(key) or []
+                    if items:
+                        prev_context_parts.append(
+                            f"上次{key}: {', '.join(str(x) for x in items)}"
+                        )
+                user_content = (
+                    "\n\n".join(prev_context_parts) + f"\n\n## 最近对话\n{history_text}"
+                )
+            else:
+                user_content = history_text
+            raw_summary = await self._gateway.complete(_SUMMARIZE_PROMPT, user_content)
 
             # Parse structured JSON from LLM, fallback to plain summary
             structured: dict[str, Any] = {}
