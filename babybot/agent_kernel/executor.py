@@ -647,7 +647,10 @@ class SingleAgentExecutor:
             task.task_id,
         )
 
-        session.messages = session.loop_guard.compress_messages(session.messages)
+        session.messages = session.loop_guard.compress_messages(
+            session.messages,
+            max_model_tokens=session.max_model_tokens,
+        )
 
         # ── transformContext hook ─────────────────────────────
         transform_fn = context.transform_context

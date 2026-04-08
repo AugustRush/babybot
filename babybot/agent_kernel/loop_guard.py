@@ -21,6 +21,7 @@ class LoopGuardConfig:
     per_tool_call_budget: int = 20
     max_context_messages: int = 100
     max_exploration_streak: int = 6
+    tail_budget_ratio: float = 0.6  # fraction of token budget for tail protection
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,19 @@ class LoopVerdict:
     blocked: bool = False
     reason: str = ""
     disable_tool: bool = False
+
+
+def _estimate_message_tokens(msg: ModelMessage) -> int:
+    """Rough token estimate for a single message."""
+    tokens = 10  # overhead for role, metadata
+    if msg.content:
+        tokens += len(msg.content) // 4
+    if msg.tool_calls:
+        for tc in msg.tool_calls:
+            tokens += len(str(tc.arguments or "")) // 4 + 10
+    if msg.tool_call_id:
+        tokens += 5
+    return tokens
 
 
 class LoopGuard:
@@ -103,12 +117,21 @@ class LoopGuard:
 
         return LoopVerdict()
 
-    def compress_messages(self, messages: list[ModelMessage]) -> list[ModelMessage]:
+    def compress_messages(
+        self,
+        messages: list[ModelMessage],
+        *,
+        max_model_tokens: int = 0,
+    ) -> list[ModelMessage]:
         """Compact message history when context grows too large.
 
         Preserves tool_call / tool_result pairing integrity: when truncating,
         the cut point is adjusted so that assistant messages with tool_calls
         are never separated from their corresponding tool result messages.
+
+        When *max_model_tokens* > 0, the tail window size is computed from the
+        token budget (``tail_budget_ratio * max_model_tokens``) instead of the
+        fixed ``max_context_messages`` count.
         """
         if (
             not self._config.enabled
@@ -136,7 +159,24 @@ class LoopGuard:
 
         system_messages = [m for m in compacted if m.role == "system"]
         non_system = [m for m in compacted if m.role != "system"]
-        window = max(0, self._config.max_context_messages - len(system_messages))
+
+        # Phase 2: determine how many recent non-system messages to keep.
+        if max_model_tokens > 0:
+            budget = int(max_model_tokens * self._config.tail_budget_ratio)
+            # Walk backward, accumulate tokens
+            tail_count = 0
+            tail_tokens = 0
+            for msg in reversed(non_system):
+                msg_tokens = _estimate_message_tokens(msg)
+                if tail_tokens + msg_tokens > budget:
+                    break
+                tail_tokens += msg_tokens
+                tail_count += 1
+            # Use the larger of token-based count and a minimum of 4
+            window = max(4, tail_count)
+        else:
+            window = max(0, self._config.max_context_messages - len(system_messages))
+
         if len(non_system) > window:
             cut = len(non_system) - window
             # Move the cut forward to avoid splitting tool_call / tool_result
@@ -161,8 +201,24 @@ class LoopGuard:
         if len(compacted) <= self._config.max_context_messages:
             return compacted
 
+        # Phase 3 — emergency: keep only the most recent messages.
         system_messages = [m for m in compacted if m.role == "system"]
-        tail = [m for m in compacted if m.role != "system"][-4:]
+        non_system_messages = [m for m in compacted if m.role != "system"]
+
+        if max_model_tokens > 0:
+            budget = int(max_model_tokens * self._config.tail_budget_ratio)
+            tail: list[ModelMessage] = []
+            tail_tokens = 0
+            for msg in reversed(non_system_messages):
+                msg_tokens = _estimate_message_tokens(msg)
+                if tail_tokens + msg_tokens > budget:
+                    break
+                tail.insert(0, msg)
+                tail_tokens += msg_tokens
+            tail = tail or non_system_messages[-4:]  # safety fallback
+        else:
+            tail = non_system_messages[-4:]
+
         while tail and tail[0].role == "tool":
             tail = tail[1:]
         return [*system_messages, *tail]
@@ -216,7 +272,9 @@ class LoopGuard:
             return True
         if any(hint in lowered for hint in cls._WRITE_SHELL_HINTS):
             return False
-        return any(re.search(pattern, lowered) for pattern in cls._READ_ONLY_SHELL_PATTERNS)
+        return any(
+            re.search(pattern, lowered) for pattern in cls._READ_ONLY_SHELL_PATTERNS
+        )
 
     @classmethod
     def is_exploration_call(cls, tool_name: str, arguments: Any) -> bool:
