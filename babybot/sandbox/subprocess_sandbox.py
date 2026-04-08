@@ -209,22 +209,33 @@ class SubprocessSandbox:
                 pass
 
             try:
-                # File descriptor limit
+                # File descriptor limit — set soft limit only; keep the
+                # system hard limit so child processes can raise it if
+                # needed (e.g. Chromium/Playwright need many fds).
+                _, hard = rlimit_mod.getrlimit(rlimit_mod.RLIMIT_NOFILE)
+                soft = (
+                    min(config.max_file_descriptors, hard)
+                    if hard > 0
+                    else config.max_file_descriptors
+                )
                 rlimit_mod.setrlimit(
                     rlimit_mod.RLIMIT_NOFILE,
-                    (config.max_file_descriptors, config.max_file_descriptors),
+                    (soft, hard),
                 )
             except (ValueError, OSError):
                 pass
 
-            try:
-                # Process limit (prevent fork bombs)
-                rlimit_mod.setrlimit(
-                    rlimit_mod.RLIMIT_NPROC,
-                    (config.max_child_processes, config.max_child_processes),
-                )
-            except (ValueError, OSError, AttributeError):
-                pass  # Not available on all platforms
+            # NOTE: RLIMIT_NPROC is intentionally NOT set.
+            # It is a per-*user* limit (not per-process-tree), so it
+            # restricts ALL processes of the user — including the parent
+            # babybot service and concurrent tasks.  This caused chronic
+            # "fork: Resource temporarily unavailable" errors for tools
+            # that spawn subprocesses (Chromium, OpenCLI, etc.).
+            #
+            # Fork-bomb protection is already provided by:
+            # - RLIMIT_CPU (300s hard cap)
+            # - start_new_session=True (process-group isolation)
+            # - Timeout-based process-tree killing in _kill_process_tree
 
         return _apply_limits
 

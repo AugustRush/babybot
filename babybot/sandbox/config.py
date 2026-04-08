@@ -78,8 +78,10 @@ class SandboxConfig:
     cpu_limit_seconds: int = 300
     # macOS: RLIMIT_AS doesn't work reliably; use RLIMIT_RSS instead
     memory_limit_mb: int = 512
-    max_file_descriptors: int = 1024
-    max_child_processes: int = 256
+    max_file_descriptors: int = 8192
+    # max_child_processes is kept for documentation / future use but is
+    # no longer applied via RLIMIT_NPROC (see subprocess_sandbox.py).
+    max_child_processes: int = 4096
 
     # Legacy regex checks: kept as a *supplementary* fallback alongside AST
     legacy_regex_enabled: bool = True
