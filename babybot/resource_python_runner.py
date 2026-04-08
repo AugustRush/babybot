@@ -327,6 +327,7 @@ class ExternalPythonRunner:
                         env=owner._clean_env(),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
                     )
                 except OSError as exc:
                     detail = str(exc)
@@ -447,6 +448,7 @@ class ExternalPythonRunner:
                     env=owner._clean_env(),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
             except OSError as exc:
                 detail = str(exc)

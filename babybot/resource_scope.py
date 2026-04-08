@@ -7,6 +7,7 @@ from typing import Any
 from .agent_kernel import ToolLease
 from .agent_kernel.lease_utils import lease_to_dict
 from .resource_models import ResourceCapability
+from .resource_protocols import CatalogHost
 
 logger = logging.getLogger(__name__)
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -40,7 +41,7 @@ _NETWORK_RESOURCE_MARKERS = (
 
 
 class ResourceScopeHelper:
-    def __init__(self, owner: Any) -> None:
+    def __init__(self, owner: CatalogHost) -> None:
         self._owner = owner
 
     @staticmethod
@@ -91,7 +92,9 @@ class ResourceScopeHelper:
                 continue
             if include_tools or include_groups:
                 in_tools = name in include_tools if include_tools else False
-                in_groups = registered.group in include_groups if include_groups else False
+                in_groups = (
+                    registered.group in include_groups if include_groups else False
+                )
                 if not (in_tools or in_groups):
                     continue
             selected.append(registered)
@@ -126,7 +129,9 @@ class ResourceScopeHelper:
                     resource_id=self.mcp_resource_id(server_name),
                     resource_type="mcp",
                     name=server_name,
-                    purpose=group.description if group else f"MCP tools from {server_name}",
+                    purpose=group.description
+                    if group
+                    else f"MCP tools from {server_name}",
                     lease=lease,
                     active=(bool(group.active) if group else True) and bool(tool_names),
                     tool_group=group_name,
@@ -134,7 +139,9 @@ class ResourceScopeHelper:
                 )
             )
 
-        for skill in sorted(self._owner.skills.values(), key=lambda item: item.name.lower()):
+        for skill in sorted(
+            self._owner.skills.values(), key=lambda item: item.name.lower()
+        ):
             if not skill.active:
                 continue
             lease = skill.lease or ToolLease()
@@ -154,7 +161,8 @@ class ResourceScopeHelper:
                     name=skill.name,
                     purpose=skill.description or f"Skill: {skill.name}",
                     lease=lease,
-                    active=skill.active and (bool(tool_names) or not has_explicit_scope),
+                    active=skill.active
+                    and (bool(tool_names) or not has_explicit_scope),
                     tool_group=skill.tool_group,
                     tool_names=tool_names,
                     keywords=tuple(skill.keywords or ()),
@@ -301,7 +309,11 @@ class ResourceScopeHelper:
         if normalized_resource_id and normalized_resource_id in normalized_query:
             score += 120
             reasons.append("explicit_resource_id")
-        elif normalized_name and len(normalized_name) >= 3 and normalized_name in normalized_query:
+        elif (
+            normalized_name
+            and len(normalized_name) >= 3
+            and normalized_name in normalized_query
+        ):
             score += 80
             reasons.append("explicit_name")
 
@@ -348,9 +360,7 @@ class ResourceScopeHelper:
 
         semantic_query = self._strip_urls(normalized_query).strip()
         tokenizer = getattr(self._owner, "_tokenize", None)
-        query_terms = (
-            tokenizer(semantic_query) if callable(tokenizer) else set()
-        )
+        query_terms = tokenizer(semantic_query) if callable(tokenizer) else set()
         require_network = self._query_requires_network(normalized_query)
         matches: list[dict[str, Any]] = []
 
@@ -405,9 +415,7 @@ class ResourceScopeHelper:
             item["resource_id"] for item in matches if item["role"] == "primary"
         ][:1]
         supporting_resource_ids = [
-            item["resource_id"]
-            for item in matches
-            if item["role"] == "supporting"
+            item["resource_id"] for item in matches if item["role"] == "supporting"
         ][: max(0, limit - len(primary_resource_ids))]
         resource_ids = list(
             dict.fromkeys([*primary_resource_ids, *supporting_resource_ids])
@@ -447,8 +455,10 @@ class ResourceScopeHelper:
             ]
 
         raw_include_tools = lease.get("include_tools") or ()
-        known_tools = set(self._owner.registry._tools.keys())
-        valid_include_tools = [tool for tool in raw_include_tools if tool in known_tools]
+        known_tools = self._owner.registry.known_names()
+        valid_include_tools = [
+            tool for tool in raw_include_tools if tool in known_tools
+        ]
         if raw_include_tools and not valid_include_tools:
             logger.warning(
                 "Lease include_tools contained no valid names, ignoring: %s",

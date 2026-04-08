@@ -9,12 +9,13 @@ from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from .resource_models import ToolGroup
+from .resource_protocols import SkillHost
 
 logger = logging.getLogger(__name__)
 
 
 class ResourceToolLoader:
-    def __init__(self, owner: Any) -> None:
+    def __init__(self, owner: SkillHost) -> None:
         self._owner = owner
 
     def register_tool(
@@ -124,7 +125,9 @@ class ResourceToolLoader:
             return {"type": "string"}
 
         if origin in {list, tuple, set}:
-            item_schema = cls.schema_for_annotation(args[0]) if args else {"type": "string"}
+            item_schema = (
+                cls.schema_for_annotation(args[0]) if args else {"type": "string"}
+            )
             return {"type": "array", "items": item_schema}
 
         if origin is dict:
@@ -135,7 +138,9 @@ class ResourceToolLoader:
             return schema
 
         if origin is Literal:
-            values = [value for value in args if isinstance(value, (str, int, float, bool))]
+            values = [
+                value for value in args if isinstance(value, (str, int, float, bool))
+            ]
             if not values:
                 return {"type": "string"}
             first = values[0]

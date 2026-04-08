@@ -31,19 +31,17 @@ class Tool(Protocol):
     """Tool protocol."""
 
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     @property
-    def description(self) -> str:
-        ...
+    def description(self) -> str: ...
 
     @property
-    def schema(self) -> dict[str, Any]:
-        ...
+    def schema(self) -> dict[str, Any]: ...
 
-    async def invoke(self, args: dict[str, Any], context: ToolContext) -> ToolResult:
-        ...
+    async def invoke(
+        self, args: dict[str, Any], context: ToolContext
+    ) -> ToolResult: ...
 
 
 @dataclass(frozen=True)
@@ -75,6 +73,10 @@ class ToolRegistry:
     def get(self, name: str) -> RegisteredTool | None:
         return self._tools.get(name)
 
+    def known_names(self) -> set[str]:
+        """Return the set of all registered tool names."""
+        return set(self._tools.keys())
+
     def list(self, lease: ToolLease | None = None) -> list[RegisteredTool]:
         lease = lease or ToolLease()
         include_groups = set(lease.include_groups)
@@ -87,13 +89,17 @@ class ToolRegistry:
                 continue
             if include_tools or include_groups:
                 in_tools = name in include_tools if include_tools else False
-                in_groups = registered.group in include_groups if include_groups else False
+                in_groups = (
+                    registered.group in include_groups if include_groups else False
+                )
                 if not (in_tools or in_groups):
                     continue
             selected.append(registered)
         return selected
 
-    def tool_schemas(self, lease: ToolLease | None = None) -> tuple[dict[str, Any], ...]:
+    def tool_schemas(
+        self, lease: ToolLease | None = None
+    ) -> tuple[dict[str, Any], ...]:
         schemas = []
         for registered in self.list(lease):
             schemas.append(

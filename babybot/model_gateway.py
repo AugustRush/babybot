@@ -221,6 +221,67 @@ class OpenAICompatibleGateway(ModelProvider):
             return False
         return True
 
+    def _supports_prompt_caching(self) -> bool:
+        """Check if the configured provider supports prompt caching."""
+        model = (self._config.model.model_name or "").lower()
+        base = (self._config.model.api_base or "").lower()
+        # Anthropic models via any compatible endpoint
+        if "claude" in model:
+            return True
+        if "anthropic" in base:
+            return True
+        return False
+
+    @staticmethod
+    def _apply_prompt_cache_markers(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Apply Anthropic prompt caching markers to system prompt + last 3 non-system messages.
+
+        Uses up to 4 cache breakpoints (Anthropic's maximum):
+        - 1 on the system prompt
+        - Up to 3 on the last non-system messages
+
+        Operates on OpenAI-format message dicts (not ModelMessage objects).
+        """
+        if not messages:
+            return messages
+
+        marker = {"type": "ephemeral"}
+        breakpoints_used = 0
+        max_breakpoints = 4
+
+        # 1. Mark the system prompt (first message if role == "system")
+        if messages[0].get("role") == "system":
+            content = messages[0].get("content")
+            if isinstance(content, str) and content:
+                messages[0]["content"] = [
+                    {"type": "text", "text": content, "cache_control": marker}
+                ]
+            elif isinstance(content, list) and content:
+                # Already a list of content blocks — mark the last one
+                content[-1]["cache_control"] = marker
+            breakpoints_used += 1
+
+        # 2. Mark last N non-system messages
+        remaining = max_breakpoints - breakpoints_used
+        non_sys_indices = [
+            i for i, m in enumerate(messages) if m.get("role") != "system"
+        ]
+        for idx in non_sys_indices[-remaining:]:
+            msg = messages[idx]
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                msg["content"] = [
+                    {"type": "text", "text": content, "cache_control": marker}
+                ]
+            elif isinstance(content, list) and content:
+                content[-1]["cache_control"] = marker
+            elif msg.get("role") == "tool":
+                msg["cache_control"] = marker
+
+        return messages
+
     @staticmethod
     def _extract_stream_delta_text(delta: Any) -> str:
         content = getattr(delta, "content", None)
@@ -266,6 +327,15 @@ class OpenAICompatibleGateway(ModelProvider):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+
+        if self._supports_prompt_caching():
+            messages = self._apply_prompt_cache_markers(messages)
+            kwargs["messages"] = messages
+            kwargs["extra_headers"] = {
+                **(kwargs.get("extra_headers") or {}),
+                "anthropic-beta": "prompt-caching-2024-07-31",
+            }
+
         accumulated_text = ""
         started = time.perf_counter()
         first_chunk_elapsed: float | None = None
@@ -713,6 +783,14 @@ class OpenAICompatibleGateway(ModelProvider):
             kwargs["tools"] = list(request.tools)
             kwargs["tool_choice"] = "auto"
             tool_count = len(request.tools)
+
+        if self._supports_prompt_caching():
+            messages = self._apply_prompt_cache_markers(messages)
+            kwargs["messages"] = messages
+            kwargs["extra_headers"] = {
+                **(kwargs.get("extra_headers") or {}),
+                "anthropic-beta": "prompt-caching-2024-07-31",
+            }
 
         task_id = meta.get("task_id", "?")
         step = meta.get("step", "?")

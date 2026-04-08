@@ -13,6 +13,7 @@ from .agent_kernel import (
     ToolLease,
 )
 from .agent_kernel.lease_utils import filter_tool_lease, merge_tool_leases
+from .resource_protocols import SubagentHost
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class ResourceSubagentRuntime:
         }
     )
 
-    def __init__(self, owner: Any) -> None:
+    def __init__(self, owner: SubagentHost) -> None:
         self._owner = owner
 
     @classmethod
@@ -93,7 +94,9 @@ class ResourceSubagentRuntime:
                     ("plan_notebook", plan_notebook),
                     (
                         "plan_notebook_id",
-                        getattr(plan_notebook, "notebook_id", "") if plan_notebook is not None else None,
+                        getattr(plan_notebook, "notebook_id", "")
+                        if plan_notebook is not None
+                        else None,
                     ),
                     ("current_notebook_node_id", notebook_node_id),
                 ]
@@ -250,7 +253,11 @@ class ResourceSubagentRuntime:
                 fallback_media = self._owner._extract_media_from_text(text)
                 merged_media = tuple(
                     dict.fromkeys(
-                        [*tuple(result.artifacts or ()), *collected_media, *fallback_media]
+                        [
+                            *tuple(result.artifacts or ()),
+                            *collected_media,
+                            *fallback_media,
+                        ]
                     )
                 )
                 return TaskResult(

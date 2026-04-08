@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import signal
 from pathlib import Path
 from typing import Any
 
+from .resource_protocols import WorkspaceHost
+from .sandbox import ASTSafetyChecker, SandboxConfig, SubprocessSandbox
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Legacy regex patterns — kept as a SUPPLEMENTARY layer alongside AST checks.
+# These catch obvious patterns quickly; the AST checker handles evasion.
+# ---------------------------------------------------------------------------
 
 _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"rm\s+(-[^\s]*\s+)*-[^\s]*[rR]", "recursive delete"),
@@ -45,8 +55,13 @@ _DANGEROUS_PYTHON_PATTERNS: list[tuple[str, str]] = [
     (r"exec\s*\(", "dynamic exec"),
 ]
 
+# Shared instances — created once, reused across all calls.
+_ast_checker = ASTSafetyChecker()
+_sandbox = SubprocessSandbox(SandboxConfig())
+
 
 def check_shell_safety(command: str) -> str | None:
+    """Legacy regex-based shell safety check (supplementary layer)."""
     for pattern, label in _DANGEROUS_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return f"Blocked: command matches dangerous pattern ({label})"
@@ -54,10 +69,21 @@ def check_shell_safety(command: str) -> str | None:
 
 
 def check_python_safety(code: str) -> str | None:
+    """Two-layer Python safety check: AST allowlist + legacy regex."""
+    # Layer 1: AST-level analysis (primary defense)
+    ast_error = _ast_checker.check_and_format(code)
+    if ast_error:
+        return ast_error
+    # Layer 2: Legacy regex patterns (supplementary)
     for pattern, label in _DANGEROUS_PYTHON_PATTERNS:
         if re.search(pattern, code, re.IGNORECASE | re.DOTALL):
             return f"Blocked: python code matches dangerous pattern ({label})"
     return None
+
+
+def get_sandbox() -> SubprocessSandbox:
+    """Get the shared sandbox instance (for use by resource_python_runner)."""
+    return _sandbox
 
 
 class WorkspaceToolSuite:
@@ -68,24 +94,8 @@ class WorkspaceToolSuite:
     def _render_command_result(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    def __init__(self, owner: Any) -> None:
+    def __init__(self, owner: WorkspaceHost) -> None:
         self._owner = owner
-
-    async def _kill_process_tree(self, proc: asyncio.subprocess.Process) -> None:
-        if proc.returncode is not None:
-            return
-        try:
-            if hasattr(os, "killpg"):
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except ProcessLookupError:
-            pass
-        except Exception:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
 
     async def execute_python_code(
         self,
@@ -108,31 +118,16 @@ class WorkspaceToolSuite:
                 }
             )
         ws = str(self._owner._get_active_write_root())
-        proc = await asyncio.create_subprocess_exec(
+        timeout_s = self._owner._coerce_timeout(timeout, default=300.0)
+        result = await _sandbox.run(
             self._owner._get_user_python(),
-            "-",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            ["-"],
+            stdin_data=code.encode("utf-8"),
             cwd=ws,
             env=self._owner._clean_env(),
-            start_new_session=True,
+            timeout=timeout_s,
         )
-        timeout_s = self._owner._coerce_timeout(timeout, default=300.0)
-        communicate_coro = proc.communicate(input=code.encode("utf-8"))
-        try:
-            if timeout_s and timeout_s > 0:
-                stdout, stderr = await asyncio.wait_for(
-                    communicate_coro, timeout=timeout_s
-                )
-            else:
-                stdout, stderr = await communicate_coro
-        except asyncio.TimeoutError:
-            await self._kill_process_tree(proc)
-            try:
-                await proc.communicate()
-            except Exception:
-                pass
+        if result.timed_out:
             timeout_message = f"Timeout: python execution exceeded {timeout_s}s."
             return self._render_command_result(
                 {
@@ -146,25 +141,19 @@ class WorkspaceToolSuite:
                     "output": timeout_message,
                 }
             )
-        except Exception:
-            try:
-                communicate_coro.close()
-            except Exception:
-                pass
-            raise
-        out = (stdout or b"").decode("utf-8", errors="ignore")
-        err = (stderr or b"").decode("utf-8", errors="ignore")
-        text = out.strip()
-        if err.strip():
-            text = f"{text}\n{err.strip()}".strip()
+        out = result.stdout.strip()
+        err = result.stderr.strip()
+        text = out
+        if err:
+            text = f"{text}\n{err}".strip()
         return self._render_command_result(
             {
-                "ok": int(proc.returncode or 0) == 0,
+                "ok": result.returncode == 0,
                 "timed_out": False,
                 "blocked": False,
-                "exit_code": int(proc.returncode or 0),
-                "stdout": out.strip(),
-                "stderr": err.strip(),
+                "exit_code": result.returncode,
+                "stdout": out,
+                "stderr": err,
                 "output": text,
             }
         )
@@ -190,31 +179,16 @@ class WorkspaceToolSuite:
                 }
             )
         ws = str(self._owner._get_active_write_root())
-        proc = await asyncio.create_subprocess_exec(
-            "/bin/sh",
-            "-lc",
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        timeout_s = self._owner._coerce_timeout(timeout, default=300.0)
+        shell_exe, shell_args = _sandbox.build_shell_args(command)
+        result = await _sandbox.run(
+            shell_exe,
+            shell_args,
             cwd=ws,
             env=self._owner._clean_env(),
-            start_new_session=True,
+            timeout=timeout_s,
         )
-        timeout_s = self._owner._coerce_timeout(timeout, default=300.0)
-        communicate_coro = proc.communicate()
-        try:
-            if timeout_s and timeout_s > 0:
-                stdout, stderr = await asyncio.wait_for(
-                    communicate_coro, timeout=timeout_s
-                )
-            else:
-                stdout, stderr = await communicate_coro
-        except asyncio.TimeoutError:
-            await self._kill_process_tree(proc)
-            try:
-                await proc.communicate()
-            except Exception:
-                pass
+        if result.timed_out:
             timeout_message = f"Timeout: shell command exceeded {timeout_s}s."
             return self._render_command_result(
                 {
@@ -228,25 +202,19 @@ class WorkspaceToolSuite:
                     "output": timeout_message,
                 }
             )
-        except Exception:
-            try:
-                communicate_coro.close()
-            except Exception:
-                pass
-            raise
-        out = (stdout or b"").decode("utf-8", errors="ignore")
-        err = (stderr or b"").decode("utf-8", errors="ignore")
-        text = out.strip()
-        if err.strip():
-            text = f"{text}\n{err.strip()}".strip()
+        out = result.stdout.strip()
+        err = result.stderr.strip()
+        text = out
+        if err:
+            text = f"{text}\n{err}".strip()
         return self._render_command_result(
             {
-                "ok": int(proc.returncode or 0) == 0,
+                "ok": result.returncode == 0,
                 "timed_out": False,
                 "blocked": False,
-                "exit_code": int(proc.returncode or 0),
-                "stdout": out.strip(),
-                "stderr": err.strip(),
+                "exit_code": result.returncode,
+                "stdout": out,
+                "stderr": err,
                 "output": text,
             }
         )
@@ -296,10 +264,7 @@ class WorkspaceToolSuite:
         window = max(1, int(limit or self.DEFAULT_VIEW_LINE_LIMIT))
         window = min(window, self.MAX_VIEW_LINE_LIMIT)
         end_idx = min(len(line_list), start_idx + window)
-        selected = [
-            (idx + 1, line_list[idx])
-            for idx in range(start_idx, end_idx)
-        ]
+        selected = [(idx + 1, line_list[idx]) for idx in range(start_idx, end_idx)]
         return self._format_file_view(
             resolved,
             selected,
@@ -410,15 +375,17 @@ class WorkspaceToolSuite:
             f"next_offset={next_offset if next_offset is not None else '-'} "
             f"limit={limit if limit is not None else '-'}]"
         )
-        body = "\n".join(
-            f"{lineno} | {line.rstrip()}" for lineno, line in selected
-        )
+        body = "\n".join(f"{lineno} | {line.rstrip()}" for lineno, line in selected)
         if truncated and next_offset is not None:
             footer_parts = [
                 f"[Truncated. Use offset={next_offset} limit={limit or WorkspaceToolSuite.DEFAULT_VIEW_LINE_LIMIT} "
                 "or ranges=[start,end] to read more.]"
             ]
-            if requested_limit is not None and limit is not None and requested_limit > limit:
+            if (
+                requested_limit is not None
+                and limit is not None
+                and requested_limit > limit
+            ):
                 footer_parts.append(
                     f"[Requested limit={requested_limit} was capped at {limit}.]"
                 )

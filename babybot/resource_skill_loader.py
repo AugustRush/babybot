@@ -15,12 +15,13 @@ from .resource_models import (
     SkillRuntimeConfig,
     ToolGroup,
 )
+from .resource_protocols import SkillHost
 
 logger = logging.getLogger(__name__)
 
 
 class SkillLoader:
-    def __init__(self, owner: Any) -> None:
+    def __init__(self, owner: SkillHost) -> None:
         self._owner = owner
 
     def _record_load_error(
@@ -72,9 +73,15 @@ class SkillLoader:
                     runtime=runtime,
                     callable_tool_cls=self._owner._callable_tool_cls(),
                 )
-                meta_include_groups = self._parse_frontmatter_list(meta.get("include_groups"))
-                meta_include_tools = self._parse_frontmatter_list(meta.get("include_tools"))
-                meta_exclude_tools = self._parse_frontmatter_list(meta.get("exclude_tools"))
+                meta_include_groups = self._parse_frontmatter_list(
+                    meta.get("include_groups")
+                )
+                meta_include_tools = self._parse_frontmatter_list(
+                    meta.get("include_tools")
+                )
+                meta_exclude_tools = self._parse_frontmatter_list(
+                    meta.get("exclude_tools")
+                )
                 description = conf.get("description") or meta.get("description", "")
                 keywords = self.normalize_keywords(
                     conf.get("keywords"),
@@ -97,7 +104,11 @@ class SkillLoader:
                         phrases=phrases,
                         lease=ToolLease(
                             include_groups=tuple(
-                                set(self._parse_frontmatter_list(conf.get("include_groups")))
+                                set(
+                                    self._parse_frontmatter_list(
+                                        conf.get("include_groups")
+                                    )
+                                )
                                 | set(meta_include_groups)
                                 | ({tool_group} if tool_group else set())
                             ),
@@ -105,7 +116,9 @@ class SkillLoader:
                                 dict.fromkeys(
                                     [
                                         *meta_include_tools,
-                                        *self._parse_frontmatter_list(conf.get("include_tools")),
+                                        *self._parse_frontmatter_list(
+                                            conf.get("include_tools")
+                                        ),
                                     ]
                                 )
                             ),
@@ -113,7 +126,9 @@ class SkillLoader:
                                 dict.fromkeys(
                                     [
                                         *meta_exclude_tools,
-                                        *self._parse_frontmatter_list(conf.get("exclude_tools")),
+                                        *self._parse_frontmatter_list(
+                                            conf.get("exclude_tools")
+                                        ),
                                     ]
                                 )
                             ),
@@ -128,14 +143,19 @@ class SkillLoader:
             except Exception as exc:
                 self._record_load_error(
                     skill_name=name,
-                    path=Path(conf.get("directory", "")) if conf.get("directory") else Path("."),
+                    path=Path(conf.get("directory", ""))
+                    if conf.get("directory")
+                    else Path("."),
                     error=str(exc),
                     stage="configured-skill",
                 )
                 logger.warning("Failed to load configured skill %s: %s", name, exc)
 
     def discover_skills(self) -> None:
-        roots = [self._owner.config.workspace_skills_dir, self._owner.config.builtin_skills_dir]
+        roots = [
+            self._owner.config.workspace_skills_dir,
+            self._owner.config.builtin_skills_dir,
+        ]
         for root in roots:
             if not root.exists() or not root.is_dir():
                 continue
@@ -152,9 +172,15 @@ class SkillLoader:
                         runtime=runtime,
                         callable_tool_cls=self._owner._callable_tool_cls(),
                     )
-                    meta_include_groups = self._parse_frontmatter_list(meta.get("include_groups"))
-                    meta_include_tools = self._parse_frontmatter_list(meta.get("include_tools"))
-                    meta_exclude_tools = self._parse_frontmatter_list(meta.get("exclude_tools"))
+                    meta_include_groups = self._parse_frontmatter_list(
+                        meta.get("include_groups")
+                    )
+                    meta_include_tools = self._parse_frontmatter_list(
+                        meta.get("include_tools")
+                    )
+                    meta_exclude_tools = self._parse_frontmatter_list(
+                        meta.get("exclude_tools")
+                    )
                     key = name.strip().lower()
                     if key in self._owner.skills:
                         continue
@@ -185,7 +211,7 @@ class SkillLoader:
                                     dict.fromkeys(
                                         [
                                             *meta_include_groups,
-                                            *(([tool_group] if tool_group else [])),
+                                            *([tool_group] if tool_group else []),
                                         ]
                                     )
                                 ),
@@ -331,7 +357,11 @@ class SkillLoader:
         if isinstance(raw_value, (list, tuple, set)):
             items = [str(item).strip() for item in raw_value if str(item).strip()]
         else:
-            items = [part.strip() for part in re.split(r"[,\n]+", str(raw_value)) if part.strip()]
+            items = [
+                part.strip()
+                for part in re.split(r"[,\n]+", str(raw_value))
+                if part.strip()
+            ]
         return tuple(dict.fromkeys(items))
 
     @classmethod
@@ -348,7 +378,10 @@ class SkillLoader:
         prompt = (prompt_body or "").strip()
         if len(prompt) <= max_chars:
             return prompt
-        return prompt[:max_chars].rstrip() + "\n\n[技能正文已省略；仅在强命中时再加载完整 SKILL.md]"
+        return (
+            prompt[:max_chars].rstrip()
+            + "\n\n[技能正文已省略；仅在强命中时再加载完整 SKILL.md]"
+        )
 
     @staticmethod
     def skip_skill_function_name(name: str) -> bool:
@@ -387,7 +420,9 @@ class SkillLoader:
             )
         elif isinstance(raw_keywords, str) and raw_keywords.strip():
             phrases.extend(
-                p.strip().lower() for p in re.split(r"[,\n]+", raw_keywords) if p.strip()
+                p.strip().lower()
+                for p in re.split(r"[,\n]+", raw_keywords)
+                if p.strip()
             )
         phrases.extend(str(x).strip().lower() for x in fallback if str(x).strip())
         normalized = []
