@@ -1,7 +1,7 @@
 ---
 name: skill-manager
 description: Use when creating, updating, installing, enabling, disabling, deleting, or reloading babybot skills. This is the single entry point for all skill lifecycle operations.
-include_groups: code
+include_groups: code, admin
 ---
 
 # Skill Manager
