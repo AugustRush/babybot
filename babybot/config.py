@@ -20,6 +20,7 @@ class ModelConfig:
     api_base: str = ""
     temperature: float = 0.7
     max_tokens: int = 65536
+    cheap_model_name: str = ""  # optional: cheap model for simple queries
 
     def validate(self) -> None:
         """Validate configuration."""
@@ -195,6 +196,7 @@ class Config:
             api_base=model_conf.get("api_base", "") or os.getenv("OPENAI_API_BASE", ""),
             temperature=model_conf.get("temperature", 0.7),
             max_tokens=model_conf.get("max_tokens", 65536),
+            cheap_model_name=model_conf.get("cheap_model_name", ""),
         )
 
         # Create system config
@@ -373,6 +375,7 @@ class Config:
                 "api_base": "",
                 "temperature": 0.7,
                 "max_tokens": 65536,
+                "cheap_model_name": "",
             },
             "mcp_servers": {},
             "system": {
@@ -478,6 +481,7 @@ class Config:
                 "api_base": self.model.api_base,
                 "temperature": self.model.temperature,
                 "max_tokens": self.model.max_tokens,
+                "cheap_model_name": self.model.cheap_model_name,
             },
             "mcp_servers": self.mcp_servers,
             "paths": {

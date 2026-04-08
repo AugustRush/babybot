@@ -33,6 +33,34 @@ _MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024
 _MODEL_RETRY_ATTEMPTS = 3
 _MODEL_RETRY_BASE_DELAY_S = 0.25
 
+_COMPLEX_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "debug",
+        "implement",
+        "refactor",
+        "traceback",
+        "exception",
+        "error",
+        "analyze",
+        "investigate",
+        "architecture",
+        "design",
+        "compare",
+        "benchmark",
+        "optimize",
+        "review",
+        "plan",
+        "test",
+        "tests",
+        "deploy",
+        "migrate",
+        "docker",
+    }
+)
+
+_MAX_SIMPLE_CHARS = 160
+_MAX_SIMPLE_WORDS = 28
+
 
 def _image_to_content_part(image_ref: str) -> dict[str, Any]:
     """File path or data URI → OpenAI image_url content part."""
@@ -159,6 +187,41 @@ class OpenAICompatibleGateway(ModelProvider):
         await asyncio.sleep(_MODEL_RETRY_BASE_DELAY_S * (2 ** max(0, attempt - 1)))
 
     @staticmethod
+    def _is_simple_message(request: ModelRequest) -> bool:
+        """Check if the request contains only a simple user message."""
+        # Find the last user message
+        last_user = ""
+        for msg in reversed(request.messages):
+            if msg.role == "user":
+                last_user = msg.content or ""
+                break
+        if not last_user:
+            return False
+        text = last_user.strip()
+        # Length checks
+        if len(text) > _MAX_SIMPLE_CHARS:
+            return False
+        if len(text.split()) > _MAX_SIMPLE_WORDS:
+            return False
+        # Multi-line
+        if text.count("\n") > 1:
+            return False
+        # Code blocks or backticks
+        if "```" in text or "`" in text:
+            return False
+        # URLs
+        if "://" in text or "www." in text:
+            return False
+        # Complex keywords
+        words = {w.strip(".,!?;:\"'()[]{}，。！？；：").lower() for w in text.split()}
+        if words & _COMPLEX_KEYWORDS:
+            return False
+        # Has tool calls in response context (indicates ongoing complex task)
+        if request.tools:
+            return False
+        return True
+
+    @staticmethod
     def _extract_stream_delta_text(delta: Any) -> str:
         content = getattr(delta, "content", None)
         if content is None and isinstance(delta, dict):
@@ -230,7 +293,9 @@ class OpenAICompatibleGateway(ModelProvider):
                                     len(piece),
                                 )
                             accumulated_text += piece
-                            await self._call_stream_callback(on_stream_text, accumulated_text)
+                            await self._call_stream_callback(
+                                on_stream_text, accumulated_text
+                            )
                     return
                 except Exception as exc:
                     if (
@@ -299,7 +364,9 @@ class OpenAICompatibleGateway(ModelProvider):
         return value or ""
 
     @staticmethod
-    def _extract_string_field_from_partial_json(raw: str, field_name: str) -> str | None:
+    def _extract_string_field_from_partial_json(
+        raw: str, field_name: str
+    ) -> str | None:
         marker = f'"{field_name}"'
         start = raw.find(marker)
         if start < 0:
@@ -478,7 +545,12 @@ class OpenAICompatibleGateway(ModelProvider):
         }
 
         async def _consume() -> None:
-            nonlocal streamed_text, finish_reason, saw_content_text, first_chunk_elapsed, usage_payload
+            nonlocal \
+                streamed_text, \
+                finish_reason, \
+                saw_content_text, \
+                first_chunk_elapsed, \
+                usage_payload
             for attempt in range(1, _MODEL_RETRY_ATTEMPTS + 1):
                 try:
                     stream = await client.chat.completions.create(
@@ -529,20 +601,28 @@ class OpenAICompatibleGateway(ModelProvider):
                                 name = self._read_delta_field(function, "name")
                                 if isinstance(name, str) and name:
                                     acc["name"] += name
-                                arguments = self._read_delta_field(function, "arguments")
+                                arguments = self._read_delta_field(
+                                    function, "arguments"
+                                )
                                 if isinstance(arguments, str) and arguments:
                                     acc["arguments"] += arguments
 
                             next_text = streamed_text
                             if not saw_content_text:
-                                next_text = self._extract_reply_text_from_stream_tool_calls(
-                                    tool_calls
+                                next_text = (
+                                    self._extract_reply_text_from_stream_tool_calls(
+                                        tool_calls
+                                    )
                                 )
                             if next_text and next_text != streamed_text:
                                 streamed_text = next_text
-                                await self._call_stream_callback(on_stream_text, streamed_text)
+                                await self._call_stream_callback(
+                                    on_stream_text, streamed_text
+                                )
                             elif piece:
-                                await self._call_stream_callback(on_stream_text, streamed_text)
+                                await self._call_stream_callback(
+                                    on_stream_text, streamed_text
+                                )
                     return
                 except Exception as exc:
                     if (
@@ -598,7 +678,9 @@ class OpenAICompatibleGateway(ModelProvider):
                 "usage": (
                     usage_payload
                     if any(usage_payload.values())
-                    else self._fallback_usage(kwargs.get("messages", []), streamed_text.strip())
+                    else self._fallback_usage(
+                        kwargs.get("messages", []), streamed_text.strip()
+                    )
                 ),
                 "model": str(kwargs.get("model", self._config.model.model_name)),
             },
@@ -613,6 +695,13 @@ class OpenAICompatibleGateway(ModelProvider):
         messages = [self._to_openai_message(msg) for msg in request.messages]
         meta = request.metadata or {}
         requested_model = str(meta.get("model_name") or self._config.model.model_name)
+        if (
+            not meta.get("model_name")
+            and self._config.model.cheap_model_name
+            and self._is_simple_message(request)
+        ):
+            requested_model = self._config.model.cheap_model_name
+            logger.debug("Smart routing: using cheap model %s", requested_model)
         kwargs: dict[str, Any] = {
             "model": requested_model,
             "messages": messages,

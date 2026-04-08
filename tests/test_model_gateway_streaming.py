@@ -18,6 +18,7 @@ class _Config:
             api_base="",
             temperature=0.1,
             max_tokens=128,
+            cheap_model_name="",
         )
         self.system = SimpleNamespace(subtask_timeout=10)
 
@@ -337,8 +338,8 @@ def test_generate_retries_transient_non_streaming_failure() -> None:
 def test_decode_partial_json_string_keeps_valid_prefix_before_trailing_escape() -> None:
     gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
 
-    assert gateway._decode_partial_json_string('\\u4f60\\') == '你'
-    assert gateway._decode_partial_json_string('abc\\u4f60\\') == 'abc你'
+    assert gateway._decode_partial_json_string("\\u4f60\\") == "你"
+    assert gateway._decode_partial_json_string("abc\\u4f60\\") == "abc你"
 
 
 def test_parse_tool_calls_recovers_workspace_write_args_from_malformed_json() -> None:
@@ -367,7 +368,9 @@ def test_decode_partial_json_string_falls_back_for_literal_newline() -> None:
     assert gateway._decode_partial_json_string("line1\nline2") == "line1\nline2"
 
 
-def test_complete_expected_timeout_logs_warning_not_error(caplog: pytest.LogCaptureFixture) -> None:
+def test_complete_expected_timeout_logs_warning_not_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     completions = _TimeoutCompletions()
     gateway = OpenAICompatibleGateway(_Config())  # type: ignore[arg-type]
     gateway._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -385,8 +388,7 @@ def test_complete_expected_timeout_logs_warning_not_error(caplog: pytest.LogCapt
         asyncio.run(_run())
 
     assert any(
-        record.levelno == logging.WARNING
-        and "LLM request timeout" in record.message
+        record.levelno == logging.WARNING and "LLM request timeout" in record.message
         for record in caplog.records
     )
     assert not any(
